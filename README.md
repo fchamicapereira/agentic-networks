@@ -21,6 +21,24 @@ Topology (full mesh):
 
 ## Setup
 
+### With Docker
+
+Requires Docker and Linux with privileged container support.
+
+```bash
+# Build the image and run the script (image is rebuilt automatically on each run)
+./tools/run_in_docker.sh simple_routing.py \
+    --topology topologies/pair.csv \
+    --prompt prompts/routing_simple.txt \
+    --model qwen2.5-72b
+```
+
+Pass any `simple_routing.py` arguments after the script name. The script runs inside the container with the project directory mounted at `/workspace`.
+
+For Claude models, set `ANTHROPIC_API_KEY` in your environment before running — it is forwarded automatically into the container.
+
+### Without Docker
+
 Requires Linux with root access (Mininet runs in network namespaces).
 
 ```bash
@@ -33,15 +51,36 @@ source env/bin/activate
 export ANTHROPIC_API_KEY=sk-...
 ```
 
-## Run
-
 Mininet requires root. Use `sudo -E` to preserve environment variables:
 
 ```bash
-sudo -E env/bin/python3 simple_routing.py
+sudo -E env/bin/python3 simple_routing.py \
+    --topology topologies/pair.csv \
+    --prompt prompts/routing_simple.txt \
+    --model qwen2.5-72b
 ```
 
-Per-node logs are written to `logs/h1.log`, `logs/h2.log`, etc. after each run.
+Run with `-h` to see the full help menu:
+
+```bash
+sudo -E env/bin/python3 simple_routing.py -h
+```
+
+## Arguments
+
+| Argument | Short | Default | Description |
+|---|---|---|---|
+| `--topology` | | *(required)* | Path to topology CSV file |
+| `--prompt` | `-p` | *(required)* | Path to prompt file sent to each agent |
+| `--model` | `-m` | `sonnet` | Model key to use for agents |
+| `--log-dir` | `-d` | `logs/` | Directory for per-node log files |
+| `--max-iterations` | `-i` | `30` | Max agent iterations per node |
+| `--max-tokens` | `-t` | `4096` | Max tokens per LLM response |
+| `--openai-host` | | `localhost` | Hostname for OpenAI-compatible API server |
+| `--openai-port` | | `8000` | Port for OpenAI-compatible API server |
+| `--log-level` | `-l` | `INFO` | Logging verbosity |
+
+Per-node logs are written to `logs/<prompt>-<model>-<topology>-<node>.log` after each run.
 
 ## Open questions
 
