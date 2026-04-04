@@ -3,7 +3,7 @@ import re
 import uuid
 import pprint
 
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam, ChatCompletionToolParam
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
@@ -14,7 +14,11 @@ from message_bus import MessageBus
 from typing import Optional
 
 MODELS = {
-    "qwen2.5-72b": "Qwen/Qwen2.5-72B-Instruct-AWQ",
+    "qwen2.5-72b-awq":   "Qwen/Qwen2.5-72B-Instruct-AWQ",
+    "qwen2.5-72b-gptq":  "Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4",
+    "qwq-32b":           "Qwen/QwQ-32B",
+    "deepseek-r1-32b":   "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "llama3.3-70b-awq":  "meta-llama/Llama-3.3-70B-Instruct-AWQ",
 }
 
 TOOLS: list[ChatCompletionToolParam] = [
@@ -62,6 +66,15 @@ def _strip_tool_call_tags(content: str) -> Optional[str]:
     return _TOOL_CALL_TAG_RE.sub("", content).strip() or None
 
 
+def check_server(base_url: str, api_key: str) -> bool:
+    """Return True if the OpenAI-compatible server is reachable and responding."""
+    try:
+        OpenAI(base_url=base_url, api_key=api_key).models.list()
+        return True
+    except APIConnectionError:
+        return False
+
+
 class AgentOpenAI(NodeAgent):
     """NodeAgent backed by any OpenAI-compatible API (vLLM, Ollama, OpenAI, etc.)."""
 
@@ -81,6 +94,29 @@ class AgentOpenAI(NodeAgent):
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.messages: list[ChatCompletionMessageParam] = []
 
+    def _do_completion(self, messages: list[ChatCompletionMessageParam]) -> tuple:
+        """Call the model and extract (response, msg, finish_reason, tool_calls, assistant_content)."""
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            tools=TOOLS,
+            messages=messages,
+        )
+        assert len(response.choices) == 1, "Expected exactly one choice from the model"
+        msg = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+        assistant_content = msg.content
+
+        tool_calls: list[tuple[str, str, dict]] = []
+        if msg.tool_calls:
+            tool_calls = [(tc.id, tc.function.name, json.loads(tc.function.arguments)) for tc in msg.tool_calls if isinstance(tc, ChatCompletionMessageToolCall)]
+        elif "<tool_call>" in (msg.content or ""):
+            tool_calls = _parse_tool_call_tags(msg.content or "")
+            assistant_content = _strip_tool_call_tags(msg.content or "") if tool_calls else msg.content
+            self.log.debug("Parsed tool calls from content: %s", pprint.pformat(tool_calls, indent=2))
+
+        return response, msg, finish_reason, tool_calls, assistant_content
+
     def request_action_from_model(self) -> LLMResponse:
         self.messages.append({"role": "user", "content": "Continue with the next action."})
 
@@ -89,31 +125,32 @@ class AgentOpenAI(NodeAgent):
         system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
         full_messages: list[ChatCompletionMessageParam] = [system_message] + self.messages
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            tools=TOOLS,
-            messages=full_messages,
-        )
-
         self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
+        response, msg, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
 
-        assert len(response.choices) == 1, "Expected exactly one choice from the model"
-        msg = response.choices[0].message
-        finish_reason = response.choices[0].finish_reason
-        assistant_content = msg.content
+        # Path C: model returned text but no tool calls (e.g. DeepSeek R1 narrating its plan
+        # instead of emitting a structured call). Nudge it once with an explicit format reminder.
+        if not tool_calls and finish_reason == "stop" and (msg.content or "").strip():
+            self.log.debug("No tool calls in response; nudging model to use tool call format.")
+            nudge_messages = full_messages + [
+                {"role": "assistant", "content": msg.content},
+                {
+                    "role": "user",
+                    "content": (
+                        "You did not call any tool. You MUST call exactly one tool now. "
+                        "Use this exact format:\n"
+                        "<tool_call>\n"
+                        '{{"name": "<tool_name>", "arguments": {{<args>}}}}\n'
+                        "</tool_call>"
+                    ),
+                },
+            ]
+            response, msg, finish_reason, tool_calls, assistant_content = self._do_completion(nudge_messages)
 
         # Collect (id, name, arguments) from whichever format the model used.
         # Path A: structured tool_calls (standard OpenAI / vLLM with --enable-auto-tool-choice)
         # Path B: <tool_call>JSON</tool_call> blocks embedded in text content (Qwen native)
-        tool_calls: list[tuple[str, str, dict]] = []
-        if msg.tool_calls:
-            tool_calls = [(tc.id, tc.function.name, json.loads(tc.function.arguments)) for tc in msg.tool_calls if isinstance(tc, ChatCompletionMessageToolCall)]
-        elif "<tool_call>" in (msg.content or ""):
-            tool_calls = _parse_tool_call_tags(msg.content or "")
-            # Strip <tool_call> blocks from stored content so history stays clean
-            assistant_content = _strip_tool_call_tags(msg.content or "") if tool_calls else msg.content
-            self.log.debug("Parsed tool calls from content: %s", pprint.pformat(tool_calls, indent=2))
+        # (Path C nudge above may have resolved into A or B)
 
         tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
             {

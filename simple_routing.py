@@ -9,11 +9,11 @@ from mininet.log import setLogLevel
 from mininet.node import Host
 
 from agent import AgentResult
-from network import load_topology, build_network
+from network import load_topology, build_network, Network
 from message_bus import MessageBus
 from agent_claude import AgentClaude
 from agent_claude import MODELS as CLAUDE_MODELS
-from agent_openai import AgentOpenAI
+from agent_openai import AgentOpenAI, check_server
 from agent_openai import MODELS as OPENAI_MODELS
 from visualize import generate_network_pdf
 
@@ -44,7 +44,9 @@ def setup_node_log(node_name: str, log_dir: Path, prompt_stem: str, model: str, 
     log_dir.mkdir(exist_ok=True)
     handler = logging.FileHandler(log_dir / f"{prompt_stem}-{model}-{topology_stem}-{node_name}.log", mode="w")
     handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", datefmt="%H:%M:%S"))
-    logging.getLogger(f"agent.{node_name}").addHandler(handler)
+    node_logger = logging.getLogger(f"agent.{node_name}")
+    node_logger.addHandler(handler)
+    node_logger.propagate = False
     return handler
 
 
@@ -57,8 +59,7 @@ def run_agent_thread(
     max_iterations: int,
     max_tokens: int,
     results: dict,
-    openai_host: str,
-    openai_port: int,
+    openai_base_url: str,
 ):
     model = MODELS[model_key]
     if model_key in CLAUDE_MODELS:
@@ -80,11 +81,25 @@ def run_agent_thread(
             model=model,
             max_iterations=max_iterations,
             max_tokens=max_tokens,
-            base_url=f"http://{openai_host}:{openai_port}/v1",
+            base_url=openai_base_url,
             api_key="none",
         )
     results[node_name] = agent.run()
     agent.mininet_host.get_network_info()
+
+
+def write_report(network: Network, route_tables: dict[str, str], report_path: Path) -> None:
+    connectivity_str = network.test_all_connectivity()
+    routing_section = "\n".join(
+        f"--- {name} ---\n{route_tables[name] or '(empty)'}"
+        for name in sorted(route_tables)
+    )
+    with open(report_path, "w") as f:
+        f.write("=== Connectivity Matrix ===\n")
+        f.write(connectivity_str)
+        f.write("\n\n=== Routing Tables ===\n\n")
+        f.write(routing_section)
+        f.write("\n")
 
 
 def main():
@@ -171,6 +186,13 @@ def main():
     setLogLevel("warning")  # Suppress Mininet's verbose output
 
     logger = logging.getLogger("main")
+
+    openai_base_url = f"http://{args.openai_host}:{args.openai_port}/v1"
+    if args.model in OPENAI_MODELS:
+        if not check_server(openai_base_url, api_key="none"):
+            logger.error("No OpenAI-compatible server responding at %s", openai_base_url)
+            exit(1)
+
     logger.info("Building Mininet network...")
 
     network = build_network(topology)
@@ -202,8 +224,7 @@ def main():
                     args.max_iterations,
                     args.max_tokens,
                     results,
-                    args.openai_host,
-                    args.openai_port,
+                    openai_base_url,
                 ),
                 name=f"agent-{name}",
                 daemon=True,
@@ -225,10 +246,6 @@ def main():
 
         run_stem = f"{prompt_stem}-{args.model}-{topology_stem}"
 
-        connectivity_path = log_dir / f"{run_stem}-connectivity.txt"
-        network.test_all_connectivity(connectivity_path)
-        logger.info("Connectivity matrix written to %s", connectivity_path)
-
         print("=== Final Routing Tables ===")
         route_tables: dict[str, str] = {}
         for name, host in network.hosts.items():
@@ -237,6 +254,10 @@ def main():
             print(f"\n--- {name} ---")
             print(routes or "(empty)")
         print()
+
+        report_path = log_dir / f"{run_stem}-report.txt"
+        write_report(network, route_tables, report_path)
+        logger.info("Report written to %s", report_path)
 
         network.net.stop()
 

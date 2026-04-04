@@ -8,7 +8,7 @@ from mininet_host import MininetHost
 
 from dataclasses import dataclass
 
-SYSTEM_PROMPT_PREAMBLE = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous network agent running on node {node_name} in a network testbed.
 Other nodes in the network: {other_nodes}.
 {initial_prompt}
@@ -135,41 +135,35 @@ class NodeAgent:
         self.model = model
         self.log = logging.getLogger(f"agent.{node_name}")
 
-        self.initial_prompt = SYSTEM_PROMPT_PREAMBLE.format(
+        self.initial_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             node_name=self.node_name,
             other_nodes=", ".join(n for n in self.bus._queues if n != self.node_name),
             initial_prompt=initial_prompt,
         )
 
+        self.tools = {
+            "get_network_info": self.mininet_host.get_network_info,
+            "add_route": self.mininet_host.add_route,
+            "delete_route": self.mininet_host.delete_route,
+            "ping": self.mininet_host.ping,
+            "send_message": self.send_message,
+            "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
+            "unknown": lambda **kargs: f"Unknown tool: {kargs.get('name', 'unknown')}. Available tools: {', '.join(self.tools.keys())}",
+        }
+
+    def send_message(self, to: str, message: str):
+        self.log.info("[msg → %s] %s", to, message)
+        self.bus.send(to=to, sender=self.node_name, message=message)
+
     def _execute_tool(self, name: str, inputs: dict) -> Optional[str]:
         try:
-            results = None
-            if name == "get_network_info":
-                self.log.info("get_network_info()")
-                results = self.mininet_host.get_network_info()
-            elif name == "add_route":
-                self.log.info("add_route(%s)", inputs)
-                results = self.mininet_host.add_route(**inputs)
-            elif name == "delete_route":
-                self.log.info("delete_route(%s)", inputs)
-                results = self.mininet_host.delete_route(**inputs)
-            elif name == "ping":
-                self.log.info("ping(%s)", inputs)
-                results = self.mininet_host.ping(**inputs)
-            elif name == "send_message":
-                self.log.info("[msg → %s] %s", inputs["to"], inputs["message"])
-                self.bus.send(to=inputs["to"], sender=self.node_name, message=inputs["message"])
-            elif name == "report_done":
-                self.log.info("report_done(%s)", inputs)
-                results = f"Acknowledged: {inputs.get('message', '')}"
-            else:
-                return f"Unknown tool: {name}"
+            self.log.info("Executing tool: %s with inputs: %s", name, inputs)
+            results = self.tools.get(name, "unknown")(**inputs)
 
             if results is not None:
                 self.log.info(results)
 
             return results
-
         except Exception as exc:
             return f"Error in {name}: {exc}"
 

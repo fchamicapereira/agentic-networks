@@ -96,7 +96,7 @@ class Network:
 
         return rules
 
-    def test_all_connectivity(self, output_path: str | Path | None = None):
+    def test_all_connectivity(self) -> str:
         # Collect all (owner_host, ip) pairs across all hosts
         all_ips: list[tuple[str, str]] = []
         for hostname, ifaces in self.ifaces_per_host.items():
@@ -122,9 +122,7 @@ class Network:
         print(table)
         print()
 
-        if output_path is not None:
-            with open(output_path, "w") as f:
-                f.write(table.get_string())
+        return table.get_string()
 
     def print(self):
         nodes = set(link.node1 for link in self.links) | set(link.node2 for link in self.links)
