@@ -3,22 +3,26 @@ from pathlib import Path
 import argparse
 import logging
 import os
-import threading
+
+from tqdm import tqdm
+
+
+class TqdmHandler(logging.StreamHandler):
+    """Log handler that writes through tqdm.write() to avoid overwriting progress bars."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            tqdm.write(self.format(record))
+        except Exception:
+            self.handleError(record)
 
 from mininet.log import setLogLevel
-from mininet.node import Host
 
-from agent import AgentResult
 from network import load_topology, build_network, Network
-from message_bus import MessageBus
-from agent_claude import AgentClaude
-from agent_claude import MODELS as CLAUDE_MODELS
-from agent_openai import AgentOpenAI, check_server
+from agent_openai import check_server
 from agent_openai import MODELS as OPENAI_MODELS
+from agentic_network import AgenticNetwork, MODELS
 from visualize import generate_network_pdf
-
-
-MODELS = {**CLAUDE_MODELS, **OPENAI_MODELS}
 
 
 def chown_to_user(path: Path) -> None:
@@ -50,50 +54,9 @@ def setup_node_log(node_name: str, log_dir: Path, prompt_stem: str, model: str, 
     return handler
 
 
-def run_agent_thread(
-    node_name: str,
-    host: Host,
-    bus: MessageBus,
-    initial_prompt: str,
-    model_key: str,
-    max_iterations: int,
-    max_tokens: int,
-    results: dict,
-    openai_base_url: str,
-):
-    model = MODELS[model_key]
-    if model_key in CLAUDE_MODELS:
-        agent = AgentClaude(
-            node_name=node_name,
-            mininet_host_cmd=host.cmd,
-            bus=bus,
-            initial_prompt=initial_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-        )
-    else:
-        agent = AgentOpenAI(
-            node_name=node_name,
-            mininet_host_cmd=host.cmd,
-            bus=bus,
-            initial_prompt=initial_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-            base_url=openai_base_url,
-            api_key="none",
-        )
-    results[node_name] = agent.run()
-    agent.mininet_host.get_network_info()
-
-
 def write_report(network: Network, route_tables: dict[str, str], report_path: Path) -> None:
     connectivity_str = network.test_all_connectivity()
-    routing_section = "\n".join(
-        f"--- {name} ---\n{route_tables[name] or '(empty)'}"
-        for name in sorted(route_tables)
-    )
+    routing_section = "\n".join(f"--- {name} ---\n{route_tables[name] or '(empty)'}" for name in sorted(route_tables))
     with open(report_path, "w") as f:
         f.write("=== Connectivity Matrix ===\n")
         f.write(connectivity_str)
@@ -177,11 +140,14 @@ def main():
     with open(args.prompt) as f:
         initial_prompt = f.read()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s  [%(name)-14s]  %(levelname)s  %(message)s",
+    handler = TqdmHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s  [%(name)-14s]  %(levelname)s  %(message)s",
         datefmt="%H:%M:%S",
-    )
+    ))
+    logging.root.setLevel(getattr(logging, args.log_level))
+    logging.root.addHandler(handler)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     setLogLevel("warning")  # Suppress Mininet's verbose output
 
@@ -201,41 +167,22 @@ def main():
     topology_stem = Path(args.topology).stem
 
     try:
-        logger.info("Network is up. Starting %d agents in parallel ...", len(network.hosts))
+        logger.info("Network is up. Starting %d agents cooperatively ...", len(network.hosts))
 
         for name in network.hosts:
             setup_node_log(name, log_dir, prompt_stem, args.model, topology_stem)
+
         logger.info("Writing per-node logs to %s/", log_dir)
-
-        bus = MessageBus(list(network.hosts.keys()))
-
         logger.info("Using model: %s (%s)", args.model, MODELS[args.model])
 
-        results: dict[str, AgentResult] = {}
-        threads = [
-            threading.Thread(
-                target=run_agent_thread,
-                args=(
-                    name,
-                    host,
-                    bus,
-                    initial_prompt,
-                    args.model,
-                    args.max_iterations,
-                    args.max_tokens,
-                    results,
-                    openai_base_url,
-                ),
-                name=f"agent-{name}",
-                daemon=True,
-            )
-            for name, host in network.hosts.items()
-        ]
-
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        results = AgenticNetwork(
+            network=network,
+            initial_prompt=initial_prompt,
+            model_key=args.model,
+            max_iterations=args.max_iterations,
+            max_tokens=args.max_tokens,
+            openai_base_url=openai_base_url,
+        ).run()
 
         print("\n=== Agent Reports ===")
         for name in network.hosts:

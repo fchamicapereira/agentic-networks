@@ -1,4 +1,5 @@
 import queue
+from typing import Optional
 
 
 class MessageBus:
@@ -12,13 +13,15 @@ class MessageBus:
             return f"Unknown node: {to}"
         self._queues[to].put((sender, message))
 
-    def drain(self, node: str) -> list[tuple[str, str]]:
-        """Return and clear all pending messages for node as [(from, message), ...]."""
+    def drain(self, node: str, block: bool = False, timeout: Optional[float] = None) -> list[tuple[str, str]]:
+        """Return pending messages for node as [(sender, message), ...].
+
+        If block=True, wait up to timeout seconds for a message to arrive.
+        """
         msgs = []
         q = self._queues[node]
-        while True:
-            try:
-                msgs.append(q.get_nowait())
-            except queue.Empty:
-                break
+        try:
+            msgs.append(q.get(block=block, timeout=timeout))
+        except queue.Empty:
+            pass
         return msgs

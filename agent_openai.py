@@ -10,15 +10,20 @@ from openai.types.chat.chat_completion_message_tool_call_param import ChatComple
 
 from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
 from message_bus import MessageBus
+from network import Interface
 
-from typing import Optional
 
 MODELS = {
-    "qwen2.5-72b-awq":   "Qwen/Qwen2.5-72B-Instruct-AWQ",
-    "qwen2.5-72b-gptq":  "Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4",
-    "qwq-32b":           "Qwen/QwQ-32B",
-    "deepseek-r1-32b":   "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "llama3.3-70b-awq":  "meta-llama/Llama-3.3-70B-Instruct-AWQ",
+    "qwen2.5-72b-awq": "Qwen/Qwen2.5-72B-Instruct-AWQ",
+    "qwen2.5-72b-gptq": "Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4",
+    "qwq-32b": "Qwen/QwQ-32B",
+    "qwq-32b-awq": "Qwen/QwQ-32B-AWQ",
+    "deepseek-r1-32b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "deepseek-r1-70b-awq": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+    "llama3.3-70b-awq": "meta-llama/Llama-3.3-70B-Instruct-AWQ",
+    "mistral-small-24b": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+    "phi-4-14b": "microsoft/phi-4",
+    "gemma-3-27b": "google/gemma-3-27b-it",
 }
 
 TOOLS: list[ChatCompletionToolParam] = [
@@ -39,31 +44,36 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
     "length": "max_tokens",
 }
 
-"""
-This is terrible, but we need it to support both the new OpenAI tool_calls format
-(used by vLLM and Ollama) and the older Qwen-style <tool_call>JSON</tool_call> format.
-"""
-_TOOL_CALL_TAG_RE = re.compile(r"(?:<tool_call>\s*)?(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+def _build_tool_guide() -> str:
+    lines = [
+        "To call a tool, output a <tool_call> block anywhere in your response:",
+        '<tool_call>{"name": "<tool_name>", "arguments": {"param": "value", ...}}</tool_call>',
+        "Available tools:",
+    ]
+    for t in AGENT_TOOLS_DEFINITIONS:
+        props = t["schema"].get("properties", {})
+        required = set(t["schema"].get("required", []))
+        sig = ", ".join((p if p in required else f"[{p}]") for p in props)
+        lines.append(f"  {t['name']}({sig}) — {t['description']}")
+        for pname, pinfo in props.items():
+            opt = "" if pname in required else " (optional)"
+            lines.append(f"    - {pname}{opt}: {pinfo['description']}")
+    return "\n".join(lines)
 
 
-def _parse_tool_call_tags(content: str) -> list[tuple[str, str, dict]]:
-    """Parse Qwen-style <tool_call>JSON</tool_call> blocks from plain text content.
-
-    Returns a list of (synthetic_id, tool_name, arguments) tuples.
-    """
+def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
+    # Tool call text format (in addition to the structured tool_calls API field):
+    #   <tool_call>JSON</tool_call>  — Qwen/Hermes native and our explicit system prompt format.
+    call_tag_regex = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
     results = []
-    for match in _TOOL_CALL_TAG_RE.finditer(content):
+    for match in call_tag_regex.finditer(content):
         try:
             data = json.loads(match.group(1))
-            tool_id = f"call_{uuid.uuid4().hex[:24]}"
-            results.append((tool_id, data["name"], data.get("arguments", {})))
+            results.append((f"call_{uuid.uuid4().hex[:24]}", data["name"], data.get("arguments", {})))
         except (json.JSONDecodeError, KeyError):
             pass
     return results
-
-
-def _strip_tool_call_tags(content: str) -> Optional[str]:
-    return _TOOL_CALL_TAG_RE.sub("", content).strip() or None
 
 
 def check_server(base_url: str, api_key: str) -> bool:
@@ -89,13 +99,16 @@ class AgentOpenAI(NodeAgent):
         max_tokens: int,
         base_url: str,
         api_key: str,
+        ifaces: list[Interface],
     ):
-        super().__init__(node_name, mininet_host_cmd, bus, initial_prompt, model, max_iterations, max_tokens)
+        # Append the tool guide so every model can fall back to text-based calls.
+        augmented_prompt = f"{initial_prompt.rstrip()}\n\n{_build_tool_guide()}"
+        super().__init__(node_name, mininet_host_cmd, bus, augmented_prompt, model, max_iterations, max_tokens, ifaces)
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.messages: list[ChatCompletionMessageParam] = []
 
     def _do_completion(self, messages: list[ChatCompletionMessageParam]) -> tuple:
-        """Call the model and extract (response, msg, finish_reason, tool_calls, assistant_content)."""
+        """Call the model and return (response, msg, finish_reason, tool_calls, assistant_content)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -106,19 +119,21 @@ class AgentOpenAI(NodeAgent):
         msg = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
         assistant_content = msg.content
+        content = msg.content or ""
 
         tool_calls: list[tuple[str, str, dict]] = []
+
+        # Path A: structured tool_calls field (standard OpenAI / vLLM --enable-auto-tool-choice)
         if msg.tool_calls:
             tool_calls = [(tc.id, tc.function.name, json.loads(tc.function.arguments)) for tc in msg.tool_calls if isinstance(tc, ChatCompletionMessageToolCall)]
-        elif "<tool_call>" in (msg.content or ""):
-            tool_calls = _parse_tool_call_tags(msg.content or "")
-            assistant_content = _strip_tool_call_tags(msg.content or "") if tool_calls else msg.content
-            self.log.debug("Parsed tool calls from content: %s", pprint.pformat(tool_calls, indent=2))
+        # Path B: <tool_call> tags in text (Qwen/Hermes native + our system prompt format)
+        elif "<tool_call>" in content:
+            tool_calls = _parse_call_tags(content)
 
         return response, msg, finish_reason, tool_calls, assistant_content
 
     def request_action_from_model(self) -> LLMResponse:
-        self.messages.append({"role": "user", "content": "Continue with the next action."})
+        self.messages.append({"role": "user", "content": "State the next action(s)."})
 
         # System prompt is prepended on every call; not stored in self.messages
         # so the history stays clean (user/assistant/tool turns only).
@@ -126,31 +141,7 @@ class AgentOpenAI(NodeAgent):
         full_messages: list[ChatCompletionMessageParam] = [system_message] + self.messages
 
         self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
-        response, msg, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
-
-        # Path C: model returned text but no tool calls (e.g. DeepSeek R1 narrating its plan
-        # instead of emitting a structured call). Nudge it once with an explicit format reminder.
-        if not tool_calls and finish_reason == "stop" and (msg.content or "").strip():
-            self.log.debug("No tool calls in response; nudging model to use tool call format.")
-            nudge_messages = full_messages + [
-                {"role": "assistant", "content": msg.content},
-                {
-                    "role": "user",
-                    "content": (
-                        "You did not call any tool. You MUST call exactly one tool now. "
-                        "Use this exact format:\n"
-                        "<tool_call>\n"
-                        '{{"name": "<tool_name>", "arguments": {{<args>}}}}\n'
-                        "</tool_call>"
-                    ),
-                },
-            ]
-            response, msg, finish_reason, tool_calls, assistant_content = self._do_completion(nudge_messages)
-
-        # Collect (id, name, arguments) from whichever format the model used.
-        # Path A: structured tool_calls (standard OpenAI / vLLM with --enable-auto-tool-choice)
-        # Path B: <tool_call>JSON</tool_call> blocks embedded in text content (Qwen native)
-        # (Path C nudge above may have resolved into A or B)
+        response, _, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
 
         tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
             {
@@ -169,10 +160,23 @@ class AgentOpenAI(NodeAgent):
 
         self.messages.append(assistant_message)
 
-        # Build the shared LLMResponse
+        # If the model produced text but no tool calls, inject a feedback message so it
+        # sees the warning in the next iteration and knows it must use a <call> block.
+        if not tool_calls and finish_reason == "stop" and (assistant_content or "").strip():
+            self.log.warning("No tool call detected in response. Injecting feedback for next iteration.")
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Warning: your last response contained no tool call. "
+                        "You MUST use a <tool_call> block for every action, including report_done. "
+                        "Plain text descriptions of actions are ignored — only <tool_call> blocks are executed."
+                    ),
+                }
+            )
+
         content: list[ToolUseBlock | str] = []
         if assistant_content:
-            self.log.debug("Assistant content after stripping tool calls:\n%s", assistant_content)
             content.append(assistant_content)
         for tid, name, args in tool_calls:
             content.append(ToolUseBlock(id=tid, tool_name=name, input=args))
@@ -185,7 +189,7 @@ class AgentOpenAI(NodeAgent):
 
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
 
-    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str) -> None:
+    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str):
         # OpenAI expects one message per tool result (no batching required)
         self.messages.append(
             {
@@ -195,5 +199,5 @@ class AgentOpenAI(NodeAgent):
             }
         )
 
-    def process_received_message(self, sender: str, message: str) -> None:
+    def process_received_message(self, sender: str, message: str):
         self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})

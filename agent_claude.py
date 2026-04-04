@@ -1,4 +1,3 @@
-import logging
 import os
 
 import anthropic
@@ -6,6 +5,7 @@ from anthropic.types import MessageParam, ToolUnionParam
 
 from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
 from message_bus import MessageBus
+from network import Interface
 
 ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 
@@ -36,8 +36,9 @@ class AgentClaude(NodeAgent):
         model: str,
         max_iterations: int,
         max_tokens: int,
+        ifaces: list[Interface],
     ):
-        super().__init__(node_name, mininet_host_cmd, bus, initial_prompt, model, max_iterations, max_tokens)
+        super().__init__(node_name, mininet_host_cmd, bus, initial_prompt, model, max_iterations, max_tokens, ifaces)
 
         if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
             print("Error: ANTHROPIC_API_KEY environment variable is not set.")
@@ -50,7 +51,7 @@ class AgentClaude(NodeAgent):
         # so we buffer them here and flush before the next API call.
         self._pending_tool_results = []
 
-    def _flush_tool_results(self) -> None:
+    def _flush_tool_results(self):
         """Append buffered tool results as one user message, then clear the buffer."""
         if self._pending_tool_results:
             self.messages.append({"role": "user", "content": self._pending_tool_results})
@@ -60,7 +61,7 @@ class AgentClaude(NodeAgent):
         # Flush any tool results accumulated since the last call
         self._flush_tool_results()
 
-        self.messages.append({"role": "user", "content": "Continue with the next action."})
+        self.messages.append({"role": "user", "content": "State the next action(s)."})
 
         response = self.client.messages.create(
             model=self.model,
@@ -85,7 +86,7 @@ class AgentClaude(NodeAgent):
 
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
 
-    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str) -> None:
+    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str):
         self._pending_tool_results.append(
             {
                 "type": "tool_result",
@@ -94,7 +95,7 @@ class AgentClaude(NodeAgent):
             }
         )
 
-    def process_received_message(self, sender: str, message: str) -> None:
+    def process_received_message(self, sender: str, message: str):
         # Flush pending tool results first so ordering is correct
         self._flush_tool_results()
         self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})

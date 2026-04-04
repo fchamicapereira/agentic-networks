@@ -5,14 +5,20 @@ from typing import Literal, Optional, TypeAlias
 
 from message_bus import MessageBus
 from mininet_host import MininetHost
+from network import Interface
+from network import Interface
 
 from dataclasses import dataclass
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous network agent running on node {node_name} in a network testbed.
 Other nodes in the network: {other_nodes}.
+Physical connections:
+{connections}
 {initial_prompt}
 """
+
+WAIT_DEFAULT_TIMEOUT_S = 5
 
 StopReason: TypeAlias = Literal[
     "end_turn",
@@ -91,7 +97,9 @@ AGENT_TOOLS_DEFINITIONS = [
     },
     {
         "name": "report_done",
-        "description": ("Signal that you want to terminate and are satisfied with the current state of the entire network."),
+        "description": (
+            "Signal that you want to terminate and are satisfied with the current state of the entire network. " "Can only be issued alone without any other tool calls in the same response. "
+        ),
         "schema": {
             "type": "object",
             "properties": {
@@ -113,6 +121,17 @@ AGENT_TOOLS_DEFINITIONS = [
             "required": ["to", "message"],
         },
     },
+    {
+        "name": "wait",
+        "description": "Block until a message arrives from another node (or until timeout). Use this when you have completed your local actions and need to wait for other nodes to respond or coordinate before proceeding.",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "timeout": {"type": "number", "description": f"Maximum seconds to wait for a message (default: {WAIT_DEFAULT_TIMEOUT_S})"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -126,6 +145,7 @@ class NodeAgent:
         model: str,
         max_iterations: int,
         max_tokens: int,
+        ifaces: list[Interface],
     ):
         self.node_name = node_name
         self.mininet_host = MininetHost(node_name, mininet_host_cmd)
@@ -135,9 +155,11 @@ class NodeAgent:
         self.model = model
         self.log = logging.getLogger(f"agent.{node_name}")
 
+        connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
         self.initial_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             node_name=self.node_name,
             other_nodes=", ".join(n for n in self.bus._queues if n != self.node_name),
+            connections=connections,
             initial_prompt=initial_prompt,
         )
 
@@ -147,24 +169,41 @@ class NodeAgent:
             "delete_route": self.mininet_host.delete_route,
             "ping": self.mininet_host.ping,
             "send_message": self.send_message,
+            "wait": self.wait,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
-            "unknown": lambda **kargs: f"Unknown tool: {kargs.get('name', 'unknown')}. Available tools: {', '.join(self.tools.keys())}",
         }
+
 
     def send_message(self, to: str, message: str):
         self.log.info("[msg → %s] %s", to, message)
         self.bus.send(to=to, sender=self.node_name, message=message)
 
+    def wait(self, timeout: float = WAIT_DEFAULT_TIMEOUT_S) -> str:
+        # Non-blocking: in the cooperative scheduler other agents run between iterations,
+        # so blocking here would stall the whole network. Drain whatever is already queued.
+        msgs = self._drain_inbox(block=False)
+        if not msgs:
+            return "No messages in queue yet — will check again next iteration."
+        return f"Received {len(msgs)} message(s)."
+
+    def _drain_inbox(self, block: bool = False, timeout: Optional[float] = None) -> list[tuple[str, str]]:
+        msgs = self.bus.drain(self.node_name, block=block, timeout=timeout)
+        for sender, msg in msgs:
+            self.log.info("[msg ← %s] %s", sender, msg)
+            self.process_received_message(sender, msg)
+        return msgs
+
     def _execute_tool(self, name: str, inputs: dict) -> Optional[str]:
         try:
-            self.log.info("Executing tool: %s with inputs: %s", name, inputs)
-            results = self.tools.get(name, "unknown")(**inputs)
-
-            if results is not None:
-                self.log.info(results)
+            self.log.info("%s(%s)", name, inputs)
+            if name in self.tools:
+                results = self.tools[name](**inputs)
+            else:
+                results = f"Unknown tool: {name}. Available tools: {', '.join(self.tools.keys())}"
 
             return results
         except Exception as exc:
+            self.log.error("Error executing tool %s: %s", name, exc)
             return f"Error in {name}: {exc}"
 
     def request_action_from_model(self) -> LLMResponse:
@@ -176,7 +215,17 @@ class NodeAgent:
     def process_received_message(self, sender: str, message: str):
         raise NotImplementedError("Must be implemented by subclass")
 
-    def run(self) -> AgentResult:
+    def run(self):
+        """Generator: runs one LLM iteration per next() call, then yields.
+
+        Returns the final AgentResult via StopIteration.value when done,
+        so AgenticNetwork can collect results with::
+
+            try:
+                next(gen)
+            except StopIteration as e:
+                result = e.value
+        """
         self.log.info("System prompt:\n%s", self.initial_prompt)
 
         final_report = AgentResult(success=False, message="Max iterations reached without completion")
@@ -185,7 +234,10 @@ class NodeAgent:
             self.log.info("--- Iteration %d/%d ---", iteration + 1, self.max_iterations)
 
             response = self.request_action_from_model()
-            self.log.debug(pprint.pformat(response, indent=2))
+
+            self.log.debug("Raw response from model:\n%s", response.raw)
+            self.log.debug("Content:\n%s", pprint.pformat(response.content, indent=2))
+            self.log.debug("Stop reason: %s", response.stop_reason)
 
             for block in response.content:
                 if isinstance(block, str):
@@ -198,14 +250,24 @@ class NodeAgent:
                 self.log.warning("Unexpected stop_reason: %s", response.stop_reason)
                 break
 
-            done = False
-            for block in response.content:
-                if not isinstance(block, ToolUseBlock):
-                    continue
+            tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
 
-                results = self._execute_tool(block.tool_name, block.input)
-                if results is not None:
-                    self.store_tool_results(block, results)
+            # report_done must be called alone — if batched with other tools the model is
+            # speculatively terminating before verifying results. Drop it and let the other calls run.
+            if len(tool_blocks) > 1 and any(b.tool_name == "report_done" for b in tool_blocks):
+                self.log.warning("report_done called alongside other tools — dropping report_done.")
+                tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
+                self.process_received_message(
+                    "system",
+                    "report_done was ignored because you called it alongside other tools. "
+                    "Call report_done ALONE, only after you have verified full connectivity.",
+                )
+
+            done = False
+            for block in tool_blocks:
+                result = self._execute_tool(block.tool_name, block.input)
+                if result is not None:
+                    self.store_tool_results(block, result)
 
                 if block.tool_name == "report_done":
                     done = True
@@ -214,17 +276,14 @@ class NodeAgent:
                         message=block.input.get("message", ""),
                     )
 
-            # Inject any messages that arrived from other agents since last iteration
-            inbox = self.bus.drain(self.node_name)
-            for sender, msg in inbox:
-                self.log.info("[msg ← %s] %s", sender, msg)
-                self.process_received_message(sender, msg)
+            # Non-blocking drain at end of every iteration
+            self._drain_inbox()
 
             if done:
                 self.log.info("Done — %s", final_report.message)
                 break
 
-        if not final_report.success:
-            self.log.warning("Agent did not report success within max iterations. Final report: %s", final_report.message)
+            yield iteration + 1  # give way; pass completed iteration count to scheduler
 
+        self.log.info("Agent run complete. Final report: %s", final_report)
         return final_report

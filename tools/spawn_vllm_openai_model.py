@@ -30,6 +30,31 @@ MODELS = {
         "tool_call_parser": "llama3_json",
         "description": "Llama 3.3 70B (AWQ 4-bit) — ~35GB",
     },
+    "deepseek-r1-70b-awq": {
+        "id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        "tool_call_parser": "llama3_json",
+        "description": "DeepSeek R1 distilled into Llama 70B (FP16) — strong reasoning, ~140GB; use AWQ quant for ~35GB",
+    },
+    "qwq-32b-awq": {
+        "id": "Qwen/QwQ-32B-AWQ",
+        "tool_call_parser": "hermes",
+        "description": "QwQ 32B reasoning model (AWQ 4-bit) — fits on 1 GPU, ~18GB",
+    },
+    "mistral-small-24b": {
+        "id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        "tool_call_parser": "mistral",
+        "description": "Mistral Small 3.1 24B (FP16) — Apache 2.0, ~48GB FP16",
+    },
+    "phi-4-14b": {
+        "id": "microsoft/phi-4",
+        "tool_call_parser": "pythonic",
+        "description": "Phi-4 14B (FP16) — MIT license, ~28GB",
+    },
+    "gemma-3-27b": {
+        "id": "google/gemma-3-27b-it",
+        "tool_call_parser": "pythonic",
+        "description": "Gemma 3 27B (FP16) — ~54GB FP16",
+    },
 }
 
 
