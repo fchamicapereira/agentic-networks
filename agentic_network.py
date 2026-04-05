@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from tqdm import tqdm
 from mininet.node import Host
@@ -53,11 +54,11 @@ def _create_agent(
 
 
 class AgenticNetwork:
-    """Cooperative scheduler for a Mininet network.
+    """Scheduler for a Mininet network.
 
-    Creates one agent per host and drives them round-robin: each agent runs
-    one LLM iteration at a time, yielding between iterations so others get
-    a turn. Only one LLM request is in-flight at any moment.
+    Creates one agent per host and drives them either sequentially round-robin
+    (one LLM request in-flight at a time) or concurrently (each agent runs in
+    its own thread).
     """
 
     def __init__(
@@ -86,7 +87,12 @@ class AgenticNetwork:
             for name, host in network.hosts.items()
         ]
 
-    def run(self) -> dict[str, AgentResult]:
+    def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
+        if concurrent:
+            return self._run_concurrent()
+        return self._run_sequential_round_robin()
+
+    def _run_sequential_round_robin(self) -> dict[str, AgentResult]:
         active = [(agent, agent.run()) for agent in self.agents]
         results: dict[str, AgentResult] = {}
 
@@ -110,18 +116,62 @@ class AgenticNetwork:
                 bar.refresh()
                 try:
                     iteration = next(gen)
+
                     bar.n = iteration
                     bar.set_description(f"  {agent.node_name}")
                     bar.refresh()
+
                     still_active.append((agent, gen))
                 except StopIteration as e:
                     results[agent.node_name] = e.value
-                    bar.n = bar.n + 1  # final iteration ran but didn't yield
+
+                    bar.n = min(bar.n + 1, bar.total)  # account for final iteration if it didn't yield
                     bar.set_description(f"✓ {agent.node_name}")
                     bar.refresh()
-                    agent.mininet_host.get_network_info()
+
                     self._logger.info("Agent %s finished.", agent.node_name)
             active = still_active
+
+        tqdm.write("")  # newline after all bars
+        return results
+
+    def _run_concurrent(self) -> dict[str, AgentResult]:
+        results: dict[str, AgentResult] = {}
+        lock = threading.Lock()
+
+        bars = {
+            agent.node_name: tqdm(
+                total=agent.max_iterations,
+                desc=f"  {agent.node_name}",
+                position=i,
+                leave=True,
+                bar_format="{desc}: {bar} {n}/{total}",
+                ncols=60,
+            )
+            for i, agent in enumerate(self.agents)
+        }
+
+        def run_agent(agent: NodeAgent) -> None:
+            bar = bars[agent.node_name]
+            gen = agent.run()
+            try:
+                while True:
+                    iteration = next(gen)
+                    bar.n = iteration
+                    bar.refresh()
+            except StopIteration as e:
+                with lock:
+                    results[agent.node_name] = e.value
+                bar.n = bar.n + 1
+                bar.set_description(f"✓ {agent.node_name}")
+                bar.refresh()
+                self._logger.info("Agent %s finished.", agent.node_name)
+
+        threads = [threading.Thread(target=run_agent, args=(agent,), daemon=True) for agent in self.agents]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         tqdm.write("")  # newline after all bars
         return results

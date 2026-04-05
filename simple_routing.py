@@ -16,6 +16,7 @@ class TqdmHandler(logging.StreamHandler):
         except Exception:
             self.handleError(record)
 
+
 from mininet.log import setLogLevel
 
 from network import load_topology, build_network, Network
@@ -118,6 +119,13 @@ def main():
         help="Path to topology CSV file",
     )
     parser.add_argument(
+        "--sequential",
+        "-s",
+        action="store_true",
+        default=False,
+        help="Run agents sequentially round-robin instead of concurrently (default: concurrent)",
+    )
+    parser.add_argument(
         "--openai-host",
         default="localhost",
         metavar="HOST",
@@ -141,10 +149,12 @@ def main():
         initial_prompt = f.read()
 
     handler = TqdmHandler()
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s  [%(name)-14s]  %(levelname)s  %(message)s",
-        datefmt="%H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s  [%(name)-14s]  %(levelname)s  %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
     logging.root.setLevel(getattr(logging, args.log_level))
     logging.root.addHandler(handler)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -167,7 +177,8 @@ def main():
     topology_stem = Path(args.topology).stem
 
     try:
-        logger.info("Network is up. Starting %d agents cooperatively ...", len(network.hosts))
+        mode = "sequentially (round-robin)" if args.sequential else "concurrently"
+        logger.info("Network is up. Starting %d agents %s ...", len(network.hosts), mode)
 
         for name in network.hosts:
             setup_node_log(name, log_dir, prompt_stem, args.model, topology_stem)
@@ -182,7 +193,7 @@ def main():
             max_iterations=args.max_iterations,
             max_tokens=args.max_tokens,
             openai_base_url=openai_base_url,
-        ).run()
+        ).run(concurrent=not args.sequential)
 
         print("\n=== Agent Reports ===")
         for name in network.hosts:

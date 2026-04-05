@@ -97,25 +97,27 @@ class Network:
         return rules
 
     def test_all_connectivity(self) -> str:
-        # Collect all (owner_host, ip) pairs across all hosts
-        all_ips: list[tuple[str, str]] = []
-        for hostname, ifaces in self.ifaces_per_host.items():
-            for iface in ifaces:
-                all_ips.append((hostname, iface.ip.split("/")[0]))
+        # For each destination host, try to reach it via any of its IPs
+        dst_hosts = sorted(self.hosts.keys())
 
         table = PrettyTable()
-        table.field_names = ["IP (owner)"] + list(self.hosts.keys())
+        table.field_names = ["src \\ dst"] + dst_hosts
 
-        for owner, ip in all_ips:
-            row = [f"{ip} ({owner})"]
-            for src_hostname, src_host in self.hosts.items():
-                if src_hostname == owner:
+        for src_hostname, src_host in sorted(self.hosts.items()):
+            row = [src_hostname]
+            for dst_hostname in dst_hosts:
+                if src_hostname == dst_hostname:
                     row.append("--")
                 else:
-                    out = src_host.cmd(f"ping -c 1 -W 1 {ip}")
-                    assert isinstance(out, str), f"Expected string output, got {type(out)}"
-                    ok = "1 received" in out or "1 packets received" in out
-                    row.append("OK" if ok else "FAIL")
+                    reachable = False
+                    for iface in self.ifaces_per_host[dst_hostname]:
+                        ip = iface.ip.split("/")[0]
+                        out = src_host.cmd(f"ping -c 1 -W 1 {ip}")
+                        assert isinstance(out, str), f"Expected string output, got {type(out)}"
+                        if "1 received" in out or "1 packets received" in out:
+                            reachable = True
+                            break
+                    row.append("OK" if reachable else "FAIL")
             table.add_row(row)
 
         print("\n=== Final Connectivity Matrix ===")

@@ -62,6 +62,24 @@ def _build_tool_guide() -> str:
     return "\n".join(lines)
 
 
+def _split_json_objects(text: str) -> list[str]:
+    """Extract top-level JSON objects from text that may contain several concatenated ones."""
+    objects = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start : i + 1])
+                start = None
+    return objects
+
+
 def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
     # Tool call text format (in addition to the structured tool_calls API field):
     #   <tool_call>JSON</tool_call>  — Qwen/Hermes native and our explicit system prompt format.
@@ -73,6 +91,22 @@ def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
             results.append((f"call_{uuid.uuid4().hex[:24]}", data["name"], data.get("arguments", {})))
         except (json.JSONDecodeError, KeyError):
             pass
+
+    if results:
+        return results
+
+    # Fallback: DeepSeek-R1 and similar models emit a ```json fence containing one or
+    # more bare JSON objects (not an array) with "name"/"arguments" keys.
+    json_fence_regex = re.compile(r"```json\s*(.*?)```", re.DOTALL)
+    for fence_match in json_fence_regex.finditer(content):
+        for obj_str in _split_json_objects(fence_match.group(1)):
+            try:
+                data = json.loads(obj_str)
+                if "name" in data:
+                    results.append((f"call_{uuid.uuid4().hex[:24]}", data["name"], data.get("arguments", {})))
+            except json.JSONDecodeError:
+                pass
+
     return results
 
 
@@ -126,8 +160,8 @@ class AgentOpenAI(NodeAgent):
         # Path A: structured tool_calls field (standard OpenAI / vLLM --enable-auto-tool-choice)
         if msg.tool_calls:
             tool_calls = [(tc.id, tc.function.name, json.loads(tc.function.arguments)) for tc in msg.tool_calls if isinstance(tc, ChatCompletionMessageToolCall)]
-        # Path B: <tool_call> tags in text (Qwen/Hermes native + our system prompt format)
-        elif "<tool_call>" in content:
+        # Path B: text-based tool calls — <tool_call> tags (Qwen/Hermes) or ```json``` fences (DeepSeek-R1)
+        else:
             tool_calls = _parse_call_tags(content)
 
         return response, msg, finish_reason, tool_calls, assistant_content
@@ -160,8 +194,7 @@ class AgentOpenAI(NodeAgent):
 
         self.messages.append(assistant_message)
 
-        # If the model produced text but no tool calls, inject a feedback message so it
-        # sees the warning in the next iteration and knows it must use a <call> block.
+        # If the model produced text but no tool calls, inject a brief warning.
         if not tool_calls and finish_reason == "stop" and (assistant_content or "").strip():
             self.log.warning("No tool call detected in response. Injecting feedback for next iteration.")
             self.messages.append(
@@ -169,8 +202,8 @@ class AgentOpenAI(NodeAgent):
                     "role": "user",
                     "content": (
                         "Warning: your last response contained no tool call. "
-                        "You MUST use a <tool_call> block for every action, including report_done. "
-                        "Plain text descriptions of actions are ignored — only <tool_call> blocks are executed."
+                        "You MUST issue a tool call for every action, including report_done. "
+                        "Plain text descriptions of actions are ignored — only tool calls are executed."
                     ),
                 }
             )
