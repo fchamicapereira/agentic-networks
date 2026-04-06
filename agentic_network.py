@@ -15,6 +15,7 @@ from agent_openai import MODELS as OPENAI_MODELS
 MODELS = {**CLAUDE_MODELS, **OPENAI_MODELS}
 
 
+
 def _create_agent(
     node_name: str,
     host: Host,
@@ -30,7 +31,7 @@ def _create_agent(
     if model_key in CLAUDE_MODELS:
         return AgentClaude(
             node_name=node_name,
-            mininet_host_cmd=host.cmd,
+            host=host,
             bus=bus,
             initial_prompt=initial_prompt,
             model=model,
@@ -41,7 +42,7 @@ def _create_agent(
     else:
         return AgentOpenAI(
             node_name=node_name,
-            mininet_host_cmd=host.cmd,
+            host=host,
             bus=bus,
             initial_prompt=initial_prompt,
             model=model,
@@ -162,7 +163,7 @@ class AgenticNetwork:
             except StopIteration as e:
                 with lock:
                     results[agent.node_name] = e.value
-                bar.n = bar.n + 1
+                bar.n = min(bar.n + 1, agent.max_iterations)
                 bar.set_description(f"✓ {agent.node_name}")
                 bar.refresh()
                 self._logger.info("Agent %s finished.", agent.node_name)

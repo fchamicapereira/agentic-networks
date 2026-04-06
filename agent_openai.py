@@ -10,6 +10,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import ChatComple
 
 from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
 from message_bus import MessageBus
+from mininet.node import Host
 from network import Interface
 
 
@@ -19,8 +20,8 @@ MODELS = {
     "qwq-32b": "Qwen/QwQ-32B",
     "qwq-32b-awq": "Qwen/QwQ-32B-AWQ",
     "deepseek-r1-32b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "deepseek-r1-70b-awq": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-    "llama3.3-70b-awq": "meta-llama/Llama-3.3-70B-Instruct-AWQ",
+    "deepseek-r1-70b-awq": "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ",
+    "llama3.3-70b-awq": "casperhansen/llama-3.3-70b-instruct-awq",
     "mistral-small-24b": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
     "phi-4-14b": "microsoft/phi-4",
     "gemma-3-27b": "google/gemma-3-27b-it",
@@ -49,7 +50,7 @@ def _build_tool_guide() -> str:
     lines = [
         "To call a tool, output a <tool_call> block anywhere in your response:",
         '<tool_call>{"name": "<tool_name>", "arguments": {"param": "value", ...}}</tool_call>',
-        "Available tools:",
+        "You may call multiple tools per response. Available tools:",
     ]
     for t in AGENT_TOOLS_DEFINITIONS:
         props = t["schema"].get("properties", {})
@@ -78,6 +79,22 @@ def _split_json_objects(text: str) -> list[str]:
                 objects.append(text[start : i + 1])
                 start = None
     return objects
+
+
+def _strip_thinking(content: str) -> str:
+    """Remove <think>...</think> blocks from assistant content before storing in history.
+
+    Reasoning models (QwQ) emit multi-thousand-token thinking blocks that
+    are scratch-pad reasoning — useful once, but dead weight when re-sent on every
+    subsequent iteration. The tool calls extracted from the content are stored separately,
+    so stripping the thinking block loses no operational information.
+    """
+    # Some models (QwQ) emit <think>...</think>; others (DeepSeek-R1) omit the opening tag.
+    stripped = re.sub(r"(<think>)?.*?</think>", "", content, flags=re.DOTALL).strip()
+    if stripped == content:
+        print("Content:", content, flush=True)
+        assert stripped != content, "Expected to find and strip a <think> block from the assistant content"
+    return stripped
 
 
 def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
@@ -125,7 +142,7 @@ class AgentOpenAI(NodeAgent):
     def __init__(
         self,
         node_name: str,
-        mininet_host_cmd,
+        host: Host,
         bus: MessageBus,
         initial_prompt: str,
         model: str,
@@ -137,7 +154,7 @@ class AgentOpenAI(NodeAgent):
     ):
         # Append the tool guide so every model can fall back to text-based calls.
         augmented_prompt = f"{initial_prompt.rstrip()}\n\n{_build_tool_guide()}"
-        super().__init__(node_name, mininet_host_cmd, bus, augmented_prompt, model, max_iterations, max_tokens, ifaces)
+        super().__init__(node_name, host, bus, augmented_prompt, model, max_iterations, max_tokens, ifaces)
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.messages: list[ChatCompletionMessageParam] = []
 
@@ -155,6 +172,10 @@ class AgentOpenAI(NodeAgent):
         assistant_content = msg.content
         content = msg.content or ""
 
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            self.log.info("[reasoning]\n%s", reasoning)
+
         tool_calls: list[tuple[str, str, dict]] = []
 
         # Path A: structured tool_calls field (standard OpenAI / vLLM --enable-auto-tool-choice)
@@ -167,7 +188,10 @@ class AgentOpenAI(NodeAgent):
         return response, msg, finish_reason, tool_calls, assistant_content
 
     def request_action_from_model(self) -> LLMResponse:
-        self.messages.append({"role": "user", "content": "State the next action(s)."})
+        # Don't inject a user turn if the last message is already a tool result —
+        # Mistral (and some other models) reject user → tool → user sequences.
+        if not self.messages or self.messages[-1]["role"] != "tool":
+            self.messages.append({"role": "user", "content": "State the next action."})
 
         # System prompt is prepended on every call; not stored in self.messages
         # so the history stays clean (user/assistant/tool turns only).
@@ -176,6 +200,9 @@ class AgentOpenAI(NodeAgent):
 
         self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
         response, _, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
+
+        if assistant_content and ("<think>" in assistant_content or "</think>" in assistant_content):
+            assistant_content = _strip_thinking(assistant_content)
 
         tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
             {

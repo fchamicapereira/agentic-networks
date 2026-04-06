@@ -66,6 +66,40 @@ Run with `-h` to see the full help menu:
 sudo -E env/bin/python3 simple_routing.py -h
 ```
 
+## Models
+
+Pass a model key via `--model`. Claude models are served via the Anthropic API; local models require a running vLLM server (see `tools/spawn_vllm_openai_model.py`).
+
+> **Size notation:** *B* = billion parameters (larger = more capable but slower/heavier). *FP16* = full 16-bit precision. *AWQ* and *GPTQ* are 4-bit quantization schemes that cut VRAM roughly in half at some quality cost.
+
+### Claude (Anthropic API)
+
+| Key | Description |
+|-----|-------------|
+| `sonnet` | Claude Sonnet 4.6 — Anthropic's balanced model |
+| `opus` | Claude Opus 4.6 — Anthropic's most capable model |
+
+### Local (vLLM / OpenAI-compatible)
+
+| Key | Description | VRAM |
+|-----|-------------|------|
+| `qwen2.5-72b-awq` | Qwen 2.5 72B, AWQ 4-bit quantized | ~36 GB |
+| `qwen2.5-72b-gptq` | Qwen 2.5 72B, GPTQ Int4 quantized | ~36 GB |
+| `qwq-32b` | QwQ 32B — Qwen's reasoning model (chain-of-thought), FP16 | ~64 GB |
+| `qwq-32b-awq` | QwQ 32B reasoning model, AWQ 4-bit quantized | ~18 GB |
+| `deepseek-r1-32b` | DeepSeek-R1 reasoning model distilled into a 32B Qwen base, FP16 | ~64 GB |
+| `deepseek-r1-70b-awq` | DeepSeek-R1 reasoning model distilled into a 70B Llama base, FP16 | ~140 GB |
+| `llama3.3-70b-awq` | Llama 3.3 70B by Meta, AWQ 4-bit quantized | ~35 GB |
+| `mistral-small-24b` | Mistral Small 3.1 24B (Apache 2.0), FP16 | ~48 GB |
+| `phi-4-14b` | Phi-4 14B by Microsoft (MIT license), FP16 | ~28 GB |
+| `gemma-3-27b` | Gemma 3 27B by Google, FP16 | ~54 GB |
+
+To start a vLLM server for a local model:
+
+```bash
+./tools/spawn_vllm_openai_model.py --model qwq-32b --tensor-parallel-size 2
+```
+
 ## Arguments
 
 | Argument | Short | Default | Description |
@@ -74,8 +108,8 @@ sudo -E env/bin/python3 simple_routing.py -h
 | `--prompt` | `-p` | *(required)* | Path to prompt file sent to each agent |
 | `--model` | `-m` | `sonnet` | Model key to use for agents |
 | `--log-dir` | `-d` | `logs/` | Directory for per-node log files |
-| `--max-iterations` | `-i` | `30` | Max agent iterations per node |
-| `--max-tokens` | `-t` | `4096` | Max tokens per LLM response |
+| `--max-iterations` | `-i` | `50` | Max agent iterations per node |
+| `--max-tokens` | `-t` | `16384` | Max tokens per LLM response |
 | `--openai-host` | | `localhost` | Hostname for OpenAI-compatible API server |
 | `--openai-port` | | `8000` | Port for OpenAI-compatible API server |
 | `--log-level` | `-l` | `INFO` | Logging verbosity |

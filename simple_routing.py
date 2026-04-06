@@ -1,10 +1,16 @@
-from pathlib import Path
-
 import argparse
 import logging
 import os
 
+from pathlib import Path
 from tqdm import tqdm
+from mininet.log import setLogLevel
+
+from network import load_topology, build_network, Network
+from agent_openai import check_server
+from agent_openai import MODELS as OPENAI_MODELS
+from agentic_network import AgenticNetwork, MODELS
+from visualize_network_routes import generate_network_pdf
 
 
 class TqdmHandler(logging.StreamHandler):
@@ -15,15 +21,6 @@ class TqdmHandler(logging.StreamHandler):
             tqdm.write(self.format(record))
         except Exception:
             self.handleError(record)
-
-
-from mininet.log import setLogLevel
-
-from network import load_topology, build_network, Network
-from agent_openai import check_server
-from agent_openai import MODELS as OPENAI_MODELS
-from agentic_network import AgenticNetwork, MODELS
-from visualize import generate_network_pdf
 
 
 def chown_to_user(path: Path) -> None:
@@ -100,17 +97,17 @@ def main():
         "--max-iterations",
         "-i",
         type=int,
-        default=30,
+        default=50,
         metavar="N",
-        help="Maximum number of agent iterations per node (default: 30)",
+        help="Maximum number of agent iterations per node (default: 50)",
     )
     parser.add_argument(
         "--max-tokens",
         "-t",
         type=int,
-        default=4096,
+        default=16384,
         metavar="N",
-        help="Maximum number of tokens per LLM response (default: 4096)",
+        help="Maximum number of tokens per LLM response (default: 16384)",
     )
     parser.add_argument(
         "--topology",

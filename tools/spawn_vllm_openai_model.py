@@ -23,17 +23,19 @@ MODELS = {
     "deepseek-r1-32b": {
         "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         "tool_call_parser": "hermes",
+        "reasoning_parser": "deepseek_r1",
         "description": "DeepSeek R1 distilled into Qwen 32B (FP16) — strong reasoning, ~64GB",
     },
     "llama3.3-70b-awq": {
-        "id": "meta-llama/Llama-3.3-70B-Instruct-AWQ",
+        "id": "casperhansen/llama-3.3-70b-instruct-awq",
         "tool_call_parser": "llama3_json",
         "description": "Llama 3.3 70B (AWQ 4-bit) — ~35GB",
     },
     "deepseek-r1-70b-awq": {
-        "id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        "tool_call_parser": "llama3_json",
-        "description": "DeepSeek R1 distilled into Llama 70B (FP16) — strong reasoning, ~140GB; use AWQ quant for ~35GB",
+        "id": "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ",
+        "tool_call_parser": None,
+        "reasoning_parser": "deepseek_r1",
+        "description": "DeepSeek R1 distilled into Llama 70B (AWQ 4-bit) — ~35GB",
     },
     "qwq-32b-awq": {
         "id": "Qwen/QwQ-32B-AWQ",
@@ -90,7 +92,10 @@ def build_docker_command(model_key: str, tensor_parallel: int, port: int, max_mo
     cmd += ["vllm/vllm-openai:latest"]              # image
     cmd += ["--model", model["id"]]
     cmd += ["--tensor-parallel-size", str(tensor_parallel)]
-    cmd += ["--enable-auto-tool-choice", "--tool-call-parser", model["tool_call_parser"]]
+    if model.get("tool_call_parser"):
+        cmd += ["--enable-auto-tool-choice", "--tool-call-parser", model["tool_call_parser"]]
+    if model.get("reasoning_parser"):
+        cmd += ["--reasoning-parser", model["reasoning_parser"]]
     if max_model_len is not None:
         cmd += ["--max-model-len", str(max_model_len)]
     return cmd

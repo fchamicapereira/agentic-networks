@@ -6,9 +6,11 @@ Routing decisions are drawn as dashed directed edges, one per (src, dst) pair,
 coloured by destination and connecting src to its next hop toward that destination.
 """
 
+import argparse
+from collections import defaultdict
 from graphviz import Digraph
 
-from network import Network, RoutingRule
+from network import Interface, Link, Network, RoutingRule, load_topology
 
 PALETTE = [
     "#e6194b",
@@ -43,39 +45,17 @@ def generate_network_pdf(network: Network, routing_rules: list[RoutingRule], out
     dot = Digraph(
         name="network",
         graph_attr={"rankdir": "LR", "overlap": "false", "splines": "true"},
-        node_attr={"shape": "plaintext", "fontname": "Helvetica"},
+        node_attr={"shape": "circle", "fontname": "Helvetica", "fontcolor": "white", "style": "filled", "width": "0.6"},
         edge_attr={"fontsize": "9", "fontname": "Helvetica"},
     )
 
     for name in node_names:
-        ifaces = network.ifaces_per_host[name]
-        iface_rows = "".join(
-            f'<TR><TD PORT="{i.iface}" BORDER="1" ALIGN="LEFT">'
-            f'<FONT POINT-SIZE="8" COLOR="white">{i.iface}<BR/>{i.ip}</FONT></TD></TR>'
-            for i in ifaces
-        )
-        label = (
-            f'<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2" BGCOLOR="{node_color[name]}">'
-            f'<TR><TD><FONT COLOR="white"><B>{name}</B></FONT></TD></TR>'
-            f"{iface_rows}"
-            f"</TABLE>>"
-        )
-        dot.node(name, label=label)
-
-    def _find_iface(node: str, peer: str):
-        for iface in network.ifaces_per_host[node]:
-            if iface.peer == peer:
-                return iface
-        return None
+        dot.node(name, label=name, fillcolor=node_color[name])
 
     for link in network.links:
-        iface1 = _find_iface(link.node1, link.node2)
-        iface2 = _find_iface(link.node2, link.node1)
-        tail = f"{link.node1}:{iface1.iface}" if iface1 else link.node1
-        head = f"{link.node2}:{iface2.iface}" if iface2 else link.node2
         dot.edge(
-            tail,
-            head,
+            link.node1,
+            link.node2,
             label=f" {link.delay_ms}ms",
             color="black",
             dir="none",
@@ -93,3 +73,41 @@ def generate_network_pdf(network: Network, routing_rules: list[RoutingRule], out
         )
 
     dot.render(output_path, format="pdf", cleanup=True)
+
+
+def _network_from_links(links: list[Link]) -> Network:
+    """Build a Network dataclass from a list of links without starting Mininet."""
+    ifaces_per_host: dict[str, list[Interface]] = defaultdict(list)
+    counters: dict[str, int] = defaultdict(int)
+    for link in links:
+        for node, ip, peer, peer_ip in [
+            (link.node1, link.node1_ip, link.node2, link.node2_ip),
+            (link.node2, link.node2_ip, link.node1, link.node1_ip),
+        ]:
+            ifaces_per_host[node].append(
+                Interface(
+                    iface=f"{node}-eth{counters[node]}",
+                    ip=ip,
+                    peer=peer,
+                    peer_ip=peer_ip,
+                )
+            )
+            counters[node] += 1
+    hosts = {name: None for name in ifaces_per_host}  # type: ignore[dict-item]
+    return Network(net=None, hosts=hosts, ifaces_per_host=dict(ifaces_per_host), links=links)  # type: ignore[arg-type]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Visualize a network topology CSV as a PDF.")
+    parser.add_argument("topology", help="Path to the topology CSV file")
+    parser.add_argument("-o", "--output", default=None, help="Output path (with or without .pdf extension; default: topology filename)")
+    args = parser.parse_args()
+
+    links = load_topology(args.topology)
+    output = (args.output or args.topology.removesuffix(".csv")).removesuffix(".pdf")
+    generate_network_pdf(_network_from_links(links), [], output)
+    print(f"Written to {output}.pdf")
+
+
+if __name__ == "__main__":
+    main()

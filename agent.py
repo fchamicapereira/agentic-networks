@@ -5,7 +5,7 @@ from typing import Literal, Optional, TypeAlias
 
 from message_bus import MessageBus
 from mininet_host import MininetHost
-from network import Interface
+from mininet.node import Host
 from network import Interface
 
 from dataclasses import dataclass
@@ -16,6 +16,9 @@ Other nodes in the network: {other_nodes}.
 Physical connections:
 {connections}
 {initial_prompt}
+You may call multiple tools per response. They are executed in order and you will receive all results before your next turn. Two important rules:
+- Execution stops immediately if a tool exits with a non-zero exit code — subsequent tools in that response will not run.
+- 'report_done' must be called alone — never alongside other tools. If combined with other tools it will be ignored and you will be warned.
 """
 
 WAIT_DEFAULT_TIMEOUT_S = 5
@@ -53,57 +56,30 @@ class AgentResult:
 
 AGENT_TOOLS_DEFINITIONS = [
     {
-        "name": "get_network_info",
+        "name": "exec",
         "description": (
-            "Show current network interface addresses (ip addr show) " "and routing table (ip route show). Use this to understand " "your current configuration before and after making changes."
+            "Execute a shell command on this node and return its output. "
+            "Use this for any network inspection or configuration: "
+            "'ip addr show', 'ip route show', 'ip route add ...', 'ip route del ...', "
+            "'ping -c 3 <ip>', 'ip link show', 'ip neigh show', etc. "
+            "Note: unlike a standard Linux host, there are NO automatic kernel routes here — "
+            "not even for directly connected subnets. You must add every route explicitly."
         ),
-        "schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "add_route",
-        "description": "Add a route to the routing table.",
         "schema": {
             "type": "object",
             "properties": {
-                "destination": {"type": "string", "description": "Destination network in CIDR notation, e.g. '10.0.12.0/30'"},
-                "dev": {"type": "string", "description": "Output interface name, e.g. 'h1-eth0'"},
-                "via": {"type": "string", "description": "Optional gateway IP address for indirect routes"},
+                "command": {"type": "string", "description": "The shell command to run, e.g. 'ip route show'"},
             },
-            "required": ["destination", "dev"],
-        },
-    },
-    {
-        "name": "delete_route",
-        "description": "Delete a route from the routing table.",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "destination": {"type": "string", "description": "Destination network in CIDR notation, e.g. '10.0.12.0/30'"},
-            },
-            "required": ["destination"],
-        },
-    },
-    {
-        "name": "ping",
-        "description": "Send ICMP echo requests to test reachability of an IP address.",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "target_ip": {"type": "string", "description": "Target IP address"},
-                "count": {"type": "integer", "description": "Number of packets to send (default 3)"},
-            },
-            "required": ["target_ip"],
+            "required": ["command"],
         },
     },
     {
         "name": "report_done",
-        "description": (
-            "Signal that you want to terminate and are satisfied with the current state of the entire network. " "Can only be issued alone without any other tool calls in the same response. "
-        ),
+        "description": "Signal that you want to terminate and are satisfied with the current state of the entire network.",
         "schema": {
             "type": "object",
             "properties": {
-                "message": {"type": "string", "description": "Summary of routes added and connectivity verified"},
+                "message": {"type": "string", "description": "Summary of what was configured and connectivity verified"},
                 "success": {"type": "boolean", "description": "True if full connectivity was achieved"},
             },
             "required": ["message", "success"],
@@ -139,7 +115,7 @@ class NodeAgent:
     def __init__(
         self,
         node_name: str,
-        mininet_host_cmd,
+        host: Host,
         bus: MessageBus,
         initial_prompt: str,
         model: str,
@@ -148,7 +124,7 @@ class NodeAgent:
         ifaces: list[Interface],
     ):
         self.node_name = node_name
-        self.mininet_host = MininetHost(node_name, mininet_host_cmd)
+        self.mininet_host = MininetHost(node_name, host)
         self.bus = bus
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
@@ -164,10 +140,7 @@ class NodeAgent:
         )
 
         self.tools = {
-            "get_network_info": self.mininet_host.get_network_info,
-            "add_route": self.mininet_host.add_route,
-            "delete_route": self.mininet_host.delete_route,
-            "ping": self.mininet_host.ping,
+            "exec": self.mininet_host.exec,
             "send_message": self.send_message,
             "wait": self.wait,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
@@ -193,18 +166,28 @@ class NodeAgent:
             self.process_received_message(sender, msg)
         return msgs
 
-    def _execute_tool(self, name: str, inputs: dict) -> Optional[str]:
+    def _execute_tool(self, name: str, inputs: dict) -> tuple[str, bool]:
+        """Execute a tool and return (result, should_stop).
+
+        should_stop is True when an exec command exits with a non-zero code.
+        """
         try:
             self.log.info("%s(%s)", name, inputs)
-            if name in self.tools:
-                results = self.tools[name](**inputs)
+            if name == "exec":
+                output, exit_code = self.mininet_host.exec(**inputs)
+                if exit_code != 0:
+                    result = f"Command failed (exit {exit_code}):\n{output}"
+                    self.log.warning("Command exited with code %d — halting tool execution for this turn.", exit_code)
+                    return result, True
+                return output, False
+            elif name in self.tools:
+                result = self.tools[name](**inputs)
+                return str(result) if result is not None else "(no output)", False
             else:
-                results = f"Unknown tool: {name}. Available tools: {', '.join(self.tools.keys())}"
-
-            return results
+                return f"Unknown tool: {name}. Available tools: {', '.join(self.tools.keys())}", False
         except Exception as exc:
             self.log.error("Error executing tool %s: %s", name, exc)
-            return f"Error in {name}: {exc}"
+            return f"Error in {name}: {exc}", False
 
     def request_action_from_model(self) -> LLMResponse:
         raise NotImplementedError("Must be implemented by subclass")
@@ -252,22 +235,22 @@ class NodeAgent:
 
             tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
 
-            # report_done must be called alone — if batched with other tools the model is
-            # speculatively terminating before verifying results. Drop it and let the other calls run.
-            if len(tool_blocks) > 1 and any(b.tool_name == "report_done" for b in tool_blocks):
-                self.log.warning("report_done called alongside other tools — dropping report_done.")
-                tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
-                self.process_received_message(
-                    "system",
-                    "report_done was ignored because you called it alongside other tools. "
-                    "Call report_done ALONE, only after you have verified full connectivity.",
+            # report_done is only accepted when called alone
+            report_done_blocks = [b for b in tool_blocks if b.tool_name == "report_done"]
+            if report_done_blocks and len(tool_blocks) > 1:
+                warning = (
+                    "'report_done' was called alongside other tools and has been ignored. "
+                    "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
                 )
+                self.log.warning(warning)
+                for b in report_done_blocks:
+                    self.store_tool_results(b, warning)
+                tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
 
             done = False
             for block in tool_blocks:
-                result = self._execute_tool(block.tool_name, block.input)
-                if result is not None:
-                    self.store_tool_results(block, result)
+                result, should_stop = self._execute_tool(block.tool_name, block.input)
+                self.store_tool_results(block, result)
 
                 if block.tool_name == "report_done":
                     done = True
@@ -275,6 +258,18 @@ class NodeAgent:
                         success=block.input.get("success", False),
                         message=block.input.get("message", ""),
                     )
+                    break
+
+                if should_stop:
+                    stop_warning = (
+                        "Execution halted: the previous command exited with a non-zero exit code. "
+                        "The remaining tools in this response were not executed. Please investigate the error above."
+                    )
+                    self.log.warning(stop_warning)
+                    # Notify the model about skipped tools
+                    for skipped in tool_blocks[tool_blocks.index(block) + 1:]:
+                        self.store_tool_results(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
+                    break
 
             # Non-blocking drain at end of every iteration
             self._drain_inbox()

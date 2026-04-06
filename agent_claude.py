@@ -5,6 +5,7 @@ from anthropic.types import MessageParam, ToolUnionParam
 
 from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
 from message_bus import MessageBus
+from mininet.node import Host
 from network import Interface
 
 ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
@@ -30,7 +31,7 @@ class AgentClaude(NodeAgent):
     def __init__(
         self,
         node_name: str,
-        mininet_host_cmd,
+        host: Host,
         bus: MessageBus,
         initial_prompt: str,
         model: str,
@@ -38,7 +39,7 @@ class AgentClaude(NodeAgent):
         max_tokens: int,
         ifaces: list[Interface],
     ):
-        super().__init__(node_name, mininet_host_cmd, bus, initial_prompt, model, max_iterations, max_tokens, ifaces)
+        super().__init__(node_name, host, bus, initial_prompt, model, max_iterations, max_tokens, ifaces)
 
         if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
             print("Error: ANTHROPIC_API_KEY environment variable is not set.")
@@ -61,7 +62,7 @@ class AgentClaude(NodeAgent):
         # Flush any tool results accumulated since the last call
         self._flush_tool_results()
 
-        self.messages.append({"role": "user", "content": "State the next action(s)."})
+        self.messages.append({"role": "user", "content": "State the next action."})
 
         response = self.client.messages.create(
             model=self.model,
