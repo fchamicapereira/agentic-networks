@@ -1,0 +1,119 @@
+=== Experiment: routing_simple_min_delay — Opus / Full Mesh 4-Node Topology ===
+
+Setup: 4 nodes (h1, h2, h3, h4) in a full mesh (6 links).
+Link latencies (one-way):
+  h1-h2 = 10ms  |  h1-h3 = 40ms  |  h1-h4 = 5ms
+  h2-h3 = 15ms  |  h2-h4 = 30ms  |  h3-h4 = 25ms
+
+=== Connectivity Matrix ===
++-----------+----+----+----+----+
+| src \ dst | h1 | h2 | h3 | h4 |
++-----------+----+----+----+----+
+|     h1    | -- | OK | OK | OK |
+|     h2    | OK | -- | OK | OK |
+|     h3    | OK | OK | -- | OK |
+|     h4    | OK | OK | OK | -- |
++-----------+----+----+----+----+
+
+=== Routing Tables ===
+
+--- h1 ---
+10.0.12.0/30 dev h1-eth0 scope link          (h2, direct 10ms)
+10.0.13.0/30 dev h1-eth1 scope link          (h3, direct 40ms — not rerouted via h2)
+10.0.14.0/30 dev h1-eth2 scope link          (h4, direct 5ms)
+10.0.23.0/30 via 10.0.12.2 dev h1-eth0       (via h2: 10+15=25ms)
+10.0.24.0/30 via 10.0.14.2 dev h1-eth2       (via h4: 5+30=35ms vs h2: 10+30=40ms)
+10.0.34.0/30 via 10.0.14.2 dev h1-eth2       (via h4: 5+25=30ms vs h3: 40+25=65ms)
+
+--- h2 ---
+10.0.12.0/30 dev h2-eth0 scope link          (h1, direct 10ms)
+10.0.13.1/32 via 10.0.12.1 dev h2-eth0       (h1's side: via h1, 10ms)
+10.0.13.2/32 via 10.0.23.2 dev h2-eth1       (h3's side: via h3, 15ms)
+10.0.14.0/30 via 10.0.12.1 dev h2-eth0       (via h1: 10+5=15ms vs direct: 30ms)
+10.0.23.0/30 dev h2-eth1 scope link          (h3, direct 15ms)
+10.0.24.1/32 dev h2-eth2 scope link          (h2's own interface)
+10.0.24.2/32 via 10.0.12.1 dev h2-eth0       (h4's side: via h1, 10+5=15ms vs direct: 30ms)
+10.0.34.1/32 via 10.0.23.2 dev h2-eth1       (h3's side: via h3, 15+25=40ms)
+10.0.34.2/32 via 10.0.12.1 dev h2-eth0       (h4's side: via h1, 10+5+25=40ms)
+
+--- h3 ---
+10.0.12.0/30 via 10.0.23.1 dev h3-eth1       (via h2: 15+10=25ms vs h1: 40ms)
+10.0.13.0/30 dev h3-eth0 scope link          (h1, direct 40ms)
+10.0.14.0/30 via 10.0.23.1 dev h3-eth1       (via h2: 15+10+5=30ms vs h1: 40+5=45ms)
+10.0.23.0/30 dev h3-eth1 scope link          (h2, direct 15ms)
+10.0.24.0/30 via 10.0.23.1 dev h3-eth1       (via h2: 15+30=45ms vs h4: 25+30=55ms)
+10.0.34.0/30 dev h3-eth2 scope link          (h4, direct 25ms)
+
+--- h4 ---
+10.0.12.0/30 via 10.0.14.1 dev h4-eth0       (via h1: 5+10=15ms vs direct: 30ms)
+10.0.13.0/30 via 10.0.34.1 dev h4-eth2       (via h3: 25ms vs h1: 5+40=45ms)
+10.0.14.0/30 dev h4-eth0 scope link          (h1, direct 5ms)
+10.0.23.0/30 via 10.0.14.1 dev h4-eth0       (via h1→h2: 5+10+15=30ms vs h3: 25+15=40ms)
+10.0.24.0/30 dev h4-eth1 scope link          (h2, direct 30ms)
+10.0.34.0/30 dev h4-eth2 scope link          (h3, direct 25ms)
+
+=== Per-Agent Behavior ===
+
+h1 (converged at iteration 11):
+- Read tc qdisc immediately: eth0=10ms (h2), eth1=40ms (h3), eth2=5ms (h4)
+- Broadcast full delay info to all 3 neighbors in iteration 3; topology assembled by iteration 5
+- Correctly rerouted 10.0.23.0/30 via h2 (10+15=25ms) and both h4 subnets via h4 (5ms)
+- Kept 10.0.13.0/30 direct (40ms) — missed the faster h1→h2→h3 path (10+15=25ms)
+  Note: h2 explicitly advised h1 to keep it direct, as h2 handled it with /32 host routes
+
+h2 (converged at iteration 15):
+- Assembled full topology from tc qdisc + neighbor messages by iteration 5
+- Proactively sent detailed routing advice with computed paths to all 3 neighbors
+- Most sophisticated routing: applied /32 host-route splitting to all shared /30 subnets
+  (10.0.13.0/30, 10.0.24.0/30, 10.0.34.0/30) to route each endpoint optimally
+- Key non-obvious decisions: route 10.0.14.0/30 via h1 (10+5=15ms vs direct 30ms),
+  route 10.0.24.2 (h4's side) via h1 (10+5=15ms vs direct 30ms)
+- Took the most iterations due to multi-round /32 optimization passes
+
+h3 (converged at iteration 13):
+- Computed optimal routes from scratch upon receiving full topology (iteration 5)
+- Correctly avoids the slow h1-h3 direct link for reaching h1's subnets:
+  routes 10.0.12.0/30 and 10.0.14.0/30 via h2 (15+10=25ms vs 40ms direct)
+- Kept 10.0.13.0/30 direct (own connected subnet), consistent with h2's /32 handling
+
+h4 (converged at iteration 12):
+- Fastest initial responder: shared delay info in iteration 3 before receiving any messages
+- Observed asymmetric RTTs from ping (h2: 90ms RTT, h3: 75ms RTT) vs tc qdisc (30ms, 25ms);
+  trusted tc qdisc for routing decisions
+- Updated 10.0.23.0/30 mid-convergence after h2 and h3 both confirmed via h1 was faster
+- Final routes all optimal: h2 traffic via h1 (5+10=15ms vs 30ms direct),
+  h3 traffic via h3 direct (25ms vs 5+40=45ms via h1)
+
+=== Assessment ===
+
+                       | h1       | h2  | h3  | h4
+-----------------------+----------+-----+-----+-----
+Connectivity           | YES      | YES | YES | YES
+Latency inferred       | YES      | YES | YES | YES
+Latency-optimal routing| PARTIAL  | YES | YES | YES
+
+Missed optimization: h1 left 10.0.13.0/30 on the direct 40ms link to h3,
+even though h1→h2→h3 = 10+15 = 25ms. h2 compensated with /32 host routes
+for its own traffic, but traffic sourced from h1 to h3's 10.0.13.2 address
+takes the slower path.
+
+Key findings:
+- 3 of 4 agents achieved fully latency-optimal routing; h1 missed one path
+- Topology assembled cooperatively in 3-5 iterations purely through agent messaging
+  (no ping-based discovery needed — tc qdisc + messages sufficed)
+- h2 introduced /32 host-route splitting unprompted, achieving finer-grained
+  optimization than /30 subnet-level routes allow
+- h4 identified and resolved a routing discrepancy between ping RTTs and tc qdisc
+  one-way delays (asymmetric link behavior), choosing the more reliable tc data
+- All agents correctly identified that h4 should route to h2 via h1 (5+10=15ms)
+  rather than using the direct h4-h2 link (30ms) — a non-obvious multi-hop optimization
+
+=== Comparison with Triangle (Opus) ===
+
+Full mesh adds complexity: 4 nodes, 6 subnets, 3 interfaces each.
+Convergence took more iterations (11-15 vs 10-19) but the network is ~2x larger.
+The triangle Opus run rerouted directly-connected subnets (e.g. h1→h3 via h2);
+the full mesh run did not for h1, likely because h2 actively steered h1 to keep
+10.0.13.0/30 direct while compensating with its own /32 host routes.
+h2's /32 splitting strategy is a new emergent behavior not seen in the triangle —
+an adaptation to the higher density of shared /30 subnets in a full mesh.

@@ -1,0 +1,85 @@
+=== Experiment: routing_simple_min_delay — Sonnet / Triangle Topology ===
+
+Setup: 3 nodes (A, B, C) in a triangle.
+Link latencies: A<->B = 20ms, B<->C = 30ms, A<->C = 80ms.
+
+=== Connectivity Matrix ===
++-----------+----+----+----+
+| src \ dst | A  | B  | C  |
++-----------+----+----+----+
+|     A     | -- | OK | OK |
+|     B     | OK | -- | OK |
+|     C     | OK | OK | -- |
++-----------+----+----+----+
+
+=== Routing Tables ===
+
+--- A ---
+10.0.12.0/30 dev A-eth0 scope link
+10.0.13.0/30 dev A-eth1 scope link
+10.0.23.0/30 via 10.0.12.2 dev A-eth0
+--- B ---
+10.0.12.0/30 dev B-eth0 scope link
+10.0.13.0/30 via 10.0.12.1 dev B-eth0
+10.0.23.0/30 dev B-eth1 scope link
+--- C ---
+10.0.12.0/30 via 10.0.23.1 dev C-eth1
+10.0.13.0/30 via 10.0.23.1 dev C-eth1
+10.0.23.0/30 dev C-eth1 scope link
+
+=== Per-Agent Behavior ===
+
+A (converged at iteration 11):
+- Started with empty route table; added connected subnets after discovering no routes existed
+- Pinged neighbors early: B=20ms, C=80ms
+- Coordinated with B and C via messages to learn full topology
+- In iteration 6, attempted to route 10.0.13.2/32 via B (50ms path) — ping failed because
+  B had not yet installed a return route to 10.0.13.0/30
+- Removed the /32 host route and fell back to the direct 80ms A-eth1 route for 10.0.13.0/30;
+  did not retry the subnet-level reroute after B's return route was installed
+- Correctly routed 10.0.23.0/30 via B (20+30=50ms vs 80ms via C)
+
+B (converged at iteration 10):
+- Added connected subnets and pinged both neighbors: A=20ms, C=30ms
+- Received full topology from A and C early via messages
+- Added route for 10.0.13.0/30 via A (10.0.12.1), reasoning that "via A costs 20ms"
+  — this accounts only for the B→A hop and ignores A→C's 80ms link;
+  the actual B→A→C path to 10.0.13.2 costs 100ms, vs B→C direct at 30ms
+- Explicitly rejected C's suggestion to route 10.0.13.0/30 via C, calling it suboptimal
+  at "30+20=50ms" — a further reasoning error (via C: B→C=30ms total, not 50ms)
+- Correctly kept direct routes for both 10.0.12.0/30 and 10.0.23.0/30
+
+C (converged at iteration 12):
+- Added connected subnets and pinged both neighbors: A=80ms, B=30ms
+- Received B's topology message early and immediately routed 10.0.12.0/30 via B
+- On learning A-B=20ms from A's message (iteration 8), correctly deduced C→A via B = 50ms
+  beats direct 80ms, and rerouted 10.0.13.0/30 via B (10.0.23.1)
+- Verified: ping to A (10.0.13.1 and 10.0.12.1) = 50ms via B ✓
+
+=== Assessment ===
+
+              | A        | B           | C
+--------------+----------+-------------+---------
+Connectivity  | YES      | YES         | YES
+Latency inferred | YES   | YES         | YES
+Latency-optimal routing | PARTIAL | SUBOPTIMAL | YES
+
+A (PARTIAL): Correctly rerouted the B-C subnet (10.0.23.0/30) via B. Did not reroute
+10.0.13.0/30 away from the direct 80ms A-C link; an early attempt to do so failed due to
+a transient routing state on B and was not retried.
+
+B (SUBOPTIMAL): Routed 10.0.13.0/30 (C's A-facing subnet) via A, incurring 20+80=100ms
+instead of the optimal 30ms direct to C. B made a partial-path reasoning error — it
+counted only the B→A hop cost (20ms) when evaluating the via-A path, and incorrectly
+computed the via-C alternative as 50ms (it is actually 30ms). This is a regression from
+the prior run.
+
+C (YES): Fully optimal. Rerouted both remote subnets (10.0.12.0/30 and 10.0.13.0/30) via
+B, achieving 50ms paths instead of the 80ms direct A-C link. This is an improvement over
+the prior run, where the analogous node failed to reroute its directly-connected subnet.
+
+Key finding: outcome variance increased compared to the prior run. C improved to full
+optimality (vs. partial before), while B regressed to suboptimal routing due to a
+multi-hop cost reasoning error. A repeated the same partial pattern. The agents remain
+able to infer latencies and share topology, but multi-hop path cost computation is an
+unreliable emergent behavior.

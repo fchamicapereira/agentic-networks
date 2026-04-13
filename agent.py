@@ -15,10 +15,11 @@ You are an autonomous network agent running on node {node_name} in a network tes
 Other nodes in the network: {other_nodes}.
 Physical connections:
 {connections}
-{initial_prompt}
-You may call multiple tools per response. They are executed in order and you will receive all results before your next turn. Two important rules:
-- Execution stops immediately if a tool exits with a non-zero exit code — subsequent tools in that response will not run.
+Using tools:
+- You may issue multiple tools at once. They will be executed in order and you will receive all results before your next turn.
+- Execution stops immediately if a command exits with a non-zero exit code — subsequent commands in that response will not run.
 - 'report_done' must be called alone — never alongside other tools. If combined with other tools it will be ignored and you will be warned.
+{initial_prompt}
 """
 
 WAIT_DEFAULT_TIMEOUT_S = 5
@@ -62,8 +63,6 @@ AGENT_TOOLS_DEFINITIONS = [
             "Use this for any network inspection or configuration: "
             "'ip addr show', 'ip route show', 'ip route add ...', 'ip route del ...', "
             "'ping -c 3 <ip>', 'ip link show', 'ip neigh show', etc. "
-            "Note: unlike a standard Linux host, there are NO automatic kernel routes here — "
-            "not even for directly connected subnets. You must add every route explicitly."
         ),
         "schema": {
             "type": "object",
@@ -145,7 +144,6 @@ class NodeAgent:
             "wait": self.wait,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
-
 
     def send_message(self, to: str, message: str):
         self.log.info("[msg → %s] %s", to, message)
@@ -239,8 +237,7 @@ class NodeAgent:
             report_done_blocks = [b for b in tool_blocks if b.tool_name == "report_done"]
             if report_done_blocks and len(tool_blocks) > 1:
                 warning = (
-                    "'report_done' was called alongside other tools and has been ignored. "
-                    "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
+                    "'report_done' was called alongside other tools and has been ignored. " "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
                 )
                 self.log.warning(warning)
                 for b in report_done_blocks:
@@ -262,12 +259,11 @@ class NodeAgent:
 
                 if should_stop:
                     stop_warning = (
-                        "Execution halted: the previous command exited with a non-zero exit code. "
-                        "The remaining tools in this response were not executed. Please investigate the error above."
+                        "Execution halted: the previous command exited with a non-zero exit code. " "The remaining tools in this response were not executed. Please investigate the error above."
                     )
                     self.log.warning(stop_warning)
                     # Notify the model about skipped tools
-                    for skipped in tool_blocks[tool_blocks.index(block) + 1:]:
+                    for skipped in tool_blocks[tool_blocks.index(block) + 1 :]:
                         self.store_tool_results(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
                     break
 

@@ -1,0 +1,138 @@
+=== Experiment: routing_min_delay_optimize_direct_connections — Opus / Full Mesh 4-Node Topology ===
+
+Setup: 4 nodes (A, B, C, D) in a full mesh (6 links).
+Link latencies (one-way):
+  A-B = 10ms  |  A-C = 170ms  |  A-D = 5ms
+  B-C = 15ms  |  B-D = 150ms  |  C-D = 25ms
+
+Prompt change vs routing_min_delay: one new hint added to the system prompt:
+  "Optimize all routes, even for directly connected interfaces.
+   Sometimes routing via other interfaces is worth it."
+
+=== Connectivity Matrix ===
++-----------+----+----+----+----+
+| src \ dst | A  | B  | C  | D  |
++-----------+----+----+----+----+
+|     A     | -- | OK | OK | OK |
+|     B     | OK | -- | OK | OK |
+|     C     | OK | OK | -- | OK |
+|     D     | OK | OK | OK | -- |
++-----------+----+----+----+----+
+
+=== Routing Tables ===
+
+--- A ---
+10.0.12.0/30 dev A-eth0 scope link          (B, direct 10ms)
+10.0.13.0/30 via 10.0.12.2 dev A-eth0       (C via B: 10+15=25ms — was direct 170ms)
+10.0.14.0/30 dev A-eth2 scope link          (D, direct 5ms)
+10.0.23.0/30 via 10.0.12.2 dev A-eth0       (via B: 10ms)
+10.0.24.0/30 via 10.0.12.2 dev A-eth0       (via B: 10ms, for B's side .1)
+10.0.24.2    via 10.0.14.2 dev A-eth2        (/32 host route for D's side: 5ms)
+10.0.34.0/30 via 10.0.14.2 dev A-eth2       (via D: 5+25=30ms)
+
+--- B ---
+10.0.12.0/30 dev B-eth0 scope link          (A, direct 10ms)
+10.0.13.1/32 via 10.0.12.1 dev B-eth0       (A's side of A-C: via A, 10ms)
+10.0.13.2/32 via 10.0.23.2 dev B-eth1       (C's side of A-C: via C, 15ms)
+10.0.14.0/30 via 10.0.12.1 dev B-eth0       (via A: 10+5=15ms vs direct 150ms)
+10.0.23.0/30 dev B-eth1 scope link          (C, direct 15ms)
+10.0.24.0/30 dev B-eth2 scope link          (D, direct 150ms)
+10.0.34.0/30 via 10.0.12.1 dev B-eth0       (via A: 10+5+25=40ms = via C: 15+25=40ms)
+
+--- C ---
+10.0.12.0/30 via 10.0.23.1 dev C-eth1       (via B: 15+10=25ms)
+10.0.13.0/30 via 10.0.23.1 dev C-eth1       (A via B: 15+10=25ms — was direct 170ms)
+10.0.14.0/30 via 10.0.34.2 dev C-eth2       (via D: 25+5=30ms — suboptimal, via B=25ms)
+10.0.23.0/30 dev C-eth1 scope link          (B, direct 15ms)
+10.0.24.0/30 via 10.0.23.1 dev C-eth1       (via B: 15ms)
+10.0.34.0/30 dev C-eth2 scope link          (D, direct 25ms)
+
+--- D ---
+10.0.12.0/30 via 10.0.14.1 dev D-eth0       (via A: 5+10=15ms)
+10.0.13.1/32 via 10.0.14.1 dev D-eth0       (A's side of A-C: via A, 5ms)
+10.0.13.2/32 via 10.0.34.1 dev D-eth2       (C's side of A-C: via C, 25ms)
+10.0.14.0/30 dev D-eth0 scope link          (A, direct 5ms)
+10.0.23.1/32 via 10.0.14.1 dev D-eth0       (B's side of B-C: via A, 5+10=15ms)
+10.0.23.2/32 via 10.0.34.1 dev D-eth2       (C's side of B-C: via C, 25ms)
+10.0.24.0/30 dev D-eth1 scope link          (B, direct 150ms)
+10.0.24.1/32 via 10.0.14.1 dev D-eth0       (B's side of B-D: via A, 5+10=15ms vs direct 150ms)
+10.0.34.0/30 dev D-eth2 scope link          (C, direct 25ms)
+
+=== Per-Agent Behavior ===
+
+A (converged at iteration 17):
+- Discovered link delays via tc qdisc: A-eth0=10ms, A-eth1=170ms, A-eth2=5ms
+- Computed full topology from neighbor messages by iteration 5
+- Immediately applied ip route replace 10.0.13.0/30 via 10.0.12.2 (B) — 25ms vs 170ms direct
+  This is the key fix vs the prior run, where A explicitly refused to reroute its own subnet
+- Identified the rp_filter problem: packets arriving on A-eth1 from C would be dropped
+  because the route to 10.0.13.0/30 no longer points out of A-eth1; set rp_filter=2 (loose)
+  and disabled send_redirects to prevent B from sending ICMP redirects
+- Split 10.0.24.0/30 with a /32 host route: .0/30 via B for .1 (10ms), .2/32 via D (5ms)
+  Correctly reasons that D's IP on B-D is faster to reach via A→D than A→B
+
+B (converged at iteration 17):
+- Applied /32 host-route splitting to 10.0.13.0/30:
+  .1 via A (10ms) — A's own interface, B→A is 10ms
+  .2 via C (15ms) — C's own interface, B→C is 15ms
+  Optimal per-endpoint routing of the high-latency A-C subnet
+- Routed 10.0.14.0/30 via A (10+5=15ms) instead of direct B-D (150ms)
+- Disabled rp_filter and send_redirects to support asymmetric forwarding
+
+C (converged at iteration 13):
+- Initially kept 10.0.13.0/30 as scope link; reconsidered at iteration 9:
+  "I should reconsider 10.0.13.0/30 — to reach A via B→A = 25ms vs direct 170ms.
+   Let me check if I can override the direct route."
+  Issued ip route replace 10.0.13.0/30 via 10.0.23.1 — RTT to A dropped from 680ms to 50ms
+- Disabled rp_filter=0 for the same reason as A: packets for 10.0.13.2 (C's own IP on
+  the A-C subnet) may arrive on C-eth1 via B rather than C-eth0
+- Remaining suboptimal route: 10.0.14.0/30 via D (25+5=30ms) instead of via B (15+10=25ms)
+  Chose via D as "simpler, small difference" despite B being 5ms faster for A's side
+
+D (converged at iteration 19):
+- Most extensive use of /32 host-route splitting, applied to three shared subnets:
+  10.0.13.0/30: .1 via A (5ms), .2 via C (25ms)
+  10.0.23.0/30: .1 via A→B (15ms), .2 via C (25ms)
+  10.0.24.0/30: .1 via A→B (15ms) overrides the direct 150ms B-D link
+- Disabled rp_filter=0 and send_redirects=0 to support asymmetric routing
+- Correctly avoids the 150ms B-D link for all B-bound traffic, routing via A instead
+
+=== Assessment ===
+
+                       | A   | B   | C       | D
+-----------------------+-----+-----+---------+-----
+Connectivity           | YES | YES | YES     | YES
+Latency inferred       | YES | YES | YES     | YES
+Latency-optimal routing| YES | YES | PARTIAL | YES
+
+Missed optimization: C routes 10.0.14.0/30 via D (25+5=30ms) instead of via B
+(15+10=25ms to reach A's side, 10.0.14.1). C correctly computed both options but
+chose via D as "simpler" with a "small difference." 5ms margin was within tolerance.
+
+New behaviors vs routing_min_delay run:
+- All four agents now reroute their own directly-connected subnets away from slow links:
+  A reroutes 10.0.13.0/30 via B (25ms vs 170ms direct)
+  C reroutes 10.0.13.0/30 via B (25ms vs 170ms direct)
+- All agents independently discover the rp_filter / send_redirects issue that arises
+  when rerouting own-interface subnets via a gateway, and correctly fix it
+- /32 host-route splitting is now widespread: B splits 10.0.13.0/30, A splits 10.0.24.0/30,
+  D splits 10.0.13.0/30, 10.0.23.0/30, and 10.0.24.0/30 independently
+  (D's 10.0.24.1/32 via A is particularly impactful: 15ms vs 150ms direct)
+
+=== Comparison with routing_min_delay (same topology) ===
+
+The only prompt change was one hint: "Optimize all routes, even for directly connected
+interfaces. Sometimes routing via other interfaces is worth it."
+
+In the prior run A explicitly refused to reroute 10.0.13.0/30: "I'll keep that direct
+since it's my own interface." The hint was sufficient to override this heuristic and
+unlock the correct reasoning in both A and C. The agents did not need to be told
+how to do it — they already had the tools and topology knowledge.
+
+The hint also unlocked a secondary insight agents had to work out themselves:
+rerouting an own-interface subnet creates an asymmetric path that rp_filter will block.
+All four agents identified and resolved this without prompting.
+
+3 of 4 agents achieved fully latency-optimal routing (A, B, D); C missed one 5ms gain.
+In the prior run only 2 of 4 were fully optimal (B, D), with A and C both leaving the
+high-latency A-C link in place for a 145ms avoidable penalty.

@@ -30,7 +30,7 @@ class Interface:
 
 class RoutingRule(NamedTuple):
     source_host: str
-    destination_host: str
+    destination: str  # destination interface name (e.g. "h4-eth0") or host name
     next_hop: str
 
 
@@ -44,17 +44,21 @@ class Network:
     def get_routing_rules(self, route_tables: dict[str, str]) -> list[RoutingRule]:
         """Parse pre-collected routing tables and correlate with topology info.
 
-        Returns one RoutingRule(source_host, destination_host, next_hop) per
-        reachable (src, dst) pair, where next_hop is the immediate neighbour
-        src uses to reach dst.
+        Returns RoutingRule(source_host, destination, next_hop) entries.
+        If all interfaces of a destination host are reached via the same next
+        hop, destination is collapsed to the host name (e.g. "h4"). Otherwise,
+        one rule per interface is emitted using the interface name (e.g. "h4-eth0"),
+        making split routing visible in the figure.
         """
         ip_to_node: dict[str, str] = {}
-        node_subnets: dict[str, set[str]] = {name: set() for name in self.hosts}
+        # Per destination node: subnet -> interface name (e.g. "h4-eth0")
+        node_subnet_to_iface: dict[str, dict[str, str]] = {name: {} for name in self.hosts}
 
         for node_name, ifaces in self.ifaces_per_host.items():
             for iface in ifaces:
                 ip_to_node[iface.ip.split("/")[0]] = node_name
-                node_subnets[node_name].add(str(ipaddress.ip_interface(iface.ip).network))
+                subnet = str(ipaddress.ip_interface(iface.ip).network)
+                node_subnet_to_iface[node_name][subnet] = iface.iface
 
         rules: list[RoutingRule] = []
 
@@ -63,13 +67,14 @@ class Network:
             if not raw:
                 continue
 
-            subnet_to_next_hop: dict[str, str] = {}
+            # List of (network, next_hop_node) sorted longest-prefix-first for LPM.
+            routes: list[tuple[ipaddress.IPv4Network, str]] = []
             for line in raw.splitlines():
                 parts = line.split()
                 if not parts:
                     continue
                 try:
-                    subnet = str(ipaddress.ip_network(parts[0], strict=False))
+                    network = ipaddress.ip_network(parts[0], strict=False)
                 except ValueError:
                     continue
 
@@ -84,15 +89,35 @@ class Network:
                             break
 
                 if next_hop_node:
-                    subnet_to_next_hop[subnet] = next_hop_node
+                    routes.append((network, next_hop_node))
+
+            # Sort longest prefix first so LPM finds the most specific match.
+            routes.sort(key=lambda r: r[0].prefixlen, reverse=True)
+
+            def lpm(ip: str) -> str | None:
+                addr = ipaddress.ip_address(ip)
+                for network, next_hop_node in routes:
+                    if addr in network:
+                        return next_hop_node
+                return None
 
             for dst_name in self.hosts:
                 if dst_name == src_name:
                     continue
-                for subnet in node_subnets[dst_name]:
-                    if subnet in subnet_to_next_hop:
-                        rules.append(RoutingRule(src_name, dst_name, subnet_to_next_hop[subnet]))
-                        break
+                dst_rules = [
+                    (node_subnet_to_iface[dst_name][str(ipaddress.ip_interface(iface.ip).network)], nh)
+                    for iface in self.ifaces_per_host[dst_name]
+                    if (nh := lpm(iface.ip.split("/")[0])) is not None
+                ]
+                if not dst_rules:
+                    continue
+                next_hops = {next_hop for _, next_hop in dst_rules}
+                if len(next_hops) == 1:
+                    rules.append(RoutingRule(src_name, dst_name, next_hops.pop()))
+                else:
+                    for iface_name, next_hop in dst_rules:
+                        label = iface_name.replace("-eth", "")  # "A-eth0" → "A0"
+                        rules.append(RoutingRule(src_name, label, next_hop))
 
         return rules
 

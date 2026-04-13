@@ -1,0 +1,84 @@
+=== Experiment: routing_simple_min_delay — Opus / Triangle Topology ===
+
+Setup: 3 nodes (h1, h2, h3) in a triangle.
+Link latencies: h1<->h2 = 20ms, h2<->h3 = 30ms, h1<->h3 = 80ms.
+
+=== Connectivity Matrix ===
++-----------+----+----+----+
+| src \ dst | h1 | h2 | h3 |
++-----------+----+----+----+
+|     h1    | -- | OK | OK |
+|     h2    | OK | -- | OK |
+|     h3    | OK | OK | -- |
++-----------+----+----+----+
+
+=== Routing Tables ===
+
+--- h1 ---
+10.0.12.0/30 dev h1-eth0 scope link
+10.0.13.0/30 via 10.0.12.2 dev h1-eth0
+10.0.23.0/30 via 10.0.12.2 dev h1-eth0
+--- h2 ---
+10.0.12.0/30 dev h2-eth0 scope link
+10.0.13.1/32 via 10.0.12.1 dev h2-eth0
+10.0.13.2/32 via 10.0.23.2 dev h2-eth1
+10.0.23.0/30 dev h2-eth1 scope link
+--- h3 ---
+10.0.12.0/30 via 10.0.23.1 dev h3-eth1
+10.0.13.0/30 via 10.0.23.1 dev h3-eth1
+10.0.23.0/30 dev h3-eth1 scope link
+
+=== Per-Agent Behavior ===
+
+h1 (converged at iteration 10):
+- Added directly connected routes, then immediately pinged both neighbors to measure latency
+- Read tc qdisc settings to get exact one-way delays: eth0=10ms (h2), eth1=40ms (h3)
+- Exchanged delay info with h2 and h3 cooperatively
+- Calculated: h1→h2→h3 = 10+15 = 25ms one-way vs h1→h3 direct = 40ms
+- Deleted the direct 10.0.13.0/30 route and rerouted it via h2 (along with 10.0.23.0/30)
+- All h3-bound traffic avoids the 80ms link — fully optimal routing
+
+h2 (converged at iteration 19):
+- Immediately broadcast topology to h1 and h3, confirmed IP forwarding was on
+- Proactively read tc qdisc delays on both interfaces (10ms, 15ms) and shared with neighbors
+- Initially routed 10.0.13.0/30 via h1, but discovered a routing loop when h1 also
+  rerouted 10.0.13.0/30 through h2 (detected via ICMP Redirect from h1)
+- Resolved the loop by splitting into per-host routes: 10.0.13.1/32 via h1, 10.0.13.2/32 via h3
+- Disabled ICMP redirects on all interfaces to prevent future loop interference
+- Most sophisticated routing behavior: host-route splitting to avoid asymmetric loop
+
+h3 (converged at iteration 16):
+- Read tc qdisc delays immediately (eth0=40ms to h1, eth1=15ms to h2)
+- Proactively requested h2's delay to h1 before committing to a routing decision
+- After receiving confirmation (h2-eth0=10ms), calculated: h3→h2→h1 = 25ms < 40ms direct
+- Deleted direct 10.0.13.0/30 route and rerouted both h1 subnets via h2
+- Encountered ICMP redirect from h2 (loop while h2 routes were still converging),
+  resolved after h2 fixed its host routes and flushed the route cache
+- Fully optimal routing: all h1 traffic via h2
+
+=== Assessment ===
+
+              | h1  | h2  | h3
+--------------+-----+-----+-----
+Connectivity  | YES | YES | YES
+Latency inferred | YES | YES | YES
+Latency-optimal routing | YES | YES | YES
+
+Key findings:
+- All 3 agents achieved fully latency-optimal routing, including rerouting the
+  h1<->h3 subnet (10.0.13.0/30) through h2 (50ms RTT vs 80ms direct)
+- Agents used tc qdisc introspection in addition to ping, providing exact one-way
+  delays rather than round-trip estimates — enabling precise path comparisons
+- Opus coordinated more actively: agents explicitly requested delay values from
+  neighbors before making routing decisions
+- h2 encountered and correctly resolved a routing loop caused by both h1 and h3
+  simultaneously rerouting 10.0.13.0/30 through it, using per-host (/32) routes
+- Convergence took more iterations (10/19/16) than Sonnet (8/12/7) due to more
+  deliberate coordination, but produced strictly better routing outcomes
+
+=== Comparison with Sonnet ===
+
+Sonnet left 10.0.13.0/30 as a direct-link route on h1 and h3, missing the 50ms
+via-h2 path. Opus agents proactively gathered tc qdisc data, reasoned about
+one-way delays, and actively rerouted to eliminate the slow direct link.
+The trade-off: Opus took ~2x more iterations but achieved fully optimal routing.

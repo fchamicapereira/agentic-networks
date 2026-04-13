@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import logging
 import os
@@ -210,7 +212,7 @@ def main():
             print(routes or "(empty)")
         print()
 
-        report_path = log_dir / f"{run_stem}-report.txt"
+        report_path = log_dir / f"{run_stem}.txt"
         write_report(network, route_tables, report_path)
         logger.info("Report written to %s", report_path)
 

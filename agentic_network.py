@@ -2,6 +2,7 @@ import logging
 import threading
 
 from tqdm import tqdm
+from typing import Callable
 from mininet.node import Host
 
 from agent import AgentResult, NodeAgent
@@ -14,6 +15,7 @@ from agent_openai import MODELS as OPENAI_MODELS
 
 MODELS = {**CLAUDE_MODELS, **OPENAI_MODELS}
 
+Reactor = Callable[["AgenticNetwork", int], None]
 
 
 def _create_agent(
@@ -60,7 +62,15 @@ class AgenticNetwork:
     Creates one agent per host and drives them either sequentially round-robin
     (one LLM request in-flight at a time) or concurrently (each agent runs in
     its own thread).
+
+    ``reactors`` is an optional list of callables with signature
+    ``(net: AgenticNetwork, iteration: int) -> None``.  They are called on
+    every scheduler tick (after each round in sequential mode; every
+    REACTOR_POLL_INTERVAL_S seconds in concurrent mode) and can inspect or
+    mutate network state — e.g. crash a node, inject messages, etc.
     """
+
+    REACTOR_POLL_INTERVAL_S = 0.5
 
     def __init__(
         self,
@@ -70,14 +80,18 @@ class AgenticNetwork:
         max_iterations: int,
         max_tokens: int,
         openai_base_url: str,
+        reactors: list[Reactor] = [],
     ):
-        self._logger = logging.getLogger("main")
-        bus = MessageBus(list(network.hosts.keys()))
+        self.logger = logging.getLogger("main")
+        self.network = network
+        self.bus = MessageBus(list(network.hosts.keys()))
+        self.reactors: list[Reactor] = reactors
+        self._stopped: set[str] = set()
         self.agents: list[NodeAgent] = [
             _create_agent(
                 node_name=name,
                 host=host,
-                bus=bus,
+                bus=self.bus,
                 initial_prompt=initial_prompt,
                 model_key=model_key,
                 max_iterations=max_iterations,
@@ -87,6 +101,10 @@ class AgenticNetwork:
             )
             for name, host in network.hosts.items()
         ]
+
+    def stop_agent(self, node_name: str) -> None:
+        """Mark an agent as stopped; it will be excluded from all future steps."""
+        self._stopped.add(node_name)
 
     def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
         if concurrent:
@@ -100,18 +118,31 @@ class AgenticNetwork:
         bars = {
             agent.node_name: tqdm(
                 total=agent.max_iterations,
-                desc=f"  {agent.node_name}",
+                desc=f"  {agent.node_name}: ",
                 position=i,
                 leave=True,
-                bar_format="{desc}: {bar} {n}/{total}",
+                bar_format="{desc}{bar} {n}/{total}",
                 ncols=60,
             )
             for i, agent in enumerate(self.agents)
         }
 
+        global_iter = 0
         while active:
+            for reactor in self.reactors:
+                reactor(self, global_iter)
+
+            for agent, gen in active:
+                if agent.node_name in self._stopped:
+                    results[agent.node_name] = AgentResult(success=False, message="Node stopped by reactor")
+                    bars[agent.node_name].set_description(f"✗ {agent.node_name}")
+                    bars[agent.node_name].refresh()
+                    self.logger.info("Agent %s stopped.", agent.node_name)
+
             still_active = []
             for agent, gen in active:
+                if agent.node_name in self._stopped:
+                    continue
                 bar = bars[agent.node_name]
                 bar.set_description(f"> {agent.node_name}")
                 bar.refresh()
@@ -130,49 +161,102 @@ class AgenticNetwork:
                     bar.set_description(f"✓ {agent.node_name}")
                     bar.refresh()
 
-                    self._logger.info("Agent %s finished.", agent.node_name)
+                    self.logger.info("Agent %s finished.", agent.node_name)
             active = still_active
+            global_iter += 1
 
         tqdm.write("")  # newline after all bars
         return results
 
     def _run_concurrent(self) -> dict[str, AgentResult]:
+        """Step-based concurrent execution.
+
+        On every step all active agents run exactly one iteration in parallel.
+        Once all threads for that step have joined, reactors are called, then
+        the next step begins.  This keeps reactor invocations fully synchronous
+        and deterministic with respect to agent progress.
+        """
         results: dict[str, AgentResult] = {}
-        lock = threading.Lock()
+        active = [(agent, agent.run()) for agent in self.agents]
 
         bars = {
             agent.node_name: tqdm(
                 total=agent.max_iterations,
-                desc=f"  {agent.node_name}",
+                desc=f"  {agent.node_name}: ",
                 position=i,
                 leave=True,
-                bar_format="{desc}: {bar} {n}/{total}",
+                bar_format="{desc}{bar} {n}/{total}",
                 ncols=60,
             )
             for i, agent in enumerate(self.agents)
         }
 
-        def run_agent(agent: NodeAgent) -> None:
-            bar = bars[agent.node_name]
-            gen = agent.run()
-            try:
-                while True:
+        step = 0
+        while active:
+            for reactor in self.reactors:
+                reactor(self, step)
+
+            for agent, gen in active:
+                if agent.node_name in self._stopped:
+                    results[agent.node_name] = AgentResult(success=False, message="Node stopped by reactor")
+                    bars[agent.node_name].set_description(f"✗ {agent.node_name}")
+                    bars[agent.node_name].refresh()
+                    self.logger.info("Agent %s stopped.", agent.node_name)
+            active = [(agent, gen) for agent, gen in active if agent.node_name not in self._stopped]
+            if not active:
+                break
+
+            step_results: dict[str, tuple] = {}
+            step_lock = threading.Lock()
+
+            def run_step(agent: NodeAgent, gen) -> None:
+                bar = bars[agent.node_name]
+                bar.set_description(f"> {agent.node_name}")
+                bar.refresh()
+                try:
                     iteration = next(gen)
                     bar.n = iteration
+                    bar.set_description(f"  {agent.node_name}")
                     bar.refresh()
-            except StopIteration as e:
-                with lock:
-                    results[agent.node_name] = e.value
-                bar.n = min(bar.n + 1, agent.max_iterations)
-                bar.set_description(f"✓ {agent.node_name}")
-                bar.refresh()
-                self._logger.info("Agent %s finished.", agent.node_name)
+                    with step_lock:
+                        step_results[agent.node_name] = ("continue", iteration, None)
+                except StopIteration as e:
+                    bar.n = min(bar.n + 1, agent.max_iterations)
+                    bar.set_description(f"✓ {agent.node_name}")
+                    bar.refresh()
+                    with step_lock:
+                        step_results[agent.node_name] = ("done", None, e.value)
+                except Exception as exc:
+                    bar.set_description(f"✗ {agent.node_name}")
+                    bar.refresh()
+                    self.logger.error("Agent %s crashed: %s", agent.node_name, exc, exc_info=True)
+                    with step_lock:
+                        step_results[agent.node_name] = ("error", None, exc)
 
-        threads = [threading.Thread(target=run_agent, args=(agent,), daemon=True) for agent in self.agents]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            threads = [threading.Thread(target=run_step, args=(agent, gen)) for agent, gen in active]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            still_active = []
+            errors = []
+            for agent, gen in active:
+                status, _, value = step_results[agent.node_name]
+                if status == "continue":
+                    still_active.append((agent, gen))
+                elif status == "done":
+                    results[agent.node_name] = value
+                    self.logger.info("Agent %s finished.", agent.node_name)
+                elif status == "error":
+                    results[agent.node_name] = AgentResult(success=False, message=f"Agent crashed: {value}")
+                    errors.append(value)
+
+            if errors:
+                raise RuntimeError("An agent crashed — see logs above for details.")
+
+            active = still_active
+            step += 1
 
         tqdm.write("")  # newline after all bars
         return results

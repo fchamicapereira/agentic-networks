@@ -1,0 +1,303 @@
+=== Experiment: routing_min_delay_optimize_direct_connections — Opus / Two-Cluster Networks Topology ===
+
+Setup: 8 nodes in two full-mesh clusters connected by two inter-network links.
+  Network A (A-D, full mesh):
+    A-B = 10ms  |  A-C = 15ms  |  A-D = 20ms
+    B-C = 10ms  |  B-D = 15ms  |  C-D = 10ms
+  Network B (E-H, full mesh):
+    E-F = 10ms  |  E-G = 15ms  |  E-H = 20ms
+    F-G = 10ms  |  F-H = 15ms  |  G-H = 10ms
+  Inter-network links:
+    D-E = 250ms  |  A-H = 350ms
+
+System prompt hint (same as full_mesh_4 variant):
+  "Optimize all routes, even for directly connected interfaces.
+   Sometimes routing via other interfaces is worth it."
+
+Key shortest paths across clusters (one-way):
+  A→E: A→D→E = 270ms  |  A→H: A→D→E→H = 290ms  (direct A-H = 350ms, slower)
+  H→A: H→E→D→A = 290ms  (direct H-A = 350ms, slower)
+  D→H: D→E→H = 270ms   |  H→D: H→E→D = 270ms
+
+=== Connectivity Matrix ===
++-----------+----+----+----+----+----+----+----+----+
+| src \ dst | A  | B  | C  | D  | E  | F  | G  | H  |
++-----------+----+----+----+----+----+----+----+----+
+|     A     | -- | OK | OK | OK | OK | OK | OK | OK |
+|     B     | OK | -- | OK | OK | OK | OK | OK | OK |
+|     C     | OK | OK | -- | OK | OK | OK | OK | OK |
+|     D     | OK | OK | OK | -- | OK | OK | OK | OK |
+|     E     | OK | OK | OK | OK | -- | OK | OK | OK |
+|     F     | OK | OK | OK | OK | OK | -- | OK | OK |
+|     G     | OK | OK | OK | OK | OK | OK | -- | OK |
+|     H     | OK | OK | OK | OK | OK | OK | OK | -- |
++-----------+----+----+----+----+----+----+----+----+
+
+=== Routing Tables ===
+
+--- A ---
+10.0.12.0/30 dev A-eth0 scope link          (B, direct 10ms — optimal, A→B→C would be 20ms)
+10.0.13.0/30 dev A-eth1 scope link          (C, direct 15ms — optimal, A→B→C = 20ms)
+10.0.14.0/30 dev A-eth2 scope link          (D, direct 20ms — optimal, A→B→D = 25ms)
+10.0.23.0/30 via 10.0.12.2 dev A-eth0       (via B: 10ms)
+10.0.24.0/30 via 10.0.12.2 dev A-eth0       (via B: 10ms vs via D: 20ms)
+10.0.34.0/30 via 10.0.13.2 dev A-eth1       (via C: 15ms vs via D: 20ms)
+10.1.56.0/30 via 10.0.14.2 dev A-eth2       (via D→E: 270ms)
+10.1.57.0/30 via 10.0.14.2 dev A-eth2       (via D→E→G: 285ms)
+10.1.58.0/30 via 10.0.14.2 dev A-eth2       (via D→E→H: 290ms)
+10.1.67.0/30 via 10.0.14.2 dev A-eth2       (via D→E→F→G or D→E→G: ~285ms)
+10.1.68.0/30 via 10.0.14.2 dev A-eth2       (via D→E→F→H: ~290ms)
+10.1.78.0/30 via 10.0.14.2 dev A-eth2       (via D→E→H: ~290ms)
+10.2.18.0/30 dev A-eth3 scope link          (H, direct 350ms — SCOPE-LINK BLIND SPOT,
+                                              A→D→E→H = 290ms would be faster)
+10.2.45.0/30 via 10.0.14.2 dev A-eth2       (via D: 20ms)
+
+--- B ---
+10.0.12.0/30 dev B-eth0 scope link
+10.0.13.0/30 via 10.0.12.1 dev B-eth0       (via A: 10ms = via C: 10ms, tie)
+10.0.14.0/30 via 10.0.12.1 dev B-eth0       (via A: 10ms vs via D: 15ms)
+10.0.23.0/30 dev B-eth1 scope link
+10.0.24.0/30 dev B-eth2 scope link
+10.0.34.0/30 via 10.0.23.2 dev B-eth1       (via C: 10ms vs via D: 15ms)
+10.1.56.0/30 via 10.0.24.2 dev B-eth2       (via D: 15ms, then D→E)
+10.1.57.0/30 via 10.0.24.2 dev B-eth2       (via D)
+10.1.58.0/30 via 10.0.24.2 dev B-eth2       (via D)
+10.1.67.0/30 via 10.0.24.2 dev B-eth2       (via D)
+10.1.68.0/30 via 10.0.24.2 dev B-eth2       (via D)
+10.1.78.0/30 via 10.0.24.2 dev B-eth2       (via D)
+10.2.18.0/30 via 10.0.24.2 dev B-eth2       (via D — SUBOPTIMAL for A's side:
+                                              B→D→A=35ms vs B→A=10ms; cascades from D's
+                                              wrong route: traffic to H travels B→D→A→H=385ms)
+10.2.45.0/30 via 10.0.24.2 dev B-eth2       (via D: 15ms)
+
+--- C ---
+10.0.12.0/30 via 10.0.23.1 dev C-eth1       (via B: 10ms)
+10.0.13.0/30 dev C-eth0 scope link          (A, direct 15ms — optimal)
+10.0.14.0/30 via 10.0.34.2 dev C-eth2       (via D: 10ms vs via A: 15ms)
+10.0.23.0/30 dev C-eth1 scope link
+10.0.24.0/30 via 10.0.23.1 dev C-eth1       (via B: 10ms = via D: 10ms, tie)
+10.0.34.0/30 dev C-eth2 scope link
+10.1.56.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.1.57.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.1.58.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.1.67.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.1.68.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.1.78.0/30 via 10.0.34.2 dev C-eth2       (via D)
+10.2.18.0/30 via 10.0.13.1 dev C-eth0       (via A — good for .1 (15ms),
+                                              SUBOPTIMAL for .2: C→A→H=365ms
+                                              vs C→D→E→H=280ms; no /32 split)
+10.2.45.0/30 via 10.0.34.2 dev C-eth2       (via D: 10ms)
+
+--- D ---
+10.0.12.0/30 via 10.0.24.1 dev D-eth1       (via B: 15ms)
+10.0.13.0/30 via 10.0.34.1 dev D-eth2       (via C: 10ms)
+10.0.14.0/30 dev D-eth0 scope link          (A, direct 20ms — optimal)
+10.0.23.0/30 via 10.0.34.1 dev D-eth2       (via C: 10ms vs via B: 15ms)
+10.0.24.0/30 dev D-eth1 scope link
+10.0.34.0/30 dev D-eth2 scope link
+10.1.56.0/30 via 10.2.45.2 dev D-eth3       (via E: 250ms)
+10.1.57.0/30 via 10.2.45.2 dev D-eth3       (via E)
+10.1.58.0/30 via 10.2.45.2 dev D-eth3       (via E)
+10.1.67.0/30 via 10.2.45.2 dev D-eth3       (via E)
+10.1.68.0/30 via 10.2.45.2 dev D-eth3       (via E)
+10.1.78.0/30 via 10.2.45.2 dev D-eth3       (via E)
+10.2.18.0/30 via 10.0.14.1 dev D-eth0       (via A — good for .1 (20ms),
+                                              SUBOPTIMAL for .2: D→A→H=370ms
+                                              vs D→E→H=270ms; see notes below)
+10.2.45.0/30 dev D-eth3 scope link
+
+--- E ---
+10.0.12.0/30 via 10.2.45.1 dev E-eth3       (via D: 250ms)
+10.0.13.0/30 via 10.2.45.1 dev E-eth3       (via D)
+10.0.14.0/30 via 10.2.45.1 dev E-eth3       (via D)
+10.0.23.0/30 via 10.2.45.1 dev E-eth3       (via D)
+10.0.24.0/30 via 10.2.45.1 dev E-eth3       (via D)
+10.0.34.0/30 via 10.2.45.1 dev E-eth3       (via D)
+10.1.56.0/30 dev E-eth0 scope link
+10.1.57.0/30 dev E-eth1 scope link
+10.1.58.0/30 dev E-eth2 scope link
+10.1.67.0/30 via 10.1.56.2 dev E-eth0       (via F: 10ms)
+10.1.68.0/30 via 10.1.56.2 dev E-eth0       (via F: 10ms vs via H: 20ms)
+10.1.78.0/30 via 10.1.57.2 dev E-eth1       (via G: 15ms vs via H: 20ms)
+10.2.18.1    via 10.2.45.1 dev E-eth3        (/32 for A's side: via D→A = 270ms ✓)
+10.2.18.2    via 10.1.58.2 dev E-eth2        (/32 for H's side: via H = 20ms ✓)
+10.2.45.0/30 dev E-eth3 scope link
+
+--- F ---
+10.0.12.0/30 via 10.1.56.1 dev F-eth0       (via E: 10ms, then E→D)
+10.0.13.0/30 via 10.1.56.1 dev F-eth0       (via E)
+10.0.14.0/30 via 10.1.56.1 dev F-eth0       (via E)
+10.0.23.0/30 via 10.1.56.1 dev F-eth0       (via E)
+10.0.24.0/30 via 10.1.56.1 dev F-eth0       (via E)
+10.0.34.0/30 via 10.1.56.1 dev F-eth0       (via E)
+10.1.56.0/30 dev F-eth0 scope link
+10.1.57.0/30 via 10.1.67.2 dev F-eth1       (via G — SUBOPTIMAL for E's side (.1):
+                                              F→G→E=20ms vs F→E=10ms; no /32 split)
+10.1.58.0/30 via 10.1.56.1 dev F-eth0       (via E: 10ms for E's side, 30ms for H's side)
+10.1.67.0/30 dev F-eth1 scope link
+10.1.68.0/30 dev F-eth2 scope link
+10.1.78.0/30 via 10.1.67.2 dev F-eth1       (via G: 10ms)
+10.2.18.0/30 via 10.1.56.1 dev F-eth0       (via E — SUBOPTIMAL for H's side (.2):
+                                              F→E→H=30ms vs F→H=15ms direct)
+10.2.45.0/30 via 10.1.56.1 dev F-eth0       (via E: 10ms)
+
+--- G ---
+10.0.12.0/30 via 10.1.57.1 dev G-eth0       (via E: 15ms)
+10.0.13.0/30 via 10.1.57.1 dev G-eth0       (via E)
+10.0.14.0/30 via 10.1.57.1 dev G-eth0       (via E)
+10.0.23.0/30 via 10.1.57.1 dev G-eth0       (via E)
+10.0.24.0/30 via 10.1.57.1 dev G-eth0       (via E)
+10.0.34.0/30 via 10.1.57.1 dev G-eth0       (via E)
+10.1.56.1    via 10.1.57.1 dev G-eth0        (/32 E's side of E-F: via E = 15ms ✓)
+10.1.56.2    via 10.1.67.1 dev G-eth1        (/32 F's side of E-F: via F = 10ms ✓)
+10.1.57.0/30 dev G-eth0 scope link
+10.1.58.1    via 10.1.57.1 dev G-eth0        (/32 E's side of E-H: via E = 15ms ✓)
+10.1.58.2    via 10.1.78.2 dev G-eth2        (/32 H's side of E-H: via H = 10ms ✓)
+10.1.67.0/30 dev G-eth1 scope link
+10.1.68.1    via 10.1.67.1 dev G-eth1        (/32 F's side of F-H: via F = 10ms ✓)
+10.1.68.2    via 10.1.78.2 dev G-eth2        (/32 H's side of F-H: via H = 10ms ✓)
+10.1.78.0/30 dev G-eth2 scope link
+10.2.18.0/30 via 10.1.78.2 dev G-eth2       (/30 via H for H's side ✓)
+10.2.18.1    via 10.1.57.1 dev G-eth0        (/32 override for A's side: via E = 285ms ✓)
+10.2.45.0/30 via 10.1.57.1 dev G-eth0       (via E: 15ms)
+
+--- H ---
+10.0.12.0/30 via 10.1.58.1 dev H-eth0       (via E: H→E→D→B = 290ms)
+10.0.13.0/30 via 10.1.58.1 dev H-eth0       (via E: H→E→D→C = 280ms)
+10.0.14.0/30 via 10.1.58.1 dev H-eth0       (via E: H→E→D = 270ms)
+10.0.23.0/30 via 10.1.58.1 dev H-eth0       (via E)
+10.0.24.0/30 via 10.1.58.1 dev H-eth0       (via E)
+10.0.34.0/30 via 10.1.58.1 dev H-eth0       (via E)
+10.1.56.0/30 via 10.1.68.1 dev H-eth1       (via F — SUBOPTIMAL for E's side (.1):
+                                              H→F→E=25ms vs H→E=20ms direct)
+10.1.57.0/30 via 10.1.78.1 dev H-eth2       (via G: H→G→E=25ms vs H→E=20ms for E's side,
+                                              but H→G=10ms for G's side; tradeoff)
+10.1.58.0/30 dev H-eth0 scope link
+10.1.67.0/30 via 10.1.78.1 dev H-eth2       (via G: 10ms)
+10.1.68.0/30 dev H-eth1 scope link
+10.1.78.0/30 dev H-eth2 scope link
+10.2.18.0/30 dev H-eth3 scope link          (A, direct 350ms — SCOPE-LINK BLIND SPOT:
+                                              H→E→D→A = 290ms would be faster for A's side)
+10.2.45.0/30 via 10.1.58.1 dev H-eth0       (via E: 20ms)
+
+=== Per-Agent Behavior ===
+
+A:
+- All intra-cluster scope links are actually optimal (A-C=15ms < A→B→C=20ms, A-D=20ms < A→B→D=25ms)
+- Correctly routes all Network B subnets via D (the D-E backbone is the only viable path)
+- Scope-link blind spot: 10.2.18.0/30 kept direct (350ms) vs A→D→E→H = 290ms
+
+B:
+- Routes 10.2.18.0/30 via D — B's own reasoning is correct (B→D→E→H = 285ms is better
+  than B→A→H = 360ms), but D routes the /30 via A, so traffic to H actually travels
+  B→D→A→H = 385ms. A cascading failure caused by D's wrong routing decision.
+- Otherwise correct for all intra-cluster and cross-cluster routes
+
+C:
+- Routes 10.2.18.0/30 via A: correct for A's side (.1, 15ms), but H's side goes
+  C→A→H = 365ms instead of optimal C→D→E→H = 280ms. No /32 split attempted.
+
+D:
+- Detected the problem: after routing 10.2.18.0/30 via A and observing 640ms RTT to
+  10.2.18.2 (H's side), D attempted:
+    ip route replace 10.2.18.0/30 via 10.2.45.2 (via E)
+  This caused a routing LOOP: E routes 10.2.18.1/32 back to D (via 10.2.45.1), creating
+  a cycle D→E→D→... for A's side. Ping to 10.2.18.1 failed.
+  D gave up and reverted to via A, never considering /32 splitting as the solution.
+  The fix (never applied):
+    ip route add 10.2.18.2/32 via 10.2.45.2  (H's side via E: 270ms)
+    keep 10.2.18.0/30 via 10.0.14.1           (A's side via A: 20ms)
+
+E:
+- Best performer in the network: correctly /32-splits 10.2.18.0/30:
+    10.2.18.1/32 via D (E→D→A = 270ms) ✓
+    10.2.18.2/32 via H (E→H = 20ms) ✓
+- All other routes optimal
+
+F:
+- Routes 10.1.57.0/30 (E-G link) via G: initially used via E (correct), then changed to
+  via G. E's side (.1): F→G→E = 20ms vs F→E = 10ms. Optimizes for first-hop cost to
+  gateway, not per-endpoint latency. No /32 split.
+- Routes 10.2.18.0/30 via E: for H's side (.2), F→E→H = 30ms vs F→H = 15ms direct.
+  F doesn't recognize H is directly reachable and on this subnet.
+
+G:
+- Most sophisticated agent: applies /32 splitting to all ambiguous subnets in Network B
+  (10.1.56.x, 10.1.58.x, 10.1.68.x per endpoint)
+- Correctly splits 10.2.18.0/30: /30 via H for H's side + /32 override for A's side via E ✓
+- All routes optimal
+
+H:
+- Correctly identifies H→E→D→A = 290ms < 350ms direct and routes all 10.0.x subnets via E ✓
+- Scope-link blind spot on 10.2.18.0/30: applied the optimization to all remotely-learned
+  subnets but did not circle back to replace its own A-H subnet route (added as dev H-eth3).
+  A's side (10.2.18.1) is reached via 350ms direct instead of 290ms via E.
+- Routes 10.1.56.0/30 via F: explicitly changed from via E to via F reasoning "via F (15ms)
+  is faster than via E (20ms)." Optimizes first-hop cost; E's side (.1) costs 25ms vs 20ms.
+- Note: the agents describe their shortest-path computations as "using Dijkstra" — this is
+  the LLM narrating its own chain-of-thought reasoning in natural language, not executing
+  any algorithm as code.
+
+=== Assessment ===
+
+                       | A       | B       | C       | D       | E   | F       | G   | H
+-----------------------+---------+---------+---------+---------+-----+---------+-----+---------
+Connectivity           | YES     | YES     | YES     | YES     | YES | YES     | YES | YES
+Latency inferred       | YES     | YES     | YES     | YES     | YES | YES     | YES | YES
+Latency-optimal routing| PARTIAL | PARTIAL | PARTIAL | PARTIAL | YES | PARTIAL | YES | PARTIAL
+
+Only E and G achieve fully latency-optimal routing.
+
+=== Non-Optimal Routing Summary ===
+
+Scope-link blind spots (same pattern as full_mesh_4):
+  A: 10.2.18.0/30 kept direct (350ms), optimal = A→D→E→H = 290ms for H's side
+  H: 10.2.18.0/30 kept direct (350ms), optimal = H→E→D→A = 290ms for A's side
+
+Non-scope-link suboptimal decisions:
+
+  D: 10.2.18.0/30 via A (20ms for .1 ✓, 370ms for .2 vs optimal 270ms)
+     D detected the problem, tried via E, hit a routing loop (E routes .1 back to D via
+     10.2.45.1), reverted. Never considered /32 splitting. Most impactful failure: D is a
+     transit node so its wrong route cascades to B's effective path to H.
+
+  C: 10.2.18.0/30 via A (15ms for .1 ✓, 365ms for .2 vs optimal 280ms)
+     No /32 split. Wrong direction for H's side.
+
+  B: 10.2.18.0/30 via D (B's own reasoning is correct; cascades from D's bad route.
+     Traffic to H at 10.2.18.2 effectively travels B→D→A→H = 385ms)
+
+  F: 10.1.57.0/30 via G (E's side .1: 20ms vs 10ms via E direct)
+     First-hop cost reasoning without per-endpoint analysis. No /32 split.
+
+  F: 10.2.18.0/30 via E (H's side .2: 30ms vs 15ms via H direct)
+     F fails to recognize H-eth3 (10.2.18.2) is directly reachable.
+
+  H: 10.1.56.0/30 via F (E's side .1: 25ms vs 20ms via E direct)
+     Explicitly traded E's side for F's side optimization.
+
+=== Key Findings ===
+
+- The 10.2.18.0/30 (A-H inter-network) subnet is the most problematic in the network.
+  It connects two nodes (A and H) that are reachable via completely different paths from
+  most other nodes. /32 splitting is mandatory for optimal routing, but only E and G
+  apply it. E does it correctly from first principles; G uses /30 + /32 override technique.
+
+- D's attempt to fix the routing loop is the most instructive failure: it correctly
+  identified the problem (640ms RTT observed), correctly identified the fix (route via E),
+  but got trapped by a forwarding loop it couldn't diagnose. The /32 solution was available
+  but the agent gave up and reverted rather than trying a more specific route.
+
+- The "optimize direct connections" hint successfully unlocks rerouting of own-interface
+  subnets for most nodes. However, it fails for the two inter-network nodes (A and H) on
+  the 10.2.18.0/30 subnet — both keep the direct 350ms link as scope link rather than
+  rerouting via the faster 290ms path through D-E.
+
+- First-hop cost reasoning (F and H): agents sometimes minimize latency to the next-hop
+  gateway without accounting for the additional hops to reach each endpoint within the
+  target /30 subnet. F→G is 10ms and F→E is 10ms, but F routes the E-G subnet via G,
+  ignoring that E's side requires G to forward back to E (20ms total vs 10ms direct).
+
+- G is the standout performer: applies /32 splitting unprompted to all ambiguous subnets,
+  correctly handles the asymmetric 10.2.18.0/30 subnet, and achieves fully optimal routing.
+  E is the only other fully optimal node.

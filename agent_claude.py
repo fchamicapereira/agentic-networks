@@ -50,19 +50,25 @@ class AgentClaude(NodeAgent):
 
         # Claude requires all tool results batched in a single user message,
         # so we buffer them here and flush before the next API call.
+        # Received messages are buffered separately and combined with tool results
+        # on flush so we never produce two consecutive user messages.
         self._pending_tool_results = []
+        self._pending_user_content: list[dict] = []
 
-    def _flush_tool_results(self):
-        """Append buffered tool results as one user message, then clear the buffer."""
-        if self._pending_tool_results:
-            self.messages.append({"role": "user", "content": self._pending_tool_results})
+    def _flush_pending(self):
+        """Combine buffered tool results and received messages into one user message."""
+        content = self._pending_tool_results + self._pending_user_content
+        if content:
+            self.messages.append({"role": "user", "content": content})
             self._pending_tool_results = []
+            self._pending_user_content = []
 
     def request_action_from_model(self) -> LLMResponse:
-        # Flush any tool results accumulated since the last call
-        self._flush_tool_results()
+        had_pending = bool(self._pending_tool_results) or bool(self._pending_user_content)
+        self._flush_pending()
 
-        self.messages.append({"role": "user", "content": "State the next action."})
+        if not had_pending:
+            self.messages.append({"role": "user", "content": "State the next action."})
 
         response = self.client.messages.create(
             model=self.model,
@@ -97,6 +103,6 @@ class AgentClaude(NodeAgent):
         )
 
     def process_received_message(self, sender: str, message: str):
-        # Flush pending tool results first so ordering is correct
-        self._flush_tool_results()
-        self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})
+        # Buffer the received message so it gets flushed together with any pending
+        # tool results in a single user message, avoiding consecutive user messages.
+        self._pending_user_content.append({"type": "text", "text": f"[Message from {sender}]: {message}"})
