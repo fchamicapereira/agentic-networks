@@ -106,6 +106,31 @@ class AgenticNetwork:
         """Mark an agent as stopped; it will be excluded from all future steps."""
         self._stopped.add(node_name)
 
+    def gather_reports(self) -> dict[str, str]:
+        """Ask each non-stopped agent to write a report. Returns {node_name: report_text}."""
+        reports: dict[str, str] = {}
+        lock = threading.Lock()
+
+        def fetch(agent: NodeAgent) -> None:
+            try:
+                text = agent.request_report()
+            except Exception as exc:
+                self.logger.error("Failed to get report from %s: %s", agent.node_name, exc)
+                text = f"(report unavailable: {exc})"
+            with lock:
+                reports[agent.node_name] = text
+
+        threads = [
+            threading.Thread(target=fetch, args=(agent,))
+            for agent in self.agents
+            if agent.node_name not in self._stopped
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return reports
+
     def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
         if concurrent:
             return self._run_concurrent()

@@ -8,7 +8,7 @@ from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletio
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
-from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
+from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
 from message_bus import MessageBus
 from mininet.node import Host
 from network import Interface
@@ -261,3 +261,16 @@ class AgentOpenAI(NodeAgent):
 
     def process_received_message(self, sender: str, message: str):
         self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})
+
+    def request_report(self) -> str:
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
+        messages = [system_message] + self.messages + [{"role": "user", "content": REPORT_PROMPT}]
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            messages=messages,
+        )
+        content = response.choices[0].message.content or ""
+        if "<think>" in content or "</think>" in content:
+            content = _strip_thinking(content)
+        return content

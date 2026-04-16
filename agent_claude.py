@@ -3,7 +3,7 @@ import os
 import anthropic
 from anthropic.types import MessageParam, ToolUnionParam
 
-from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, StopReason, ToolUseBlock
+from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
 from message_bus import MessageBus
 from mininet.node import Host
 from network import Interface
@@ -15,13 +15,18 @@ MODELS = {
     "opus": "claude-opus-4-6",
 }
 
-TOOLS: list[ToolUnionParam] = [
+_tools_base: list[ToolUnionParam] = [
     {
         "name": t["name"],
         "description": t["description"],
         "input_schema": t["schema"],
     }
     for t in AGENT_TOOLS_DEFINITIONS
+]
+# Cache all tool definitions — mark the last entry as the cache boundary.
+TOOLS: list[ToolUnionParam] = [
+    *_tools_base[:-1],
+    {**_tools_base[-1], "cache_control": {"type": "ephemeral"}},
 ]
 
 
@@ -47,6 +52,7 @@ class AgentClaude(NodeAgent):
 
         self.client = anthropic.Anthropic(api_key=os.getenv(ANTHROPIC_API_KEY_ENV_VAR))
         self.messages: list[MessageParam] = []
+        self._system = [{"type": "text", "text": self.initial_prompt, "cache_control": {"type": "ephemeral"}}]
 
         # Claude requires all tool results batched in a single user message,
         # so we buffer them here and flush before the next API call.
@@ -73,7 +79,7 @@ class AgentClaude(NodeAgent):
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=self.initial_prompt,
+            system=self._system,
             tools=TOOLS,
             messages=self.messages,
         )
@@ -106,3 +112,14 @@ class AgentClaude(NodeAgent):
         # Buffer the received message so it gets flushed together with any pending
         # tool results in a single user message, avoiding consecutive user messages.
         self._pending_user_content.append({"type": "text", "text": f"[Message from {sender}]: {message}"})
+
+    def request_report(self) -> str:
+        self._flush_pending()
+        messages = self.messages + [{"role": "user", "content": REPORT_PROMPT}]
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=self._system,
+            messages=messages,
+        )
+        return "\n".join(b.text for b in response.content if b.type == "text")

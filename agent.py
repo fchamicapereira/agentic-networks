@@ -24,6 +24,16 @@ Using tools:
 
 WAIT_DEFAULT_TIMEOUT_S = 5
 
+REPORT_PROMPT = (
+    "The experiment is now complete. Please write a concise report describing:\n"
+    "1. The actions you took during this experiment\n"
+    "2. The justification behind each decision\n"
+    "3. What you discovered about the network\n"
+    "4. Any coordination you had with other agents\n\n"
+    "Be specific about commands you ran, routing rules you configured, and why you made each choice. "
+    "Write the report in plain text without tool calls."
+)
+
 StopReason: TypeAlias = Literal[
     "end_turn",
     "max_tokens",
@@ -188,6 +198,9 @@ class NodeAgent:
             return f"Error in {name}: {exc}", False
 
     def request_action_from_model(self) -> LLMResponse:
+        raise NotImplementedError("Must be implemented by subclass")
+
+    def request_report(self) -> str:
         raise NotImplementedError("Must be implemented by subclass")
 
     def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str):
