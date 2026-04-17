@@ -8,10 +8,10 @@ from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletio
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
-from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
-from message_bus import MessageBus
+from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
+from .message_bus import MessageBus
 from mininet.node import Host
-from network import Interface
+from .network import Interface
 
 
 MODELS = {

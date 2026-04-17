@@ -5,13 +5,13 @@ from tqdm import tqdm
 from typing import Callable
 from mininet.node import Host
 
-from agent import AgentResult, NodeAgent
-from message_bus import MessageBus
-from network import Network
-from agent_claude import AgentClaude
-from agent_claude import MODELS as CLAUDE_MODELS
-from agent_openai import AgentOpenAI
-from agent_openai import MODELS as OPENAI_MODELS
+from .agent import AgentResult, NodeAgent
+from .message_bus import MessageBus
+from .network import Network
+from .agent_claude import AgentClaude
+from .agent_claude import MODELS as CLAUDE_MODELS
+from .agent_openai import AgentOpenAI
+from .agent_openai import MODELS as OPENAI_MODELS
 
 MODELS = {**CLAUDE_MODELS, **OPENAI_MODELS}
 

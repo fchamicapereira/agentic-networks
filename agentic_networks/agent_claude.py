@@ -3,10 +3,10 @@ import os
 import anthropic
 from anthropic.types import MessageParam, ToolUnionParam
 
-from agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
-from message_bus import MessageBus
+from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
+from .message_bus import MessageBus
 from mininet.node import Host
-from network import Interface
+from .network import Interface
 
 ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 

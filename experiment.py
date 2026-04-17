@@ -9,11 +9,11 @@ from typing import Iterable
 from tqdm import tqdm
 from mininet.log import setLogLevel
 
-from agent_openai import check_server
-from agent_openai import MODELS as OPENAI_MODELS
-from agentic_network import AgenticNetwork
-from network import Network
-from visualize_network_routes import generate_network_pdf
+from agentic_networks.agent_openai import check_server
+from agentic_networks.agent_openai import MODELS as OPENAI_MODELS
+from agentic_networks.agentic_network import AgenticNetwork
+from agentic_networks.network import Network
+from agentic_networks.routes import Route
 
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -101,5 +101,5 @@ def generate_routes_pdf(
 ) -> None:
     """Render current routing state as a Graphviz PDF."""
     pdf_path = str(log_dir / f"{run_stem}-routes")
-    generate_network_pdf(network, network.get_routing_rules(route_tables), pdf_path)
+    Route.from_network(network, route_tables).render_matplotlib(pdf_path)
     logger.info("Network graph written to %s.pdf", pdf_path)

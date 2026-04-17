@@ -3,10 +3,10 @@ import pprint
 
 from typing import Literal, Optional, TypeAlias
 
-from message_bus import MessageBus
-from mininet_host import MininetHost
+from .message_bus import MessageBus
+from .mininet_host import MininetHost
 from mininet.node import Host
-from network import Interface
+from .network import Interface
 
 from dataclasses import dataclass
 

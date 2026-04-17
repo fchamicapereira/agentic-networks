@@ -1,50 +1,53 @@
-# Experiment Report: Node C
+# Experiment Report: Node C Network Configuration
 
 ## Network Topology Discovered
-A triangle topology with three nodes (A, B, C) and three links:
-- **C-A** (C-eth0): 10.0.13.0/30, netem delay 40ms per side → 80ms RTT
-- **C-B** (C-eth1): 10.0.23.0/30, netem delay 15ms per side → 30ms RTT
-- **A-B**: 10.0.12.0/30, netem delay ~10ms per side → 20ms RTT (reported by A and B)
+A three-node network with full mesh connectivity:
+- **A-B link**: 10.0.12.0/30 (~20ms RTT)
+- **A-C link**: 10.0.13.0/30 (~80ms RTT)
+- **B-C link**: 10.0.23.0/30 (~30ms RTT)
 
 ## Actions Taken
 
-### 1. Interface Discovery and Diagnostics
-- Ran `ip addr show`, `ip route show` to discover interfaces and existing routes.
-- Found two interfaces (C-eth0 to A, C-eth1 to B) but **no routes configured** at all.
-- Initial pings failed with "Network is unreachable."
+### 1. Interface Discovery
+Ran `ip addr show`, `ip route show`, and `ip link show` to assess initial state. Found two interfaces (C-eth0 at 10.0.13.2/30, C-eth1 at 10.0.23.2/30) were UP but no routes were configured.
 
-### 2. Added Connected Routes
-- `ip route add 10.0.13.0/30 dev C-eth0` (to reach A directly)
-- `ip route add 10.0.23.0/30 dev C-eth1` (to reach B directly)
-- **Justification**: These are directly connected subnets; required for any communication.
+### 2. Direct Route Configuration
+Added connected subnet routes:
+- `ip route add 10.0.13.0/30 dev C-eth0` (C-A link)
+- `ip route add 10.0.23.0/30 dev C-eth1` (C-B link)
 
-### 3. Measured Link Latencies
-- Ran `tc qdisc show dev C-eth0` → 40ms delay; `tc qdisc show dev C-eth1` → 15ms delay.
-- Pinged both peers to confirm: A at 80ms RTT, B at 30ms RTT.
-- **Justification**: Needed latency data to make optimal routing decisions for the non-directly-connected subnet (10.0.12.0/30).
+**Justification**: These are directly connected subnets and must be routed through their respective interfaces.
 
-### 4. Added Route to 10.0.12.0/30 via B
-- `ip route add 10.0.12.0/30 via 10.0.23.1 dev C-eth1`
-- **Justification**: Two paths to reach 10.0.12.0/30:
-  - Via A (10.0.13.1): 40ms one-way to A, A is directly on subnet → 80ms RTT
-  - Via B (10.0.23.1): 15ms one-way to B, B is directly on subnet → 30ms RTT; or to reach A's side (10.0.12.1): 15ms + 10ms = 25ms one-way → 50ms RTT
-  - **Via B is faster in both cases**, so route was added through B.
+### 3. Latency Measurement
+Pinged both direct peers:
+- A (10.0.13.1): ~80ms RTT
+- B (10.0.23.1): ~30ms RTT
 
-### 5. Enabled IP Forwarding
-- `sysctl -w net.ipv4.ip_forward=1`
-- **Justification**: Enables C to forward packets between A and B if needed as a transit node (though the A-B direct link at 20ms RTT is faster than A-C-B at 80+30=110ms).
+**Justification**: Needed to determine optimal routing paths for the non-directly-connected subnet (10.0.12.0/30).
 
-### 6. Final Verification
-- Pinged all four remote IPs successfully:
-  - 10.0.13.1 (A direct): 80ms RTT ✓
-  - 10.0.23.1 (B direct): 30ms RTT ✓
-  - 10.0.12.1 (A via B): 50ms RTT ✓
-  - 10.0.12.2 (B via B): 30ms RTT ✓
+### 4. Remote Subnet Route
+Added: `ip route add 10.0.12.0/30 via 10.0.23.1 dev C-eth1`
+
+**Justification**: Two options to reach the A-B subnet:
+- Via A directly: 80ms
+- Via B: 30ms (C→B) + 20ms (B→A) = 50ms
+Routing via B saves ~30ms, so B was chosen as the next hop.
+
+### 5. Connectivity Verification
+Pinged all four remote IPs successfully:
+- 10.0.13.1 (A direct): ~65-80ms
+- 10.0.12.1 (A via B): ~50ms
+- 10.0.23.1 (B direct): ~30ms
+- 10.0.12.2 (B via B): ~30ms
 
 ## Coordination with Other Agents
 
-- **With B**: Exchanged interface information and link delays. B confirmed its delays (B-A=20ms RTT, B-C=30ms RTT), agreed routing 10.0.12.0/30 via B was optimal, and added route to 10.0.13.0/30 via me (10.0.23.2).
-- **With A**: Exchanged interface info and delays. A initially suggested routing 10.0.12.0/30 via itself, but later confirmed via B was optimal. A added route to 10.0.23.0/30 via B (10.0.12.2), which is faster (20+15=35ms one-way) than via me directly (40ms one-way).
+Both A and B reached out to share interface information and subnet details. Key exchanges:
+- **From A**: Shared its interfaces (A-eth0=10.0.12.1/30 to B, A-eth1=10.0.13.1/30 to C), confirming the A-B subnet as 10.0.12.0/30.
+- **From B**: Shared its interfaces (B-eth0=10.0.12.2/30 to A, B-eth1=10.0.23.1/30 to C) and confirmed latencies (B-A ~20ms, B-C ~30ms). Confirmed IP forwarding was enabled for transit traffic.
+- **To both**: I shared my interface details, measured latencies, and routing decisions. I advised B that its optimal route to 10.0.13.0/30 should be via me (30ms) rather than via A (20ms for B-A + 80ms for A-C = 100ms). B chose to route 10.0.13.0/30 via A at 20ms, which makes sense since that's the directly connected path to that subnet's other endpoint.
 
-## Summary
-Full IP connectivity achieved across all subnets with latency-optimized routing. The key insight was that the C-B link (15ms) was significantly faster than C-A (40ms), making B the preferred transit for C to reach the A-B subnet.
+## Key Findings
+- The A-C direct link (80ms) is the highest latency link in the network.
+- The path A→B→C (20+30=50ms) is faster than the direct A→C link (80ms), making B a beneficial transit node for A-C traffic on the 10.0.12.0/30 subnet.
+- All three nodes achieved full IP connectivity across all three subnets with latency-optimized routing.

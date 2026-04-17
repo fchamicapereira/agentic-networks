@@ -20,8 +20,8 @@ import heapq
 
 from collections import defaultdict
 
-from network import Link, RoutingRule, load_topology
-from visualize_network_routes import generate_network_pdf, _network_from_links
+from .network import Link, Network, load_topology
+from .routes import Route, RoutingRule
 
 
 def _build_adjacency(links: list[Link]) -> dict[str, list[tuple[int, str]]]:
@@ -93,11 +93,10 @@ def main() -> None:
     args = parser.parse_args()
 
     links = load_topology(args.topology)
-    network = _network_from_links(links)
     rules = compute_optimal_rules(links)
 
     output = (args.output or args.topology.removesuffix(".csv")).removesuffix(".pdf")
-    generate_network_pdf(network, rules, output)
+    Route(Network(links), rules).render_matplotlib(output)
     print(f"Written to {output}.pdf")
 
     # Print a human-readable summary of the routing table.

@@ -15,8 +15,8 @@ import logging
 
 from pathlib import Path
 
-from network import load_topology, build_network, Network
-from agentic_network import AgenticNetwork, MODELS
+from agentic_networks.network import load_topology, Network
+from agentic_networks.agentic_network import AgenticNetwork, MODELS
 from experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
@@ -98,7 +98,8 @@ def main():
     check_openai_server_or_exit(args.model, openai_base_url, logger)
 
     logger.info("Building Mininet network...")
-    network = build_network(load_topology(args.topology))
+    network = Network(load_topology(args.topology))
+    network.start()
 
     node_names = sorted(network.hosts.keys())
     crashed_node = node_names[-1]
@@ -134,7 +135,7 @@ def main():
         write_agent_reports(anet, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger)
 
-        network.net.stop()
+        network.stop()
     finally:
         chown_to_user(log_dir)
 

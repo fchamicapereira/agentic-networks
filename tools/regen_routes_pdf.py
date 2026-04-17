@@ -17,8 +17,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from network import load_topology
-from visualize_network_routes import generate_network_pdf, _network_from_links
+from agentic_networks.network import load_topology, Network
+from agentic_networks.routes import Route
 
 
 def _normalize_hosts(
@@ -109,14 +109,14 @@ def regen(txt_path: Path, topo_dir: Path) -> None:
         return
 
     links = load_topology(topo_path)
-    network = _network_from_links(links)
+    network = Network(links)
     topo_nodes = list(network.hosts.keys())
     route_tables = _normalize_hosts(route_tables, topo_nodes)
-    rules = network.get_routing_rules(route_tables)
+    route = Route.from_network(network, route_tables)
 
     out = str(txt_path.with_suffix("")) + "-routes"
-    generate_network_pdf(network, rules, out)
-    print(f"  [done] {out}.pdf  ({len(rules)} rules from {len(route_tables)} hosts)")
+    route.render_matplotlib(out)
+    print(f"  [done] {out}.pdf  ({len(route.rules)} rules from {len(route_tables)} hosts)")
 
 
 def main() -> None:
