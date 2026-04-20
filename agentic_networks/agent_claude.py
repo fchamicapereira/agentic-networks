@@ -1,7 +1,7 @@
 import os
 
 import anthropic
-from anthropic.types import MessageParam, ToolUnionParam
+from anthropic.types import MessageParam, TextBlockParam, ToolUnionParam
 
 from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
 from .message_bus import MessageBus
@@ -11,22 +11,20 @@ from .network import Interface
 ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 
 MODELS = {
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6",
+    "sonnet-4-6": "claude-sonnet-4-6",
+    "opus-4-6": "claude-opus-4-6",
+    "opus-4-7": "claude-opus-4-7",
 }
 
-_tools_base: list[ToolUnionParam] = [
-    {
-        "name": t["name"],
-        "description": t["description"],
-        "input_schema": t["schema"],
-    }
-    for t in AGENT_TOOLS_DEFINITIONS
-]
 # Cache all tool definitions — mark the last entry as the cache boundary.
 TOOLS: list[ToolUnionParam] = [
-    *_tools_base[:-1],
-    {**_tools_base[-1], "cache_control": {"type": "ephemeral"}},
+    *({"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in AGENT_TOOLS_DEFINITIONS[:-1]),
+    {
+        "name": AGENT_TOOLS_DEFINITIONS[-1]["name"],
+        "description": AGENT_TOOLS_DEFINITIONS[-1]["description"],
+        "input_schema": AGENT_TOOLS_DEFINITIONS[-1]["schema"],
+        "cache_control": {"type": "ephemeral"},
+    },
 ]
 
 
@@ -52,7 +50,7 @@ class AgentClaude(NodeAgent):
 
         self.client = anthropic.Anthropic(api_key=os.getenv(ANTHROPIC_API_KEY_ENV_VAR))
         self.messages: list[MessageParam] = []
-        self._system = [{"type": "text", "text": self.initial_prompt, "cache_control": {"type": "ephemeral"}}]
+        self._system: list[TextBlockParam] = [{"type": "text", "text": self.initial_prompt, "cache_control": {"type": "ephemeral"}}]
 
         # Claude requires all tool results batched in a single user message,
         # so we buffer them here and flush before the next API call.

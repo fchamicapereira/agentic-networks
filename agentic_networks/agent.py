@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous network agent running on node {node_name} in a network testbed.
-Other nodes in the network: {other_nodes}.
+Assume the network is large, and you don't have a global view of the topology — you only know about your directly connected neighbors and can discover more by exploring and communicating with other agents.
 Physical connections:
 {connections}
 Using tools:
@@ -162,6 +162,7 @@ class NodeAgent:
     def wait(self, timeout: float = WAIT_DEFAULT_TIMEOUT_S) -> str:
         # Non-blocking: in the cooperative scheduler other agents run between iterations,
         # so blocking here would stall the whole network. Drain whatever is already queued.
+        self.log.info("Waiting for messages with timeout %.1f seconds...", timeout)
         msgs = self._drain_inbox(block=False)
         if not msgs:
             return "No messages in queue yet — will check again next iteration."
@@ -180,7 +181,6 @@ class NodeAgent:
         should_stop is True when an exec command exits with a non-zero code.
         """
         try:
-            self.log.info("%s(%s)", name, inputs)
             if name == "exec":
                 output, exit_code = self.mininet_host.exec(**inputs)
                 if exit_code != 0:
@@ -209,6 +209,67 @@ class NodeAgent:
     def process_received_message(self, sender: str, message: str):
         raise NotImplementedError("Must be implemented by subclass")
 
+    def _run_tool_blocks(
+        self,
+        tool_blocks: list[ToolUseBlock],
+        allow_report_done: bool = True,
+    ) -> Optional[AgentResult]:
+        report_done_blocks = [b for b in tool_blocks if b.tool_name == "report_done"]
+        if report_done_blocks and not allow_report_done:
+            warning = "You have already signaled completion. 'report_done' has been ignored."
+            self.log.warning(warning)
+            for b in report_done_blocks:
+                self.store_tool_results(b, warning)
+            tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
+        elif report_done_blocks and len(tool_blocks) > 1:
+            warning = (
+                "'report_done' was called alongside other tools and has been ignored. " "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
+            )
+            self.log.warning(warning)
+            for b in report_done_blocks:
+                self.store_tool_results(b, warning)
+            tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
+
+        for block in tool_blocks:
+            result, should_stop = self._execute_tool(block.tool_name, block.input)
+            self.store_tool_results(block, result)
+
+            if block.tool_name == "report_done":
+                return AgentResult(
+                    success=block.input.get("success", False),
+                    message=block.input.get("message", ""),
+                )
+
+            if should_stop:
+                stop_warning = "Execution halted: the previous command exited with a non-zero exit code. " "The remaining tools in this response were not executed. Please investigate the error above."
+                self.log.warning(stop_warning)
+                for skipped in tool_blocks[tool_blocks.index(block) + 1 :]:
+                    self.store_tool_results(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
+                break
+
+        return None
+
+    def _listen_for_messages(self):
+        """Generator: keeps the agent alive after report_done to answer incoming messages.
+
+        Drains the inbox first so messages that arrived in the same step as report_done
+        are handled immediately.  Yields once per scheduler step and exits when the
+        inbox is empty after a yield.
+        """
+        for _ in range(self.max_iterations):
+            msgs = self._drain_inbox()
+            if not msgs:
+                break
+
+            response = self.request_action_from_model()
+            for block in response.content:
+                if isinstance(block, str):
+                    self.log.info("[assistant] %s", block)
+            tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
+            self._run_tool_blocks(tool_blocks, allow_report_done=False)
+
+            yield self.max_iterations  # stay alive so other agents can still reach us
+
     def run(self):
         """Generator: runs one LLM iteration per next() call, then yields.
 
@@ -226,6 +287,9 @@ class NodeAgent:
 
         for iteration in range(self.max_iterations):
             self.log.info("--- Iteration %d/%d ---", iteration + 1, self.max_iterations)
+
+            # Drain inbox at the start so the model sees incoming messages on this turn.
+            self._drain_inbox()
 
             response = self.request_action_from_model()
 
@@ -245,46 +309,12 @@ class NodeAgent:
                 break
 
             tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
+            agent_result = self._run_tool_blocks(tool_blocks)
 
-            # report_done is only accepted when called alone
-            report_done_blocks = [b for b in tool_blocks if b.tool_name == "report_done"]
-            if report_done_blocks and len(tool_blocks) > 1:
-                warning = (
-                    "'report_done' was called alongside other tools and has been ignored. " "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
-                )
-                self.log.warning(warning)
-                for b in report_done_blocks:
-                    self.store_tool_results(b, warning)
-                tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
-
-            done = False
-            for block in tool_blocks:
-                result, should_stop = self._execute_tool(block.tool_name, block.input)
-                self.store_tool_results(block, result)
-
-                if block.tool_name == "report_done":
-                    done = True
-                    final_report = AgentResult(
-                        success=block.input.get("success", False),
-                        message=block.input.get("message", ""),
-                    )
-                    break
-
-                if should_stop:
-                    stop_warning = (
-                        "Execution halted: the previous command exited with a non-zero exit code. " "The remaining tools in this response were not executed. Please investigate the error above."
-                    )
-                    self.log.warning(stop_warning)
-                    # Notify the model about skipped tools
-                    for skipped in tool_blocks[tool_blocks.index(block) + 1 :]:
-                        self.store_tool_results(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
-                    break
-
-            # Non-blocking drain at end of every iteration
-            self._drain_inbox()
-
-            if done:
-                self.log.info("Done — %s", final_report.message)
+            if agent_result is not None:
+                self.log.info("Done — %s", agent_result.message)
+                final_report = agent_result
+                yield from self._listen_for_messages()
                 break
 
             yield iteration + 1  # give way; pass completed iteration count to scheduler
