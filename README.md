@@ -27,13 +27,13 @@ Requires Docker and Linux with privileged container support.
 
 ```bash
 # Build the image and run the script (image is rebuilt automatically on each run)
-./tools/run_in_docker.sh simple_routing.py \
+./tools/run_in_docker.sh agentic_routing.py \
     --topology topologies/pair.csv \
     --prompt prompts/routing_simple.txt \
     --model qwen2.5-72b
 ```
 
-Pass any `simple_routing.py` arguments after the script name. The script runs inside the container with the project directory mounted at `/workspace`.
+Pass any `agentic_routing.py` arguments after the script name. The script runs inside the container with the project directory mounted at `/workspace`.
 
 For Claude models, set `ANTHROPIC_API_KEY` in your environment before running — it is forwarded automatically into the container.
 
@@ -54,7 +54,7 @@ export ANTHROPIC_API_KEY=sk-...
 Mininet requires root. Use `sudo -E` to preserve environment variables:
 
 ```bash
-sudo -E env/bin/python3 simple_routing.py \
+sudo -E env/bin/python3 agentic_routing.py \
     --topology topologies/pair.csv \
     --prompt prompts/routing_simple.txt \
     --model qwen2.5-72b
@@ -63,7 +63,7 @@ sudo -E env/bin/python3 simple_routing.py \
 Run with `-h` to see the full help menu:
 
 ```bash
-sudo -E env/bin/python3 simple_routing.py -h
+sudo -E env/bin/python3 agentic_routing.py -h
 ```
 
 ## Models

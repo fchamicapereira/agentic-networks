@@ -71,6 +71,7 @@ def main():
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
     network.start()
+    network.clear_routing_tables()
 
     prompt_stem = Path(args.prompt).stem
     topology_stem = Path(args.topology).stem

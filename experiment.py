@@ -77,10 +77,11 @@ def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> 
 
 def collect_route_tables(network: Network) -> dict[str, str]:
     """Read the routing table from every host and return {node_name: routes}."""
-    return {
-        name: (host.cmd("ip route show") or "").strip()
-        for name, host in network.hosts.items()
-    }
+    result = {}
+    for name, host in network.hosts.items():
+        assert host is not None
+        result[name] = host.cmd("ip route show").strip()
+    return result
 
 
 def write_agent_reports(anet: AgenticNetwork, log_dir: Path, run_stem: str, logger: logging.Logger) -> None:

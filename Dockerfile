@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     sudo \
     git build-essential \
     mininet \
+    frr \
     iproute2 iputils-ping \
     python3-pip python3-setuptools python3-dev \
     python3-tk python3-numpy python3-scipy python3-matplotlib \
