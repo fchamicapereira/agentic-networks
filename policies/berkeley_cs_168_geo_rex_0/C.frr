@@ -1,0 +1,49 @@
+! C.frr — Customer of S, provider of D
+!
+! Relationships (Gao-Rexford):
+!   Providers: S (10.0.3.1)   — C pays S for upstream transit
+!   Customers: D (10.0.6.2)   — D pays C for transit
+!
+! C buys transit from S and resells it to D.
+! C only exports its own prefix and D's (customer) routes upstream to S —
+! re-exporting provider routes would give S free transit, violating the contract.
+!
+! Local preference:
+!   300 = customer-learned  (prefer sending via paying customers)
+!   100 = provider-learned  (last resort — costs money)
+!
+! Export policy (valley-free routing):
+!   → providers: own prefix + customer routes only
+!   → customers: full table
+
+bgp community-list standard CUSTOMER-ROUTES permit 65003:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.3.1/32
+!
+route-map FROM-PROVIDER permit 10
+ set community 65003:300
+ set local-preference 100
+!
+route-map FROM-CUSTOMER permit 10
+ set community 65003:100
+ set local-preference 300
+!
+! To provider: only own prefix and customer-learned routes.
+route-map TO-PROVIDER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PROVIDER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PROVIDER deny 30
+!
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Provider
+  neighbor 10.0.3.1 route-map FROM-PROVIDER in
+  neighbor 10.0.3.1 route-map TO-PROVIDER out
+  ! Customer
+  neighbor 10.0.6.2 route-map FROM-CUSTOMER in
+  neighbor 10.0.6.2 route-map TO-CUSTOMER out
+ exit-address-family
+!

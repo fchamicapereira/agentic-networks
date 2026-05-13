@@ -1,0 +1,68 @@
+! A.frr — Tier-1 transit AS (core)
+!
+! Relationships (Gao-Rexford):
+!   Peers:     B (10.0.1.2), C (10.0.2.2)
+!   Customers: D (10.0.4.2), F (10.1.1.1), G (10.1.2.1)
+!
+! As a tier-1 AS, A has no upstream provider — it only peers and serves customers.
+!
+! Money logic:
+!   Customers PAY A for transit → A prefers their routes and provides full connectivity.
+!   Peers exchange traffic for FREE → A only accepts/exports routes that are commercially
+!   justified (own prefix + customer routes). Re-exporting peer routes to other peers
+!   would give free transit, which violates the settlement-free agreement.
+!
+! Local preference (used for best-path selection):
+!   300 = customer-learned  (prefer sending traffic through paying customers)
+!   200 = peer-learned
+!
+! Export policy (valley-free routing):
+!   → peers:     own prefix + customer-learned routes only
+!                (do NOT re-export peer routes — no free transit)
+!   → customers: full table (they pay for global connectivity)
+!
+! BGP communities used locally to track route origin:
+!   65001:100 = learned from a customer
+!   65001:200 = learned from a peer
+
+bgp community-list standard CUSTOMER-ROUTES permit 65001:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.1.1/32
+!
+! Inbound from peers: tag + deprioritise
+route-map FROM-PEER permit 10
+ set community 65001:200
+ set local-preference 200
+!
+! Inbound from customers: tag + prioritise
+route-map FROM-CUSTOMER permit 10
+ set community 65001:100
+ set local-preference 300
+!
+! Outbound to peers: export own prefix and customer routes only.
+! Denying peer-tagged routes prevents valley routing (free transit between peers).
+route-map TO-PEER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PEER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PEER deny 30
+!
+! Outbound to customers: full table — they pay for global reachability.
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Peers
+  neighbor 10.0.1.2 route-map FROM-PEER in
+  neighbor 10.0.1.2 route-map TO-PEER out
+  neighbor 10.0.2.2 route-map FROM-PEER in
+  neighbor 10.0.2.2 route-map TO-PEER out
+  ! Customers
+  neighbor 10.0.4.2 route-map FROM-CUSTOMER in
+  neighbor 10.0.4.2 route-map TO-CUSTOMER out
+  neighbor 10.1.1.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.1.1 route-map TO-CUSTOMER out
+  neighbor 10.1.2.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.2.1 route-map TO-CUSTOMER out
+ exit-address-family
+!

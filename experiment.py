@@ -99,8 +99,9 @@ def generate_routes_pdf(
     log_dir: Path,
     run_stem: str,
     logger: logging.Logger,
+    show_delays: bool = False,
 ) -> None:
     """Render current routing state as a Graphviz PDF."""
     pdf_path = str(log_dir / f"{run_stem}-routes")
-    Route.from_network(network, route_tables).render_matplotlib(pdf_path)
+    Route.from_network(network, route_tables).render_matplotlib(pdf_path, show_delays=show_delays)
     logger.info("Network graph written to %s.pdf", pdf_path)

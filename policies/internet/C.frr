@@ -1,0 +1,58 @@
+! C.frr — Tier-1 transit AS (core)
+!
+! Relationships (Gao-Rexford):
+!   Peers:     A (10.0.2.1), B (10.0.3.1)
+!   Customers: E (10.0.6.2), J (10.1.5.1), K (10.1.6.1)
+!
+! Same tier-1 role as A and B. Sells transit to regional AS E and stubs J, K.
+!
+! Money logic:
+!   E, J, K pay C → full table exported to them.
+!   A, B are settlement-free peers → only own + customer routes exported to them.
+!   Without this restriction, C would give A free access to B's customers (and vice
+!   versa), undermining the commercial value of peering agreements.
+!
+! Local preference:
+!   300 = customer-learned
+!   200 = peer-learned
+!
+! Export policy (valley-free):
+!   → peers:     own prefix + customer-learned routes only
+!   → customers: full table
+
+bgp community-list standard CUSTOMER-ROUTES permit 65001:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.3.1/32
+!
+route-map FROM-PEER permit 10
+ set community 65001:200
+ set local-preference 200
+!
+route-map FROM-CUSTOMER permit 10
+ set community 65001:100
+ set local-preference 300
+!
+route-map TO-PEER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PEER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PEER deny 30
+!
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Peers
+  neighbor 10.0.2.1 route-map FROM-PEER in
+  neighbor 10.0.2.1 route-map TO-PEER out
+  neighbor 10.0.3.1 route-map FROM-PEER in
+  neighbor 10.0.3.1 route-map TO-PEER out
+  ! Customers
+  neighbor 10.0.6.2 route-map FROM-CUSTOMER in
+  neighbor 10.0.6.2 route-map TO-CUSTOMER out
+  neighbor 10.1.5.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.5.1 route-map TO-CUSTOMER out
+  neighbor 10.1.6.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.6.1 route-map TO-CUSTOMER out
+ exit-address-family
+!

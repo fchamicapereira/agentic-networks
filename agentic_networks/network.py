@@ -102,6 +102,11 @@ class Network:
                 )
                 counters[node] += 1
 
+        self.loopback_per_host: dict[str, str] = {
+            node: f"10.255.{i}.1/32"
+            for i, node in enumerate(sorted(self.hosts.keys()), 1)
+        }
+
     def test_all_connectivity(self) -> str:
         # For each destination host, try to reach it via any of its IPs
         dst_hosts = sorted(self.hosts.keys())
@@ -116,14 +121,11 @@ class Network:
                 if src_hostname == dst_hostname:
                     row.append("--")
                 else:
-                    reachable = False
-                    for iface in self.ifaces_per_host[dst_hostname]:
-                        ip = iface.ip.split("/")[0]
-                        out = src_host.cmd(f"ping -c 1 -W 1 {ip}")
-                        assert isinstance(out, str), f"Expected string output, got {type(out)}"
-                        if "1 received" in out or "1 packets received" in out:
-                            reachable = True
-                            break
+                    src_ip = self.loopback_per_host[src_hostname].split("/")[0]
+                    dst_ip = self.loopback_per_host[dst_hostname].split("/")[0]
+                    out = src_host.cmd(f"ping -c 1 -W 1 -I {src_ip} {dst_ip}")
+                    assert isinstance(out, str), f"Expected string output, got {type(out)}"
+                    reachable = "1 received" in out or "1 packets received" in out
                     row.append("OK" if reachable else "FAIL")
             table.add_row(row)
 
@@ -153,6 +155,7 @@ class Network:
             host = hosts[node]
             assert host is not None
             host.cmd("ip link set lo up")
+            host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo")
             for iface in ifaces:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
@@ -166,9 +169,10 @@ class Network:
             assert host is not None
             host.cmd("ip route flush table main")
 
-    def start_bgp(self, policy: str | None = None) -> dict[str, int]:
+    def start_bgp(self, policies: dict[str, str] | None = None) -> dict[str, int]:
         """Start FRR eBGP on all nodes. Each node gets its own private ASN.
 
+        policies: optional per-node FRR config snippets {node_name: frr_text}.
         Returns the ASN map {node_name: asn}.
         """
         asn_map = {node: 65000 + i for i, node in enumerate(sorted(self.hosts.keys()), 1)}
@@ -206,15 +210,17 @@ class Network:
                     f" neighbor {peer_ip} remote-as {peer_asn}",
                     f" neighbor {peer_ip} timers 1 3",
                 ]
+            loopback_ip = self.loopback_per_host[node]
             lines += [
                 " !",
                 " address-family ipv4 unicast",
-                "  redistribute connected",
+                f"  network {loopback_ip}",
                 " exit-address-family",
                 "!",
             ]
-            if policy:
-                lines.append(self._render_policy(policy, node, asn))
+            node_policy = policies.get(node) if policies else None
+            if node_policy:
+                lines.append(self._render_policy(node_policy, node, asn))
 
             (config_dir / "frr.conf").write_text("\n".join(lines) + "\n")
 

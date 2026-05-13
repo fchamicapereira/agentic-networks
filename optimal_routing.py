@@ -20,8 +20,8 @@ import heapq
 
 from collections import defaultdict
 
-from .network import Link, Network, load_topology
-from .routes import Route, RoutingRule
+from agentic_networks.network import Link, Network, load_topology
+from agentic_networks.routes import Route, RoutingRule
 
 
 def _build_adjacency(links: list[Link]) -> dict[str, list[tuple[int, str]]]:

@@ -21,7 +21,6 @@ from experiment import (
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    parser.add_argument("--prompt", "-p", required=True, metavar="FILE", help="Path to the prompt file")
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     parser.add_argument("--max-iterations", "-i", type=int, default=50, metavar="N")
@@ -31,7 +30,25 @@ def parse_args():
                         help="Run agents sequentially round-robin instead of concurrently")
     parser.add_argument("--openai-host", default="localhost", metavar="HOST")
     parser.add_argument("--openai-port", type=int, default=8000, metavar="PORT")
+
+    prompt_group = parser.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument("--prompt", "-p", metavar="FILE",
+                              help="Single prompt file given to every agent")
+    prompt_group.add_argument("--prompts-dir", metavar="DIR",
+                              help="Directory of per-node prompt files ({node}.txt)")
     return parser.parse_args()
+
+
+def load_prompts(args) -> tuple[str | dict[str, str], str]:
+    """Return (prompts, stem) where prompts is either a shared string or a per-node dict."""
+    if args.prompt:
+        p = Path(args.prompt)
+        return p.read_text(), p.stem
+    d = Path(args.prompts_dir)
+    prompts = {f.stem: f.read_text() for f in sorted(d.glob("*.txt"))}
+    if not prompts:
+        raise SystemExit(f"No .txt files found in {d}")
+    return prompts, d.name
 
 
 def write_report(network: Network, route_tables: dict[str, str], report_path: Path) -> None:
@@ -73,7 +90,7 @@ def main():
     network.start()
     network.clear_routing_tables()
 
-    prompt_stem = Path(args.prompt).stem
+    prompts, prompt_stem = load_prompts(args)
     topology_stem = Path(args.topology).stem
     run_stem = f"{prompt_stem}-{args.model}-{topology_stem}"
 
@@ -84,7 +101,7 @@ def main():
     try:
         anet = AgenticNetwork(
             network=network,
-            initial_prompt=Path(args.prompt).read_text(),
+            initial_prompts=prompts,
             model_key=args.model,
             max_iterations=args.max_iterations,
             max_tokens=args.max_tokens,
@@ -99,7 +116,7 @@ def main():
         logger.info("Report written to %s/%s.txt", log_dir, run_stem)
 
         write_agent_reports(anet, log_dir, run_stem, logger)
-        generate_routes_pdf(network, route_tables, log_dir, run_stem, logger)
+        generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
 
         network.stop()
     finally:

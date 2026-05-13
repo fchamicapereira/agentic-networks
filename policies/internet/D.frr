@@ -1,0 +1,84 @@
+! D.frr — Tier-2 regional transit AS
+!
+! Relationships (Gao-Rexford):
+!   Providers: A (10.0.4.1), B (10.0.5.1)
+!   Peer:      E (10.0.7.2)
+!   Customers: L (10.1.7.1), M (10.1.8.1)
+!
+! D buys transit from two tier-1s (A and B) for redundancy and reaches the rest
+! of the internet through them. D peers with E at the regional level (settlement-free).
+! D sells transit to stub customers L and M.
+!
+! Money logic:
+!   A and B charge D for transit → D prefers routes learned from its own customers
+!   (local-pref 300) over peer routes (200) over provider routes (100). This
+!   means D will use its providers only as a last resort, which minimises costs.
+!
+!   D does NOT re-export routes learned from A/B to E (its peer), and does NOT
+!   re-export routes from E to A/B (its providers). Doing so would make D an
+!   uncompensated transit between its providers and peer — a losing proposition.
+!
+!   D exports its own prefix and customer routes upstream (to A, B) and to E,
+!   so the rest of the internet can reach D's customers L and M.
+!
+! Local preference:
+!   300 = customer-learned  (free money — prefer routing through paying customers)
+!   200 = peer-learned      (settlement-free, use when customer path unavailable)
+!   100 = provider-learned  (costs money, use only as last resort)
+!
+! Export policy (valley-free):
+!   → providers: own prefix + customer-learned routes only
+!   → peer:      own prefix + customer-learned routes only
+!   → customers: full table (they pay for global reachability)
+
+bgp community-list standard CUSTOMER-ROUTES permit 65001:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.4.1/32
+!
+route-map FROM-CUSTOMER permit 10
+ set community 65001:100
+ set local-preference 300
+!
+route-map FROM-PEER permit 10
+ set community 65001:200
+ set local-preference 200
+!
+route-map FROM-PROVIDER permit 10
+ set community 65001:300
+ set local-preference 100
+!
+! To providers and peers: advertise only own prefix and customer routes.
+! Advertising peer or provider routes upward/sideways would make D an unpaid
+! transit — violating the valley-free property.
+route-map TO-PROVIDER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PROVIDER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PROVIDER deny 30
+!
+route-map TO-PEER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PEER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PEER deny 30
+!
+! Customers get the full routing table — they pay for global connectivity.
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Providers (buy transit from them)
+  neighbor 10.0.4.1 route-map FROM-PROVIDER in
+  neighbor 10.0.4.1 route-map TO-PROVIDER out
+  neighbor 10.0.5.1 route-map FROM-PROVIDER in
+  neighbor 10.0.5.1 route-map TO-PROVIDER out
+  ! Peer (settlement-free regional exchange)
+  neighbor 10.0.7.2 route-map FROM-PEER in
+  neighbor 10.0.7.2 route-map TO-PEER out
+  ! Customers (sell transit to them)
+  neighbor 10.1.7.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.7.1 route-map TO-CUSTOMER out
+  neighbor 10.1.8.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.8.1 route-map TO-CUSTOMER out
+ exit-address-family
+!

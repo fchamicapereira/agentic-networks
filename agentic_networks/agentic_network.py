@@ -68,6 +68,9 @@ class AgenticNetwork:
     every scheduler tick (after each round in sequential mode; every
     REACTOR_POLL_INTERVAL_S seconds in concurrent mode) and can inspect or
     mutate network state — e.g. crash a node, inject messages, etc.
+
+    ``initial_prompts`` may be a single string (shared by all agents) or a
+    dict mapping node names to individual prompt strings.
     """
 
     REACTOR_POLL_INTERVAL_S = 0.5
@@ -75,7 +78,7 @@ class AgenticNetwork:
     def __init__(
         self,
         network: Network,
-        initial_prompt: str,
+        initial_prompts: str | dict[str, str],
         model_key: str,
         max_iterations: int,
         max_tokens: int,
@@ -92,7 +95,9 @@ class AgenticNetwork:
                 node_name=name,
                 host=host,
                 bus=self.bus,
-                initial_prompt=initial_prompt,
+                initial_prompt=(
+                    initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts
+                ),
                 model_key=model_key,
                 max_iterations=max_iterations,
                 max_tokens=max_tokens,

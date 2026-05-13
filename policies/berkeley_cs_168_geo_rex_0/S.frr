@@ -1,0 +1,72 @@
+! S.frr — Customer of A, peer of B, provider of C
+!
+! Relationships (Gao-Rexford):
+!   Providers:  A (10.0.1.1)  — S pays A for upstream transit
+!   Peers:      B (10.0.2.2)  — S and B exchange traffic settlement-free
+!   Customers:  C (10.0.3.2)  — C pays S for transit
+!
+! Key economic incentive: C pays S, so S *prefers* routes learned from C
+! (local-pref 300). When D's prefix is reachable via A (provider, cost money),
+! B (peer, free), and C (customer, earns money), S will always choose the path
+! through C — this is Gao-Rexford in action.
+!
+! Local preference (drives best-path selection):
+!   300 = customer-learned  (C's routes — S earns revenue sending this way)
+!   200 = peer-learned      (B's routes — settlement-free, neutral)
+!   100 = provider-learned  (A's routes — S pays, use only as last resort)
+!
+! Export policy (valley-free routing):
+!   → providers: own prefix + customer routes only (no re-exporting peer/provider)
+!   → peers:     own prefix + customer routes only (no free transit for peers)
+!   → customers: full table (C pays for global reachability)
+
+bgp community-list standard CUSTOMER-ROUTES permit 65005:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.5.1/32
+!
+! Inbound from provider A: deprioritise (costs money)
+route-map FROM-PROVIDER permit 10
+ set community 65005:300
+ set local-preference 100
+!
+! Inbound from peer B: neutral
+route-map FROM-PEER permit 10
+ set community 65005:200
+ set local-preference 200
+!
+! Inbound from customer C: prioritise (earns money)
+! This makes S route toward D via C rather than via A or B.
+route-map FROM-CUSTOMER permit 10
+ set community 65005:100
+ set local-preference 300
+!
+! To provider/peer: only own prefix and customer (C's) routes.
+! Re-exporting peer/provider routes would give away free transit.
+route-map TO-PROVIDER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PROVIDER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PROVIDER deny 30
+!
+route-map TO-PEER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PEER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PEER deny 30
+!
+! To customer C: full table (C pays for global reachability).
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Provider
+  neighbor 10.0.1.1 route-map FROM-PROVIDER in
+  neighbor 10.0.1.1 route-map TO-PROVIDER out
+  ! Peer
+  neighbor 10.0.2.2 route-map FROM-PEER in
+  neighbor 10.0.2.2 route-map TO-PEER out
+  ! Customer
+  neighbor 10.0.3.2 route-map FROM-CUSTOMER in
+  neighbor 10.0.3.2 route-map TO-CUSTOMER out
+ exit-address-family
+!

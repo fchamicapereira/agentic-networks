@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="BGP baseline routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--topology", required=True, metavar="FILE")
-    parser.add_argument("--policy", "-p", metavar="FILE", help="FRR config snippet applied as routing policy on every node")
+    parser.add_argument("--policies-dir", "-p", metavar="DIR", help="Directory of per-node FRR policy files (<NODE>.frr)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     return parser.parse_args()
 
@@ -66,10 +66,13 @@ def main():
 
     logger = setup_logging(args.log_level)
 
-    policy = Path(args.policy).read_text() if args.policy else None
-    policy_stem = Path(args.policy).stem if args.policy else "default"
+    policies: dict[str, str] | None = None
+    if args.policies_dir:
+        policies_path = Path(args.policies_dir)
+        policies = {f.stem: f.read_text() for f in sorted(policies_path.glob("*.frr"))}
+    policies_stem = Path(args.policies_dir).name if args.policies_dir else "default"
     topology_stem = Path(args.topology).stem
-    run_stem = f"bgp-{policy_stem}-{topology_stem}"
+    run_stem = f"bgp-{policies_stem}-{topology_stem}"
 
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
@@ -77,7 +80,7 @@ def main():
 
     try:
         logger.info("Starting eBGP (one AS per node)...")
-        asn_map = network.start_bgp(policy=policy)
+        asn_map = network.start_bgp(policies=policies)
         for node, asn in sorted(asn_map.items()):
             logger.info("  %s → AS%d", node, asn)
         logger.info("BGP converged.")

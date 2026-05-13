@@ -59,7 +59,7 @@ class Route:
         rules = _parse_routing_rules(network, route_tables)
         return cls(network, rules)
 
-    def render_matplotlib(self, output_path: str) -> None:
+    def render_matplotlib(self, output_path: str, show_delays: bool = False) -> None:
         """Render routing state to a PDF using matplotlib (Kamada-Kawai layout).
 
         Physical links → thick grey lines with a boxed delay label at the midpoint.
@@ -68,8 +68,9 @@ class Route:
 
         Args:
             output_path: Destination path without extension; .pdf is appended.
+            show_delays: Whether to draw delay labels on each link.
         """
-        _render_matplotlib(self.network, self.rules, output_path)
+        _render_matplotlib(self.network, self.rules, output_path, show_delays)
 
     def render_graphviz(self, output_path: str) -> None:
         """Render routing state to a PDF using Graphviz.
@@ -88,13 +89,9 @@ class Route:
 
 def _parse_routing_rules(network: Network, route_tables: dict[str, str]) -> list[RoutingRule]:
     ip_to_node: dict[str, str] = {}
-    node_subnet_to_iface: dict[str, dict[str, str]] = {name: {} for name in network.hosts}
-
     for node_name, ifaces in network.ifaces_per_host.items():
         for iface in ifaces:
             ip_to_node[iface.ip.split("/")[0]] = node_name
-            subnet = str(ipaddress.ip_interface(iface.ip).network)
-            node_subnet_to_iface[node_name][subnet] = iface.iface
 
     rules: list[RoutingRule] = []
 
@@ -109,7 +106,8 @@ def _parse_routing_rules(network: Network, route_tables: dict[str, str]) -> list
             if not parts:
                 continue
             try:
-                net = ipaddress.ip_network(parts[0], strict=False)
+                dest = "0.0.0.0/0" if parts[0] == "default" else parts[0]
+                net = ipaddress.ip_network(dest, strict=False)
             except ValueError:
                 continue
 
@@ -138,20 +136,10 @@ def _parse_routing_rules(network: Network, route_tables: dict[str, str]) -> list
         for dst_name in network.hosts:
             if dst_name == src_name:
                 continue
-            dst_rules = [
-                (node_subnet_to_iface[dst_name][str(ipaddress.ip_interface(iface.ip).network)], nh)
-                for iface in network.ifaces_per_host[dst_name]
-                if (nh := lpm(iface.ip.split("/")[0])) is not None
-            ]
-            if not dst_rules:
-                continue
-            next_hops = {next_hop for _, next_hop in dst_rules}
-            if len(next_hops) == 1:
-                rules.append(RoutingRule(src_name, dst_name, next_hops.pop()))
-            else:
-                for iface_name, next_hop in dst_rules:
-                    label = iface_name.replace("-eth", "")  # "A-eth0" → "A0"
-                    rules.append(RoutingRule(src_name, label, next_hop))
+            loopback_ip = network.loopback_per_host[dst_name].split("/")[0]
+            nh = lpm(loopback_ip)
+            if nh is not None:
+                rules.append(RoutingRule(src_name, dst_name, nh))
 
     return rules
 
@@ -160,20 +148,21 @@ def _parse_routing_rules(network: Network, route_tables: dict[str, str]) -> list
 
 def _layout(links: list[Link]) -> dict[str, np.ndarray]:
     """
-    Kamada-Kawai layout with fourth-root-compressed shortest-path distances.
+    Kamada-Kawai layout using hop-count distances.
 
-    Computes all-pairs shortest-path delays, applies ^0.10 compression before
-    passing the distance matrix to KK, then normalises X/Y to fill the canvas.
+    A spring-layout pass is used to seed KK's initial positions. This breaks
+    the symmetry that causes KK to produce crossings on graphs where many
+    nodes are equidistant from each other (e.g. bipartite-like topologies).
     """
     G = nx.Graph()
     for link in links:
         G.add_edge(link.node1, link.node2, delay=link.delay_ms)
 
     nodes = sorted(G.nodes())
-    sp = dict(nx.all_pairs_dijkstra_path_length(G, weight="delay"))
-    dist = {a: {b: sp[a][b] ** 0.10 for b in nodes} for a in nodes}
-
-    raw = nx.kamada_kawai_layout(G, dist=dist)
+    sp = dict(nx.all_pairs_shortest_path_length(G))
+    dist = {a: {b: float(sp[a][b]) for b in nodes} for a in nodes}
+    seed_pos = nx.spring_layout(G, seed=42, iterations=100)
+    raw = nx.kamada_kawai_layout(G, dist=dist, pos=seed_pos)
 
     coords = np.array([raw[n] for n in nodes])
     lo, hi = coords.min(axis=0), coords.max(axis=0)
@@ -188,7 +177,7 @@ def _layout(links: list[Link]) -> dict[str, np.ndarray]:
     }
 
 
-def _render_matplotlib(network: Network, rules: list[RoutingRule], output_path: str) -> None:
+def _render_matplotlib(network: Network, rules: list[RoutingRule], output_path: str, show_delays: bool = False) -> None:
     node_names = sorted(network.hosts.keys())
     node_color: dict[str, str] = {
         name: _PALETTE[i % len(_PALETTE)] for i, name in enumerate(node_names)
@@ -225,19 +214,20 @@ def _render_matplotlib(network: Network, rules: list[RoutingRule], output_path: 
             np.array([-edge_vec[1], edge_vec[0]]) / edge_len
             if edge_len > 0 else np.array([0.0, 1.0])
         )
-        left_iface = iface_name.get((link.node1, link.node2), link.node1).replace("-eth", "")
-        right_iface = iface_name.get((link.node2, link.node1), link.node2).replace("-eth", "")
-        delay_label = f"{left_iface}<-{link.delay_ms}ms->{right_iface}"
-        ax.text(
-            mid[0] + perp[0] * 0.03, mid[1] + perp[1] * 0.03,
-            delay_label,
-            ha="center", va="center", fontsize=9, color="#222222",
-            bbox=dict(
-                boxstyle="round,pad=0.18", facecolor="white",
-                edgecolor="#bbbbbb", linewidth=0.8, alpha=0.92,
-            ),
-            zorder=2,
-        )
+        if show_delays:
+            left_iface = iface_name.get((link.node1, link.node2), link.node1).replace("-eth", "")
+            right_iface = iface_name.get((link.node2, link.node1), link.node2).replace("-eth", "")
+            delay_label = f"{left_iface}<-{link.delay_ms}ms->{right_iface}"
+            ax.text(
+                mid[0] + perp[0] * 0.03, mid[1] + perp[1] * 0.03,
+                delay_label,
+                ha="center", va="center", fontsize=9, color="#222222",
+                bbox=dict(
+                    boxstyle="round,pad=0.18", facecolor="white",
+                    edgecolor="#bbbbbb", linewidth=0.8, alpha=0.92,
+                ),
+                zorder=2,
+            )
 
     edge_dests: dict[tuple[str, str], list[str]] = defaultdict(list)
     for rule in rules:

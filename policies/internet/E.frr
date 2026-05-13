@@ -1,0 +1,76 @@
+! E.frr — Tier-2 regional transit AS
+!
+! Relationships (Gao-Rexford):
+!   Provider:  C (10.0.6.1)
+!   Peer:      D (10.0.7.1)
+!   Customers: N (10.1.9.1), O (10.1.10.1)
+!
+! E buys transit from tier-1 AS C for global reachability. E peers with D at the
+! regional level — both benefit from exchanging each other's customer traffic
+! without paying their respective providers for that traffic. E sells transit
+! to stub customers N and O.
+!
+! Money logic:
+!   The peer relationship with D is economically attractive: traffic between
+!   E's customers (N, O) and D's customers (L, M) flows over the free D-E link
+!   instead of going through C (which would cost E money). This is the classic
+!   incentive for regional peering.
+!
+!   E must NOT re-export C's routes to D (its peer), and must NOT re-export D's
+!   routes to C (its provider). Either would make E an uncompensated transit.
+!
+! Local preference:
+!   300 = customer-learned  (prefer — generates revenue)
+!   200 = peer-learned      (free — use over provider)
+!   100 = provider-learned  (costs money — last resort)
+!
+! Export policy (valley-free):
+!   → provider:  own prefix + customer-learned routes only
+!   → peer:      own prefix + customer-learned routes only
+!   → customers: full table
+
+bgp community-list standard CUSTOMER-ROUTES permit 65001:100
+!
+ip prefix-list OWN-PREFIX seq 5 permit 10.255.5.1/32
+!
+route-map FROM-CUSTOMER permit 10
+ set community 65001:100
+ set local-preference 300
+!
+route-map FROM-PEER permit 10
+ set community 65001:200
+ set local-preference 200
+!
+route-map FROM-PROVIDER permit 10
+ set community 65001:300
+ set local-preference 100
+!
+route-map TO-PROVIDER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PROVIDER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PROVIDER deny 30
+!
+route-map TO-PEER permit 10
+ match ip address prefix-list OWN-PREFIX
+route-map TO-PEER permit 20
+ match community CUSTOMER-ROUTES
+route-map TO-PEER deny 30
+!
+route-map TO-CUSTOMER permit 10
+!
+router bgp __ASN__
+ address-family ipv4 unicast
+  ! Provider (buy transit from C for global reachability)
+  neighbor 10.0.6.1 route-map FROM-PROVIDER in
+  neighbor 10.0.6.1 route-map TO-PROVIDER out
+  ! Peer (settlement-free: avoids paying C for D↔E traffic)
+  neighbor 10.0.7.1 route-map FROM-PEER in
+  neighbor 10.0.7.1 route-map TO-PEER out
+  ! Customers (sell transit to them)
+  neighbor 10.1.9.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.9.1 route-map TO-CUSTOMER out
+  neighbor 10.1.10.1 route-map FROM-CUSTOMER in
+  neighbor 10.1.10.1 route-map TO-CUSTOMER out
+ exit-address-family
+!
