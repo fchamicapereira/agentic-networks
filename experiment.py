@@ -9,9 +9,11 @@ from typing import Iterable
 from tqdm import tqdm
 from mininet.log import setLogLevel
 
+from agentic_networks.agent import AgentResult
 from agentic_networks.agent_openai import check_server
 from agentic_networks.agent_openai import MODELS as OPENAI_MODELS
-from agentic_networks.agentic_network import AgenticNetwork
+from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS
+from agentic_networks.agentic_network import MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
 
@@ -77,20 +79,95 @@ def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> 
 
 def collect_route_tables(network: Network) -> dict[str, str]:
     """Read the routing table from every host and return {node_name: routes}."""
-    result = {}
-    for name, host in network.hosts.items():
-        assert host is not None
-        result[name] = host.cmd("ip route show").strip()
-    return result
+    return {name: host.cmd("ip route show").strip() for name, host in network.hosts.items()}
 
 
-def write_agent_reports(anet: AgenticNetwork, log_dir: Path, run_stem: str, logger: logging.Logger) -> None:
-    """Ask each agent to write a self-report and save it to {run_stem}-{name}-report.txt."""
-    logger.info("Gathering agent self-reports...")
-    for name, text in anet.gather_reports().items():
+def collect_node_logs(log_dir: Path, run_stem: str, node_names: Iterable[str]) -> dict[str, str]:
+    """Read per-node log files from disk and return {node_name: log_text}."""
+    logs = {}
+    for name in node_names:
+        path = log_dir / f"{run_stem}-{name}.log"
+        if path.exists():
+            logs[name] = path.read_text()
+    return logs
+
+
+def write_agent_reports(reports: dict[str, str], log_dir: Path, run_stem: str, logger: logging.Logger) -> None:
+    """Save pre-gathered agent self-reports to {run_stem}-{name}-report.md."""
+    for name, text in reports.items():
         path = log_dir / f"{run_stem}-{name}-report.md"
         path.write_text(text)
         logger.info("Agent report written to %s", path)
+
+
+def write_final_report(
+    model_key: str,
+    openai_base_url: str,
+    max_tokens: int,
+    final_prompt: str,
+    agent_reports: dict[str, str],
+    agent_results: dict[str, AgentResult],
+    node_logs: dict[str, str],
+    connectivity: str,
+    route_tables: dict[str, str],
+    log_dir: Path,
+    run_stem: str,
+    logger: logging.Logger,
+) -> None:
+    """Send a one-shot analysis request to the model and write the result to {run_stem}-final-report.md."""
+    results_section = "\n".join(
+        f"{name}: {'SUCCESS' if r.success else f'INCOMPLETE — {r.message}'}"
+        for name, r in sorted(agent_results.items())
+    )
+    reports_section = "\n\n".join(
+        f"--- {name} ---\n{text}" for name, text in sorted(agent_reports.items())
+    )
+    logs_section = "\n\n".join(
+        f"--- {name} ---\n{text}" for name, text in sorted(node_logs.items())
+    )
+    routing_section = "\n\n".join(
+        f"--- {name} ---\n{route_tables.get(name, '(empty)')}" for name in sorted(route_tables)
+    )
+    context = (
+        "=== Agent Final Results ===\n\n"
+        + results_section
+        + "\n\n=== Agent Self-Reports ===\n\n"
+        + reports_section
+        + "\n\n=== Agent Logs ===\n\n"
+        + logs_section
+        + "\n\n=== Connectivity Matrix ===\n\n"
+        + connectivity
+        + "\n\n=== Routing Tables ===\n\n"
+        + routing_section
+    )
+
+    logger.info("Generating final report with model %s...", model_key)
+    if model_key in CLAUDE_MODELS:
+        import anthropic
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=CLAUDE_MODELS[model_key],
+            max_tokens=max_tokens,
+            system=final_prompt,
+            messages=[{"role": "user", "content": context}],
+        )
+        text = "\n".join(b.text for b in response.content if b.type == "text")
+    else:
+        from openai import OpenAI
+        client = OpenAI(base_url=openai_base_url, api_key="none")
+        response = client.chat.completions.create(
+            model=MODELS[model_key],
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": final_prompt},
+                {"role": "user", "content": context},
+            ],
+        )
+        text = response.choices[0].message.content or ""
+
+    path = log_dir / f"{run_stem}-final-report.md"
+    path.write_text(text)
+    logger.info("Final report written to %s", path)
 
 
 def generate_routes_pdf(

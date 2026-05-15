@@ -28,6 +28,7 @@ def _create_agent(
     max_tokens: int,
     openai_base_url: str,
     ifaces: list,
+    window_size: int,
 ) -> NodeAgent:
     model = MODELS[model_key]
     if model_key in CLAUDE_MODELS:
@@ -40,6 +41,7 @@ def _create_agent(
             max_iterations=max_iterations,
             max_tokens=max_tokens,
             ifaces=ifaces,
+            window_size=window_size,
         )
     else:
         return AgentOpenAI(
@@ -83,6 +85,7 @@ class AgenticNetwork:
         max_iterations: int,
         max_tokens: int,
         openai_base_url: str,
+        window_size: int,
         reactors: list[Reactor] = [],
     ):
         self.logger = logging.getLogger("main")
@@ -103,6 +106,7 @@ class AgenticNetwork:
                 max_tokens=max_tokens,
                 openai_base_url=openai_base_url,
                 ifaces=network.ifaces_per_host[name],
+                window_size=window_size,
             )
             for name, host in network.hosts.items()
         ]
@@ -180,7 +184,7 @@ class AgenticNetwork:
                     iteration = next(gen)
 
                     bar.n = iteration
-                    bar.set_description(f"  {agent.node_name}")
+                    bar.set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
                     bar.refresh()
 
                     still_active.append((agent, gen))
@@ -193,6 +197,16 @@ class AgenticNetwork:
 
                     self.logger.info("Agent %s finished.", agent.node_name)
             active = still_active
+
+            if active and all(agent.is_done for agent, _ in active):
+                self.logger.info("All agents have terminated. Stopping experiment early.")
+                for agent, gen in active:
+                    results[agent.node_name] = agent._final_report
+                    bars[agent.node_name].set_description(f"✓ {agent.node_name}")
+                    bars[agent.node_name].refresh()
+                    gen.close()
+                active = []
+
             global_iter += 1
 
         tqdm.write("")  # newline after all bars
@@ -272,8 +286,10 @@ class AgenticNetwork:
             still_active = []
             errors = []
             for agent, gen in active:
-                status, _, value = step_results[agent.node_name]
+                status, iteration, value = step_results[agent.node_name]
                 if status == "continue":
+                    bars[agent.node_name].set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
+                    bars[agent.node_name].refresh()
                     still_active.append((agent, gen))
                 elif status == "done":
                     results[agent.node_name] = value
@@ -286,6 +302,16 @@ class AgenticNetwork:
                 raise RuntimeError("An agent crashed — see logs above for details.")
 
             active = still_active
+
+            if active and all(agent.is_done for agent, _ in active):
+                self.logger.info("All agents have terminated. Stopping experiment early.")
+                for agent, gen in active:
+                    results[agent.node_name] = agent._final_report
+                    bars[agent.node_name].set_description(f"✓ {agent.node_name}")
+                    bars[agent.node_name].refresh()
+                    gen.close()
+                active = []
+
             step += 1
 
         tqdm.write("")  # newline after all bars

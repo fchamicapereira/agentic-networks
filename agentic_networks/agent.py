@@ -139,6 +139,8 @@ class NodeAgent:
         self.max_tokens = max_tokens
         self.model = model
         self.log = logging.getLogger(f"agent.{node_name}")
+        self.is_done = False
+        self._final_report = AgentResult(success=False, message="Max iterations reached without completion")
 
         connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
         self.initial_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -249,27 +251,6 @@ class NodeAgent:
 
         return None
 
-    def _listen_for_messages(self):
-        """Generator: keeps the agent alive after report_done to answer incoming messages.
-
-        Drains the inbox first so messages that arrived in the same step as report_done
-        are handled immediately.  Yields once per scheduler step and exits when the
-        inbox is empty after a yield.
-        """
-        for _ in range(self.max_iterations):
-            msgs = self._drain_inbox()
-            if not msgs:
-                break
-
-            response = self.request_action_from_model()
-            for block in response.content:
-                if isinstance(block, str):
-                    self.log.info("[assistant] %s", block)
-            tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
-            self._run_tool_blocks(tool_blocks, allow_report_done=False)
-
-            yield self.max_iterations  # stay alive so other agents can still reach us
-
     def run(self):
         """Generator: runs one LLM iteration per next() call, then yields.
 
@@ -280,16 +261,23 @@ class NodeAgent:
                 next(gen)
             except StopIteration as e:
                 result = e.value
+
+        Agents that call report_done stay alive to answer messages from peers.
+        They can reactivate if they choose to act on an incoming message (i.e.
+        respond with tool calls other than report_done).  The experiment ends
+        when all agents are simultaneously done or max_iterations is reached.
         """
         self.log.info("System prompt:\n%s", self.initial_prompt)
-
-        final_report = AgentResult(success=False, message="Max iterations reached without completion")
 
         for iteration in range(self.max_iterations):
             self.log.info("--- Iteration %d/%d ---", iteration + 1, self.max_iterations)
 
-            # Drain inbox at the start so the model sees incoming messages on this turn.
-            self._drain_inbox()
+            msgs = self._drain_inbox()
+
+            # Terminated and nothing to respond to — stay alive but skip LLM call.
+            if self.is_done and not msgs:
+                yield iteration + 1
+                continue
 
             response = self.request_action_from_model()
 
@@ -312,12 +300,15 @@ class NodeAgent:
             agent_result = self._run_tool_blocks(tool_blocks)
 
             if agent_result is not None:
-                self.log.info("Done — %s", agent_result.message)
-                final_report = agent_result
-                yield from self._listen_for_messages()
-                break
+                self.is_done = True
+                self._final_report = agent_result
+                self.log.info("=== AGENT TERMINATED === %s", agent_result.message)
+            elif self.is_done and tool_blocks:
+                # Was terminated but chose to act on an incoming message → reactivate.
+                self.is_done = False
+                self.log.info("=== AGENT REACTIVATED === responding to an incoming message.")
 
-            yield iteration + 1  # give way; pass completed iteration count to scheduler
+            yield iteration + 1
 
-        self.log.info("Agent run complete. Final report: %s", final_report)
-        return final_report
+        self.log.info("Agent run complete. Final report: %s", self._final_report)
+        return self._final_report

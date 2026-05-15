@@ -4,10 +4,9 @@ import tempfile
 import time
 
 from dataclasses import dataclass
+from typing import cast
 from pathlib import Path
 from prettytable import PrettyTable
-
-from typing import cast
 
 from mininet.net import Mininet
 from mininet.link import TCLink
@@ -50,9 +49,7 @@ class NetworkHost(Host):
         return result
 
     def zebra(self, config_file: Path) -> str:
-        return self.cmd(
-            f"/usr/lib/frr/zebra -d -N {self.name} -f {config_file} 2>&1"
-        )
+        return self.cmd(f"/usr/lib/frr/zebra -d -N {self.name} -f {config_file} 2>&1")
 
     def bgpd(self, config_file: Path) -> None:
         log_file = config_file.parent / "bgpd.out"
@@ -78,7 +75,7 @@ class Network:
     def __init__(self, links: list[Link]):
         self.links = links
         self.net: Mininet | None = None
-        self.hosts: dict[str, NetworkHost | None] = {}
+        self.hosts: dict[str, NetworkHost] = {}
         self.ifaces_per_host: dict[str, list[Interface]] = {}
         self._bgp_dirs: dict[str, Path] = {}
 
@@ -88,8 +85,7 @@ class Network:
                 (link.node1, link.node1_ip, link.node2, link.node2_ip),
                 (link.node2, link.node2_ip, link.node1, link.node1_ip),
             ]:
-                if node not in self.hosts:
-                    self.hosts[node] = None
+                if node not in self.ifaces_per_host:
                     self.ifaces_per_host[node] = []
                     counters[node] = 0
                 self.ifaces_per_host[node].append(
@@ -102,10 +98,7 @@ class Network:
                 )
                 counters[node] += 1
 
-        self.loopback_per_host: dict[str, str] = {
-            node: f"10.255.{i}.1/32"
-            for i, node in enumerate(sorted(self.hosts.keys()), 1)
-        }
+        self.loopback_per_host: dict[str, str] = {node: f"10.255.{i}.1/32" for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)}
 
     def test_all_connectivity(self) -> str:
         # For each destination host, try to reach it via any of its IPs
@@ -115,7 +108,6 @@ class Network:
         table.field_names = ["src \\ dst"] + dst_hosts
 
         for src_hostname, src_host in sorted(self.hosts.items()):
-            assert src_host is not None, "test_all_connectivity requires a live Mininet network"
             row = [src_hostname]
             for dst_hostname in dst_hosts:
                 if src_hostname == dst_hostname:
@@ -141,32 +133,25 @@ class Network:
         Populates self.net and self.hosts with real Mininet objects.
         Call self.net.stop() when done.
         """
-        net: Mininet = Mininet(link=TCLink, host=NetworkHost)
-        hosts: dict[str, NetworkHost | None] = {
-            name: cast(NetworkHost, net.addHost(name, ip=None)) for name in self.hosts
-        }
+        self.net = Mininet(link=TCLink, host=NetworkHost)
+        self.hosts = {name: cast(NetworkHost, self.net.addHost(name, ip=None)) for name in self.ifaces_per_host}
 
         for link in self.links:
-            net.addLink(hosts[link.node1], hosts[link.node2], delay=f"{link.delay_ms}ms")
+            self.net.addLink(self.hosts[link.node1], self.hosts[link.node2], delay=f"{link.delay_ms}ms")
 
-        net.start()
+        self.net.start()
 
         for node, ifaces in self.ifaces_per_host.items():
-            host = hosts[node]
-            assert host is not None
+            host = self.hosts[node]
             host.cmd("ip link set lo up")
             host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo")
             for iface in ifaces:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
 
-        self.net = net
-        self.hosts = hosts
-
     def clear_routing_tables(self) -> None:
         """Flush the main routing table on every node."""
         for host in self.hosts.values():
-            assert host is not None
             host.cmd("ip route flush table main")
 
     def start_bgp(self, policies: dict[str, str] | None = None) -> dict[str, int]:
@@ -178,11 +163,9 @@ class Network:
         asn_map = {node: 65000 + i for i, node in enumerate(sorted(self.hosts.keys()), 1)}
 
         for node, host in self.hosts.items():
-            assert host is not None
             host.cmd("sysctl -w net.ipv4.ip_forward=1")
 
         for node, host in self.hosts.items():
-            assert host is not None
             asn = asn_map[node]
             ifaces = self.ifaces_per_host[node]
             router_id = ifaces[0].ip.split("/")[0]
@@ -234,7 +217,6 @@ class Network:
         time.sleep(1)
 
         for node, host in self.hosts.items():
-            assert host is not None
             host.bgpd(self._bgp_dirs[node] / "frr.conf")
 
         self._wait_bgp_convergence()
@@ -254,13 +236,7 @@ class Network:
                     weight_lines.append(f" neighbor {peer_ip} weight {weight}")
                     break
 
-        return (
-            policy
-            .replace("__ASN__", str(asn))
-            .replace("__NODE__", node)
-            .replace("__ROUTER_ID__", router_id)
-            .replace("__NEIGHBOR_WEIGHTS__", "\n".join(weight_lines))
-        )
+        return policy.replace("__ASN__", str(asn)).replace("__NODE__", node).replace("__ROUTER_ID__", router_id).replace("__NEIGHBOR_WEIGHTS__", "\n".join(weight_lines))
 
     def _wait_bgp_convergence(self, timeout: int = 60) -> None:
         # Phase 1: wait for all BGP sessions to reach Established.
@@ -273,7 +249,6 @@ class Network:
         while time.time() < deadline:
             all_up = True
             for node, host in self.hosts.items():
-                assert host is not None
                 out = host.bgp_summary()
                 last_summaries[node] = out
                 if "BGP router identifier" not in out or any(token in out for token in bad_tokens):
@@ -296,7 +271,6 @@ class Network:
         while time.time() < deadline:
             counts: dict[str, int] = {}
             for node, host in self.hosts.items():
-                assert host is not None
                 routes = host.cmd("ip route show proto bgp")
                 counts[node] = len(routes.strip().splitlines()) if routes.strip() else 0
             if counts == prev_counts:
@@ -315,7 +289,6 @@ class Network:
 
     def _convergence_failure(self, last_summaries: dict[str, str], timeout: int) -> None:
         first_host = next(iter(self.hosts.values()))
-        assert first_host is not None
         ps_out = first_host.cmd("ps aux | grep bgpd | grep -v grep")
         syslog_out = first_host.cmd("grep -i 'bgpd\\|frr\\|zebra' /var/log/syslog 2>/dev/null | tail -40")
         print("\n=== BGP convergence diagnostics ===")
@@ -331,7 +304,6 @@ class Network:
     def stop_bgp(self) -> None:
         """Stop FRR daemons and clean up per-node config dirs."""
         for node, host in self.hosts.items():
-            assert host is not None
             host.stop_frr()
             if node in self._bgp_dirs:
                 shutil.rmtree(self._bgp_dirs[node], ignore_errors=True)

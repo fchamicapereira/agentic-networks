@@ -1,7 +1,8 @@
 import os
+from typing import TypeGuard
 
 import anthropic
-from anthropic.types import MessageParam, TextBlockParam, ToolUnionParam
+from anthropic.types import MessageParam, TextBlockParam, ToolUnionParam, ToolUseBlockParam
 
 from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
 from .message_bus import MessageBus
@@ -28,6 +29,10 @@ TOOLS: list[ToolUnionParam] = [
 ]
 
 
+def _is_tool_use_block(block: object) -> TypeGuard[ToolUseBlockParam]:
+    return isinstance(block, dict) and block.get("type") == "tool_use"
+
+
 class AgentClaude(NodeAgent):
     """NodeAgent backed by the Anthropic Claude API."""
 
@@ -41,6 +46,7 @@ class AgentClaude(NodeAgent):
         max_iterations: int,
         max_tokens: int,
         ifaces: list[Interface],
+        window_size: int,
     ):
         super().__init__(node_name, host, bus, initial_prompt, model, max_iterations, max_tokens, ifaces)
 
@@ -50,6 +56,7 @@ class AgentClaude(NodeAgent):
 
         self.client = anthropic.Anthropic(api_key=os.getenv(ANTHROPIC_API_KEY_ENV_VAR))
         self.messages: list[MessageParam] = []
+        self.window_size = window_size
         self._system: list[TextBlockParam] = [{"type": "text", "text": self.initial_prompt, "cache_control": {"type": "ephemeral"}}]
 
         # Claude requires all tool results batched in a single user message,
@@ -67,6 +74,42 @@ class AgentClaude(NodeAgent):
             self._pending_tool_results = []
             self._pending_user_content = []
 
+    def _windowed_messages(self) -> list[MessageParam]:
+        """Return the last window_size messages safe to send to the API.
+
+        Ensures the window never starts with a user message that contains
+        tool_result blocks referencing tool_use blocks that were dropped —
+        those orphaned results are stripped so Claude doesn't reject the request.
+        """
+        msgs = self.messages
+        if len(msgs) <= self.window_size:
+            return msgs
+
+        trimmed = list(msgs[-self.window_size :])
+
+        # The window must start with a user message.
+        while trimmed and trimmed[0]["role"] == "assistant":
+            trimmed.pop(0)
+
+        # Collect all tool_use IDs that are still present in the window.
+        present_ids: set[str] = set()
+        for msg in trimmed:
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if _is_tool_use_block(block):
+                        present_ids.add(block["id"])
+
+        # Strip orphaned tool_results from the first message.
+        first = trimmed[0]
+        first_content = first.get("content", [])
+        if isinstance(first_content, list):
+            cleaned = [b for b in first_content if not (isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") not in present_ids)]
+            if len(cleaned) < len(first_content):
+                trimmed[0] = {**first, "content": cleaned or [{"type": "text", "text": "Continue."}]}
+
+        return trimmed
+
     def request_action_from_model(self) -> LLMResponse:
         had_pending = bool(self._pending_tool_results) or bool(self._pending_user_content)
         self._flush_pending()
@@ -79,7 +122,7 @@ class AgentClaude(NodeAgent):
             max_tokens=self.max_tokens,
             system=self._system,
             tools=TOOLS,
-            messages=self.messages,
+            messages=self._windowed_messages(),
         )
 
         self.messages.append({"role": "assistant", "content": response.content})
