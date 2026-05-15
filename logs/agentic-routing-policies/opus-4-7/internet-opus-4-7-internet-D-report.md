@@ -1,52 +1,56 @@
-# AS-D Experiment Report
+# Experiment Report: AS D — Tier-2 Regional Transit
 
 ## 1. Actions Taken
 
 **Initial discovery:**
-- Ran `ip addr` and `ip route` to inventory interfaces and confirm no preexisting routes. Confirmed loopback 10.255.4.1/32 and five point-to-point /30 links (A, B, E, L, M).
+- Inspected my local interfaces with `ip addr show` and confirmed loopback `10.255.4.1/32` plus five point-to-point /30 links to A, B, E, L, M.
+- `ip route show` returned empty — no routes were pre-configured.
 
-**Neighbor coordination:**
-- Sent introductions to all five neighbors (A, B as providers; E as peer; L, M as customers), stating policy intent and requesting their prefixes.
+**Outreach:**
+- Sent introductory messages to all five neighbors (A, B, E, L, M) requesting their loopbacks and prefixes they wanted me to handle.
 
-**Link/connected routes:**
-- Installed connected routes for all five /30 transit subnets via `ip route add 10.0.X.X/30 dev D-ethN`. These were missing initially (the kernel hadn't auto-created them) and caused early "Network is unreachable" errors when trying to set next-hops.
+**Route installation (final state):**
+```
+default via 10.0.4.1 dev D-eth0 onlink            # via provider A (primary)
+10.255.1.1/32 via 10.0.4.1 dev D-eth0 onlink      # A's loopback
+10.255.2.1/32 via 10.0.5.1 dev D-eth1 onlink      # B's loopback
+10.255.5.1/32 via 10.0.7.2 dev D-eth2 onlink      # peer E
+10.255.14.1/32 via 10.0.7.2 dev D-eth2 onlink     # E's customer
+10.255.15.1/32 via 10.0.7.2 dev D-eth2 onlink     # E's customer
+10.255.12.1/32 via 10.1.7.1 dev D-eth3 onlink     # customer L
+10.255.13.1/32 via 10.1.8.1 dev D-eth4 onlink     # customer M
+```
 
-**Loopback /32 routes for direct neighbors** (dev routes, since /30 next-hops are valid only via interface):
-- `10.255.1.1` (A) via D-eth0
-- `10.255.2.1` (B) via D-eth1
-- `10.255.5.1` (E) via D-eth2
-- `10.255.12.1` (L) via D-eth3
-- `10.255.13.1` (M) via D-eth4
+**Advertisements sent:**
+- To A, B (providers) and E (peer): only `10.255.4.1/32` (mine) + `10.255.12.1/32` (L) + `10.255.13.1/32` (M).
+- Did not announce A/B/E or their prefixes to anyone else, and did not announce any /30 link subnets.
 
-**Remote prefixes installed per policy preference:**
-- Peer customers via E: `10.255.14.1` (N), `10.255.15.1` (O) via 10.0.7.2
-- Provider routes via A (10.0.4.1): C, F, G, J, K
-- Provider routes via B (10.0.5.1): H, I (B is their direct provider, so the AS-path is shorter — still all "provider" tier)
+**Verification:** Pinged all 14 known global loopbacks from `10.255.4.1` — 100% success.
 
 ## 2. Justification
 
-- **Route preference order (customer > peer > provider)** drove every next-hop selection. L and M are direct customers, so I keep their routes pinned to their links. E's prefix and E's customers (N, O) go through the peer link rather than through a provider, even when providers also know them.
-- **Advertisement policy:**
-  - To A, B (providers): only D + L + M — never re-export peer/provider routes (no uncompensated transit).
-  - To E (peer): same — only D + L + M (no provider routes).
-  - To L, M (customers): full table.
-- **Dev-only routes for /30 next-hops:** Point-to-point links have no need for a gateway IP; `via 10.x.x.x` failed with "invalid gateway" until I added the connected /30 first.
-- **Splitting H, I via B vs others via A:** Both are providers (equal cost policy-wise); I chose the natural origin per the advertisement source to minimize AS-path length, which is a tiebreaker among equal-preference providers.
+- **Default via A, not B:** A and B are both providers, so either works for policy. A responded first with a clean offer; both could have served. I picked A and informed B that it would be backup transit. (A full implementation would install B as a backup with higher metric; only one default is currently installed.)
+- **Peer routes preferred over default:** E's prefixes (5.1, 14.1, 15.1) are explicitly routed via E even though the default via A could also reach them. Peer paths are settlement-free; provider paths cost money. This maximizes revenue (= minimizes cost) per policy.
+- **Customer prefixes announced to everyone (providers + peer):** Transit for customers is the revenue source — wider propagation means more inbound traffic billed to L and M.
+- **Provider/peer prefixes NOT announced to anyone:** Announcing A's routes to B would make me transit for A (prohibited). Announcing E's routes to A/B would make me transit for a peer (prohibited). Same in reverse.
+- **No /30 link subnets advertised:** Per rules, point-to-point links are private infrastructure.
+- **`onlink` flag required:** Initial `ip route add ... via <peer>` failed because the /30 next-hop is technically "off-link" from the kernel's strict perspective. `onlink` resolves this.
 
-## 3. Discoveries About the Network
+## 3. Network Discoveries
 
-- **Topology:** 15 ASes total, all with /32 loopback identifiers in 10.255.0.0/16.
-- **Tier structure:** A and B are tier-1 transit (peer C as well). E is a regional tier-2 with customers N, O. L and M are stub customers.
-- **Reachability list learned:** A=10.255.1.1, B=10.255.2.1, C=10.255.3.1, D=10.255.4.1 (me), E=10.255.5.1, F=10.255.6.1, G=10.255.7.1, H=10.255.8.1, I=10.255.9.1, J=10.255.10.1, K=10.255.11.1, L=10.255.12.1, M=10.255.13.1, N=10.255.14.1, O=10.255.15.1.
-- **Key gotcha:** Only loopback /32s are propagated globally — the /30 transit subnets are not. Pings sourced from a /30 transit interface fail past one hop. All verification must source from the loopback (`ping -I 10.255.4.1`). A told me this; M and L confirmed the same symptom.
-- **Convergence took time:** Several destinations initially failed pings before remote ASes finished installing routes. Per the rules, I did not abandon policy-preferred paths on early failure.
+- **Topology around D:** Direct links to A (provider, 10.255.1.1), B (provider, 10.255.2.1), E (peer, 10.255.5.1), L (customer, 10.255.12.1), M (customer, 10.255.13.1).
+- **Global prefix set (from A's and B's advertisements):** loopbacks 10.255.1.1 through 10.255.15.1 exist in the testbed. Both providers offered the same set of reachable prefixes, confirming they each have global reachability — typical Tier-1-ish or well-connected upstreams.
+- **There is an AS C (10.255.3.1)** reachable only via providers — no direct adjacency from me.
+- **E has two downstream customers** (10.255.14.1 and 10.255.15.1).
+- **L and M are stub ASes** with no further customers — they only need transit for their own loopbacks.
+- **RTTs** suggest A is "farther" (default RTT ~90ms) than B (~50ms) — but policy, not latency, governs the choice.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- **A (provider):** Exchanged prefix lists. A advertised the full table (A, B, C, F, G, H, I, J, K, plus later E, J, K, N, O). A also gave the critical hint to source pings from loopback.
-- **B (provider):** Similar exchange. B advertised the same full table excluding my own/customer prefixes. B confirmed it installed L and M and propagated them globally.
-- **E (peer):** Exchanged prefixes. E advertised itself + N + O only (peer policy). E asked me to confirm L was my customer so it could prefer the peer path to L over its provider path.
-- **L (customer):** Reported 10.255.12.1/32, default route via me. Initially reported only D and M reachable; I instructed L to source pings from its loopback.
-- **M (customer):** Reported 10.255.13.1/32, default route via me. Same loopback-sourcing instruction sent.
+- **L:** Confirmed their single prefix (10.255.12.1/32), agreed I'd be their default gateway, no customers downstream.
+- **M:** Confirmed their single prefix (10.255.13.1/32), already had a default route pointing at me, confirmed end-to-end ping after my route install.
+- **A:** Exchanged loopbacks, A installed my customer prefixes for global propagation, sent me a full list of reachable global loopbacks. I use A as default.
+- **B:** Same exchange as A. B also installed my customer prefixes globally. I keep B as a backup transit (not currently installed as a metric-weighted alternate, which is a possible improvement).
+- **E:** Exchanged loopbacks and customer prefixes peer-to-peer. After initial confusion (ICMP unreachables on my side were due to missing `onlink` next-hops, not a real reachability problem), confirmed bidirectional reachability across the peering link.
 
-**Final state:** All 14 other ASes verified reachable from loopback 10.255.4.1. Policy strictly enforced: customer routes installed first, peer routes for E/N/O, providers used only for prefixes with no better path. No peer/provider routes leaked upstream.
+No private policy information (preferences, contracts, who is provider vs peer) was disclosed to any agent.

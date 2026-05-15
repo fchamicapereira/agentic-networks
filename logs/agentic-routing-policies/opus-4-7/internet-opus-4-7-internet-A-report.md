@@ -2,55 +2,58 @@
 
 ## 1. Actions Taken
 
-**Discovery phase:**
-- Inspected `ip addr` and `ip route`. Found loopback 10.255.1.1/32 and five /30 transit links (eth0→B, eth1→C, eth2→D, eth3→F, eth4→G). The main routing table was empty — no kernel-installed connected routes.
-- Sent hello messages to all 5 neighbors announcing my prefix and requesting theirs + their customer prefixes.
+**Initial discovery:**
+- Ran `ip addr show` and `ip route show` to learn my interfaces and loopback (10.255.1.1/32).
+- Sent introductory messages to all five neighbors (B, C, D, F, G) requesting their loopbacks and any customer prefixes.
 
-**Bootstrap connectivity:**
-- Manually added connected routes for each /30:
-  `ip route add 10.0.1.0/30 dev A-eth0` (and similar for eth1–eth4).
+**Connected-link routes:**
+- Discovered that no /30 link routes were preinstalled. Added them manually:
+  - `ip route add 10.0.1.0/30 dev A-eth0` (toward B)
+  - `ip route add 10.0.2.0/30 dev A-eth1` (toward C)
+  - `ip route add 10.0.4.0/30 dev A-eth2` (toward D)
+  - `ip route add 10.1.1.0/30 dev A-eth3` (toward F)
+  - `ip route add 10.1.2.0/30 dev A-eth4` (toward G)
 
-**Route installation (per BGP-style policy):**
-- D (customer): `10.255.4.1/32 via 10.0.4.2`
-- F (customer): `10.255.6.1/32 via 10.1.1.1`
-- G (customer): `10.255.7.1/32 via 10.1.2.1`
-- B (peer) + B's customers H, I: `10.255.{2,8,9}.1/32 via 10.0.1.2`
-- C (peer) + C's customers E, J, K and E's customers N, O: `10.255.{3,5,10,11,14,15}.1/32 via 10.0.2.2`
-- D's customer M: `10.255.13.1/32 via 10.0.4.2`
-- L (advertised by both B and D; D is direct customer): `10.255.12.1/32 via 10.0.4.2`
+**Loopback routes installed (per neighbor advertisements):**
+- 10.255.2.1/32 via 10.0.1.2 (B's loopback)
+- 10.255.3.1/32 via 10.0.2.2 (C's loopback)
+- 10.255.4.1/32 via 10.0.4.2 (D — customer, direct)
+- 10.255.6.1/32 via 10.1.1.1 (F — customer)
+- 10.255.7.1/32 via 10.1.2.1 (G — customer)
+- 10.255.8.1/32, 10.255.9.1/32 via 10.0.1.2 (B's customers H, I)
+- 10.255.5.1/32, 10.255.10.1/32, 10.255.11.1/32, 10.255.14.1/32, 10.255.15.1/32 via 10.0.2.2 (C's customers E, J, K and E's downstream N, O)
+- 10.255.12.1/32, 10.255.13.1/32 via 10.0.4.2 (D's downstream customers)
 
-**Advertisements:**
-- To peers B and C: only A + customer cone (A, D, F, G, L, M). Did NOT re-export routes learned from one peer to the other.
-- To customers D, F, G: full table including all peer-learned prefixes.
+**Advertisements sent:**
+- To customers D, F, G: full prefix list (transit service).
+- To peers B and C: only my customer prefixes — 10.255.4.1, 10.255.6.1, 10.255.7.1, 10.255.12.1, 10.255.13.1.
 
 **Verification:**
-- Pinged all 14 remote /32s sourced from 10.255.1.1 — 100% success.
+- Pinged all 14 remote loopbacks from my loopback (`ping -I 10.255.1.1`) — all succeeded.
 
-## 2. Justifications
+## 2. Justification
 
-- **Policy over reachability:** L was reachable via B (peer) but I installed it via D (customer) per the rule that customer routes are preferred. Same for D's /32: kept via direct link even though B also advertised it (D is multi-homed).
-- **Peer-to-peer no-transit:** When advertising to B, I explicitly excluded C's routes (E, J, K, N, O); to C, excluded B's (H, I). This preserves the settlement-free agreement.
-- **Full table to customers:** D, F, G pay for transit, so they get every prefix I know.
-- **Source-IP hint:** When customers reported reachability failures, I diagnosed it as source-IP problem (their /30 interface IPs aren't globally advertised — only loopbacks are) and advised `ping -I <loopback>`.
+- **Connected /30 routes** were a prerequisite for any next-hop resolution; the kernel rejected the first loopback-route addition until link subnets were present.
+- **Customer prefixes preferred over peer prefixes**: D is multi-homed (also a customer of B). When B advertised 10.255.4.1, 10.255.12.1, 10.255.13.1, I retained the direct-via-D path because routing to a customer generates revenue, while routing via a peer does not.
+- **Full table to customers**: customers pay for transit, so they receive every prefix I can reach (own, peer customers, my customers).
+- **Filtered advertisements to peers**: peers are settlement-free; transiting traffic for them (e.g., announcing C's customers to B) would give them free transit, violating tier-1 policy and losing revenue. So peers only see my own customers.
+- **No link /30s advertised**: per the rules, point-to-point subnets are private infrastructure.
+- **Loopback-sourced pings** (`-I 10.255.1.1`) used because link IPs are not globally advertised and replies might not route back.
+- **Did not disclose policy details** to peers/customers — only exchanged prefix data.
 
 ## 3. Network Discoveries
 
-Inferred topology:
-- Tier-1 peers: A, B, C (mutual settlement-free).
-- A's customers: D, F (stub), G (stub).
-- B's customers: D (multi-homed), H, I, plus learns L via D.
-- C's customers: E, J, K. E's customers: N, O.
-- D's customers: L, M.
-- Total of 15 ASes (A + 14 others), all using /32 loopbacks 10.255.X.1.
-- Transit /30 subnets are not propagated globally — only loopback /32s. This requires customers to source traffic from their loopback for global reachability.
-- The kernel did not auto-install connected /30 routes from interface addressing in this testbed; manual `ip route add ... dev ...` was required.
+- I sit at the top of a hierarchy with five neighbors: peers B (10.255.2.1) and C (10.255.3.1); customers D (10.255.4.1), F (10.255.6.1), G (10.255.7.1).
+- F and G are leaf customers with no downstream.
+- D has downstream customers at 10.255.12.1 and 10.255.13.1.
+- B has downstream customers H (10.255.8.1) and I (10.255.9.1), and also serves D as a multi-homed customer.
+- C has downstream customers E (10.255.5.1), J (10.255.10.1), K (10.255.11.1), and E in turn serves N (10.255.14.1) and O (10.255.15.1).
+- Total reachable remote loopbacks: 14, all reachable from my loopback after configuration.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- **B (peer):** exchanged prefix lists; both confirmed not re-exporting each other's peers. B told me about its customers H, I, and that D is also its customer (multi-homed). B later added L (from D) to its advertisements.
-- **C (peer):** exchanged prefix lists; C advertised E, J, K, N, O.
-- **D (customer):** announced 10.255.4.1/32 and customers M, then L. Reported it could not reach C/H/I/J/K from its /30 source; I advised sourcing from loopback — D confirmed full reachability afterward.
-- **F (customer, stub):** reported reachability gaps; I advised loopback sourcing and confirmed forwarding from A works.
-- **G (customer, stub):** same as F; advised loopback sourcing.
-
-Final state: A has 14 /32 routes installed with correct policy preferences, all reachable, and is correctly providing transit to D/F/G while not leaking transit between peers B and C.
+- **B (peer)**: Exchanged loopbacks and customer prefix lists. B explicitly stated it would not transit peer-to-peer traffic, consistent with my own peer policy. We agreed on next-hops (10.0.1.2 / 10.0.1.1).
+- **C (peer)**: Exchanged loopbacks and customer prefix lists with same no-transit understanding. Next-hops 10.0.2.2 / 10.0.2.1.
+- **D (customer)**: D registered as transit customer, advertised its two downstream prefixes, and uses me as default upstream.
+- **F, G (customers)**: Both confirmed they have no downstream customers; they use me as default and rely on me to globally advertise their loopbacks.
+- No information about internal policy, preferences, or contracts was revealed to any non-trusted party — only prefix and next-hop data was shared.

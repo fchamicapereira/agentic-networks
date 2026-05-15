@@ -1,49 +1,51 @@
-# K Stub AS Experiment Report
+# K Node Experiment Report
 
 ## 1. Actions Taken
 
-**Initial inspection:**
-- Ran `ip addr show` and `ip route show` to learn local state.
-- Discovered: loopback `10.255.11.1/32`, point-to-point link `K-eth0` with `10.1.6.1/30` (peer `10.1.6.2` = C). No initial routes beyond connected.
+**Initial reconnaissance:**
+- Ran `ip addr show` and `ip route show` to discover local config.
+- Found: loopback `10.255.11.1/32`, single interface `K-eth0` on `10.1.6.1/30` with peer `10.1.6.2` (C), and no routing table entries.
 
 **Routing setup:**
-- Attempted `ip route add default via 10.1.6.2`, which failed ("invalid gateway") because the /30 connected route had not yet been programmed (likely interface still settling).
-- Worked around with:
-  - `ip route add 10.1.6.2/32 dev K-eth0`
-  - `ip route add default via 10.1.6.2 dev K-eth0`
-- Final FIB: link-scope route to peer + default via C.
+- `ip route add 10.1.6.2/32 dev K-eth0` — explicit /32 link route to the peer. This was needed because my interface is configured as `/30` but the practical reachability is to a single peer address; without this, the default route's gateway resolution was failing with "Nexthop has invalid gateway."
+- `ip route add default via 10.1.6.2` — installed default toward provider C, the only sensible policy choice for a stub AS.
 
-**Peering with C:**
-- Sent C my prefix (`10.255.11.1/32`) and confirmed no customers.
-- Accepted C's offer of a full table; relied on the default route as sufficient (per C's recommendation).
+**BGP-style advertisement (via message to C):**
+- Advertised only `10.255.11.1/32` (my loopback) to C.
+- Explicitly did NOT advertise `10.1.6.0/30` (the p2p link subnet).
 
 **Verification:**
-- Pinged each AS loopback as C disclosed them. Successful: C, E, J, N, O. Persistently unreachable: A, B, D, F, G, H, I, L, M.
-- Used `traceroute -n` to 10.255.1.1: packets reach `10.1.6.2` (C) hop 1 then black-hole.
-- Sent multiple status updates to C requesting FIB verification on its end. State did not change over extended waiting.
-- Reported partial success and exited.
+- Pinged C's loopback and a representative sample of remote loopbacks across A, B, E, J, and their customers, all sourced from `-I 10.255.11.1`.
+- One destination (A: 10.255.1.1) failed on the first probe; I retried per policy and it succeeded — likely BGP convergence delay.
 
-## 2. Justification of Decisions
+## 2. Justifications
 
-- **Default route via C only:** As a stub AS with a single provider, a default route is the minimal, correct configuration. No need for specific prefixes.
-- **Advertise only own prefix:** Stub AS rule — never re-export learned routes. I told C only about `10.255.11.1/32`.
-- **Manual `/32` link route workaround:** Needed because the kernel hadn't auto-installed the connected route yet; without an on-link entry for the next hop, the default route was rejected. Once the interface stabilized, ARP succeeded and traffic flowed.
-- **Patient retries rather than reconfiguring:** Per the convergence rules, failed pings don't imply misconfiguration. I held my correct config and waited.
-- **Escalation to C:** When the partial-reachability pattern persisted well past plausible convergence time, I notified C with specific failing prefixes and asked it to verify its FIB. Beyond that, a stub AS has no levers to pull.
+- **Default route via C**: K is a stub AS with C as its sole provider. There's no alternative path and no policy decision to make beyond pointing everything at C.
+- **Advertise only loopback**: Point-to-point link subnets are private infrastructure and must never be leaked. The loopback is the only globally meaningful prefix I originate. I have no customer cone to advertise.
+- **No transit offered**: As a stub with only a provider relationship, advertising any prefix learned from C back to C (or anyone else) would constitute providing transit to a provider, which is forbidden and unprofitable.
+- **Source pings from loopback**: Link IPs aren't advertised globally; replies to them may be dropped. Loopback is the only address with guaranteed return reachability.
+- **Retry on first ping failure**: Per the rules, transient failures on a policy-preferred path should not trigger fallback. Since I have no fallback anyway (single provider), retrying was the only option, and it succeeded.
 
-## 3. Discoveries About the Network
+## 3. Network Discoveries
 
-- Topology: K is single-homed to C via `10.1.6.0/30`.
-- Address plan: each AS owns a `/32` loopback in `10.255.X.1`, where X correlates with letter index (A=1 … O=15). L was initially missing (announced later as `10.255.12.1`).
-- Path diversity observed via TTL: C (ttl 64, 1 hop), E/J (ttl 63, 2 hops), N/O (ttl 62, 3 hops) — confirming a multi-tier topology behind C.
-- Partial connectivity: some ASes reachable, others not. Forward-path traceroutes showed traffic dying at C, indicating either missing FIB entries on C for those destinations or asymmetric reverse-path failures somewhere in C's upstream cloud.
+From C's advertisement message, I learned the topology beyond my immediate neighbor:
+- **C (10.255.3.1)** — my provider.
+- **A (10.255.1.1)** with customers at 10.255.4.1, 10.255.6.1, 10.255.7.1.
+- **B (10.255.2.1)** with customers at 10.255.4.1, 10.255.8.1, 10.255.9.1. (Note: 10.255.4.1 appears under both A and B — likely a multi-homed customer.)
+- **E (10.255.5.1)** with customers 10.255.14.1, 10.255.15.1.
+- **J (10.255.10.1)** — apparently another stub like me.
+
+TTL observations from ping responses suggest:
+- C is 1 hop away (ttl 64).
+- B, E, J are 2 hops via C (ttl 63).
+- A and several customers are 3 hops (ttl 62 on some replies).
+- Some customers are 3 hops with notable latency (~140-156ms), suggesting deeper paths.
 
 ## 4. Coordination With Other Agents
 
-Only C (my provider) was contacted, which is appropriate for a stub:
-- **C → K (received):** prefix exchange request; full-table offer; list of known AS loopbacks; later L addition; assurance that routes were installed and "will converge."
-- **K → C (sent):** announced `10.255.11.1/32`, no customers; confirmed default route in place; reported reachable vs unreachable prefix sets; flagged that traceroute terminated at C; requested FIB verification for the failing destinations. C acknowledged but the situation did not resolve before the experiment ended.
+Only one peer interaction occurred — with **C**:
+1. C initiated, requesting the prefixes I wanted globally reachable.
+2. I replied advertising `10.255.11.1/32` only, and noted my default was installed pointing at 10.1.6.2.
+3. C confirmed transit was active and provided a summary of reachable prefixes via it.
 
-## Final State
-
-Local config correct and minimal: default via `10.1.6.2`, own prefix advertised. Reachability achieved to 5/14 other ASes (C, E, J, N, O). Remaining failures attributable to upstream/peer convergence outside K's control.
+No other agents were contacted, which is correct given my role: a stub AS has no peers or customers to coordinate with.

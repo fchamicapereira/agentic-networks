@@ -1,40 +1,47 @@
-# O Stub AS Experiment Report
+# Experiment Report: AS O (Stub)
 
 ## 1. Actions Taken
 
-**Discovery and link setup:**
-- Inspected interfaces: `ip addr show` — confirmed loopback 10.255.15.1/32 and O-eth0 with 10.1.10.1/30 (peer 10.1.10.2 = E).
-- Attempted `ip route add default via 10.1.10.2` — failed initially with "Nexthop has invalid gateway" because peer ARP/link not yet ready.
-- Worked around with explicit on-link route: `ip route add 10.1.10.2/32 dev O-eth0` followed by `ip route add default via 10.1.10.2`.
+**Initial discovery:**
+- Ran `ip addr show` and `ip route show` to enumerate local interfaces and routing state.
+- Found loopback 10.255.15.1/32, link O-eth0 with 10.1.10.1/30, peer at 10.1.10.2, and no pre-existing routes beyond connected.
 
-**Coordination with E:**
-- Replied to E's initial hello advertising my single prefix 10.255.15.1/32 and "no customers."
-- Asked E for prefix list when convergence appeared stuck.
+**Default route installation:**
+- First attempt: `ip route add default via 10.1.10.2` — failed with "Nexthop has invalid gateway" because 10.1.10.2 was not yet considered reachable (no ARP yet / kernel sanity check).
+- Replaced with: `ip route add default via 10.1.10.2 dev O-eth0 onlink` — succeeded. The `onlink` flag tells the kernel to trust that the gateway is directly attached on O-eth0.
+
+**Coordination with provider E:**
+- Replied to E's initial message with my loopback (10.255.15.1/32) and confirmed I have no customer prefixes.
 
 **Verification:**
-- Ran ping sweeps to 10.255.1.1 – 10.255.20.1 with the default source (link IP 10.1.10.1) — only AS-5, AS-14, and self responded.
-- After E advised, re-ran with `-I 10.255.15.1` to source from my loopback — all 15 ASes responded.
+- `ping -c 2 10.1.10.2` from the link IP confirmed L2/L3 to E worked.
+- `ping -c 2 -I 10.255.15.1 10.255.5.1` initially failed (E had not yet installed its return route), then succeeded after E installed it.
+- Iterated through a range of remote loopbacks (10.255.1.1 through 10.255.14.1) sourcing from my loopback to map global reachability. Repeated the failures once to filter out transient convergence issues.
+- Sent E a summary of reachability results.
 
 ## 2. Justification
 
-- **Default route to E:** As a stub with a single uplink, a default route via the provider is the simplest and correct policy. No BGP daemon was needed since E offered to do the heavy lifting.
-- **Advertised only 10.255.15.1/32:** Rule compliance — stub AS originates only its own prefix and re-exports nothing.
-- **No re-export:** I have only one neighbor (E), so no risk of leaking, but I also confirmed verbally I had no customers.
-- **Switching ping source to loopback:** Remote ASes have routes to AS loopbacks (10.255.x.1/32) advertised via BGP, but not to point-to-point link subnets like 10.1.10.0/30. Sourcing from the link IP made return traffic undeliverable; sourcing from loopback fixed it.
+- **Default route via E only:** As a stub AS with a single provider and no customers/peers, the simplest and correct policy is to send all non-local traffic to my provider. I have no other neighbor to compare against, so policy preference is trivial.
+- **Sourcing pings from loopback:** Per the rules, link IPs (10.1.10.0/30) are private infrastructure and never advertised, so replies to them may not return. The loopback 10.255.15.1/32 is what I asked E to carry, so it's the only sensible source.
+- **Did not advertise the point-to-point subnet:** Per the rules, link subnets are private. I only shared my loopback with E.
+- **No transit offered:** I have no customers, and I must not transit for my provider. Nothing to advertise to anyone other than E.
+- **Kept preferred path despite some unreachable destinations:** Per the rules, ping failures don't justify abandoning a policy-preferred path — and in any case I have only one upstream.
+- **Privacy:** I disclosed only what was operationally necessary to E (my loopback). I did not divulge any policy details to others (and there were no other agents to talk to).
 
 ## 3. Network Discoveries
 
-- The network has at least 15 ASes (10.255.1.1 – 10.255.15.1), all reachable via E.
-- E (AS 10.255.5.1) is my provider; from E's message, the visible topology hints: N=10.255.14.1, D=10.255.4.1, M=10.255.13.1, C=10.255.3.1, with C being E's upstream/transit.
-- Traceroute appears blocked/filtered along the path (only first hop replied), but ICMP echo works end-to-end.
-- Link subnets are not globally advertised — only loopback /32s are reachable across the AS fabric. This is a deliberate design choice for the testbed.
-- Convergence took several minutes; reachability beyond AS-14 only appeared after E completed its upstream sessions.
+- I have exactly one neighbor: E, my provider, via O-eth0 on 10.1.10.0/30.
+- E's loopback is 10.255.5.1/32.
+- Reachable remote AS loopbacks via E: 10.255.3.1, 10.255.10.1, 10.255.11.1, 10.255.14.1 (RTTs ranged ~40–136 ms, consistent with multi-hop transit through the wider internet).
+- Unreachable at test time: 10.255.1.1, 10.255.2.1, 10.255.4.1, 10.255.6.1, 10.255.7.1, 10.255.8.1, 10.255.9.1, 10.255.12.1, 10.255.13.1. These could be due to incomplete BGP propagation in the wider topology, deliberate policy filtering by other ASes, or those ASes simply not yet being configured. As a stub I cannot influence this — it is correctly handled by my provider.
+- The loopback numbering scheme (10.255.X.1/32) suggests roughly 15 ASes (A through O) exist in the testbed.
 
-## 4. Coordination with Other Agents
+## 4. Coordination
 
-Only with E (my sole neighbor / provider):
-1. E announced itself with its loopback and offered full routes.
-2. I advertised 10.255.15.1/32 and confirmed no customers.
-3. I reported partial reachability and that traceroutes died at E's interface.
-4. E diagnosed correctly that I was pinging from the wrong source and instructed me to use `-I 10.255.15.1`.
-5. After that change, full connectivity to all 15 known ASes verified. Reported done.
+**With E (provider):**
+1. E initiated contact, identifying itself, offering a default route, and asking for my loopback / customer prefixes.
+2. I replied with loopback 10.255.15.1/32 and stated I have no customer prefixes. Confirmed I had installed the default via 10.1.10.2.
+3. E confirmed it had installed a return route to 10.255.15.1 via 10.1.10.1 and that I had full global reachability.
+4. I tested and reported back the destinations that worked and noted some were unreachable but I would keep the path installed anyway.
+
+No other agents contacted me, and as a stub AS I had no reason to initiate contact with anyone else.

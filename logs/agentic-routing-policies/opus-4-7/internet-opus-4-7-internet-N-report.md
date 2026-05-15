@@ -1,47 +1,59 @@
-# AS-N Experiment Report
+# Experiment Report: Stub AS N
 
 ## 1. Actions Taken
 
-**Initial inspection:**
-- Ran `ip addr show` and `ip route show` to discover local config.
-- Found two relevant addresses: loopback `10.255.14.1/32` (my originated prefix) and link IP `10.1.9.1/30` on N-eth0, with peer `10.1.9.2` (E).
+**Initial reconnaissance:**
+- Ran `ip addr show` and `ip route show` to inventory my interfaces and routing table.
+- Found: loopback `10.255.14.1/32`, link interface `N-eth0` with `10.1.9.1/30` toward peer `10.1.9.2` (E). No routes installed beyond connected.
 
-**Route configuration:**
-- `ip route add default via 10.1.9.2` initially failed because the peer wasn't in any connected route (the /30 was already there, so this was actually a transient ARP/link issue).
-- The default route did install once the link became usable: `default via 10.1.9.2 dev N-eth0`.
+**Routing setup:**
+- Attempted `ip route add default via 10.1.9.2` — failed with "invalid gateway" because the /30 was apparently not installed as a connected route in a usable form.
+- Worked around it by first installing an explicit link-scope route: `ip route add 10.1.9.2/32 dev N-eth0`.
+- Then installed the default: `ip route add default via 10.1.9.2`.
 
 **Verification:**
-- `ping 10.1.9.2` — failed initially (ARP FAILED), succeeded ~10s later as the link converged.
-- `ping 10.255.5.1` (E loopback) — OK.
-- Probed all prefixes E advertised. Initial pings sourced from the default interface IP (10.1.9.1) failed for D/M/C/J/K.
-- After E's hint, retried with `ping -I 10.255.14.1 <target>` — all succeeded.
+- `ping -I 10.255.14.1 10.1.9.2` initially failed (E hadn't installed its return route yet).
+- After E confirmed setup, `ping -I 10.255.14.1 10.255.5.1` succeeded (~24 ms).
+- Probed other AS loopbacks (`10.255.1.1` through `10.255.15.1`); reachable: 3, 5, 10, 11, 15. Others were silent (likely unprovisioned or simply not in the topology).
 
-**Coordination with E:**
-- Announced my prefix `10.255.14.1/32`, declared myself stub with no customers.
-- Reported reachability failures; E diagnosed return-path issues and advised sourcing from loopback.
+**Advertisements:**
+- Told E only my loopback `10.255.14.1/32`. Did not share the `10.1.9.0/30` point-to-point subnet (private infrastructure rule).
+- Did not advertise anything elsewhere — I have no other neighbors.
 
 ## 2. Justifications
 
-- **Single default route via E:** As a stub, I have exactly one upstream. A default is sufficient and minimal.
-- **Advertised only `10.255.14.1/32`:** This is my own prefix. As a stub, I must not re-export any routes learned from E (no transit).
-- **Did not install any per-AS routes:** Everything goes through the default; no need to clutter the table.
-- **Sourcing pings from loopback:** Other ASes only have a route to my advertised prefix (10.255.14.1/32), not to the point-to-point link (10.1.9.0/30). Packets from 10.1.9.1 had no return path.
+- **Default route via E:** As a stub AS with only one upstream, a single default route is the simplest and correct posture. All non-local traffic must go to the provider.
+- **Link-scope route workaround:** Needed because the kernel rejected the default gateway as off-subnet. Explicitly pinning `10.1.9.2` to the device makes the next-hop resolvable.
+- **Sourcing pings from loopback (`-I 10.255.14.1`):** Per rules, link IPs are not advertised globally, so replies to them may be dropped. Only the loopback is a routable, advertised address.
+- **Only advertising the loopback to E:** Point-to-point /30s are infrastructure and must not be leaked. The loopback is the only legitimate revenue-bearing prefix I originate.
+- **No advertisements to anyone else:** I have no other neighbors, no customers, and no peers. Even if I did, as a stub I would not re-advertise routes learned from E (that would be providing transit for a provider — forbidden).
+- **Not abandoning the preferred path on initial ping failure:** When the first ping to E failed, I waited rather than tearing down the route, consistent with the policy that preferred paths should be retried before falling back.
 
 ## 3. Network Discoveries
 
-- Topology: I am singly-homed to E. E is my only provider.
-- Known ASes (loopbacks) reachable via E: E=10.255.5.1, O=10.255.15.1, D=10.255.4.1, M=10.255.13.1 (D's customer), C=10.255.3.1, J=10.255.10.1, K=10.255.11.1.
-- Links use `netem` with ~12 ms delay; initial ARP/forwarding took ~10–15 s to stabilize.
-- Some intermediate nodes appear to drop traceroute (ICMP TTL-exceeded) — only direct pings succeed.
-- Point-to-point /30 link addresses are not globally routable; only loopbacks are advertised.
+- I am a single-homed stub with exactly one neighbor: E on `N-eth0`.
+- E's loopback is `10.255.5.1/32`; RTT to it ~24 ms.
+- E provides full transit / default reachability.
+- At least these other AS loopbacks are reachable through E: `10.255.3.1` (~84 ms), `10.255.10.1` (~114 ms), `10.255.11.1` (~104 ms), `10.255.15.1` (~40 ms).
+- Several /32s in the `10.255.0.0/16` range did not respond, suggesting either unconfigured nodes or no path installed in transit ASes.
+- I did not attempt to learn the global topology — as a stub, I don't need it; the default route suffices.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Only with E (provider):
-1. E greeted me with its identity and offered the full table.
-2. I announced my prefix and stub status.
-3. I reported partial reachability; E confirmed forward-path was fine and said it had notified D/C to install my return route.
-4. E correctly diagnosed that my problem was source-address selection and instructed me to use `-I 10.255.14.1`.
-5. After that worked, I confirmed full connectivity and signaled completion.
+Only one agent interacted with me: **E (my provider).**
 
-No communication with non-adjacent ASes was needed — all reachability flows through the provider relationship.
+- **E → N:** Introduced itself, gave its loopback (`10.255.5.1/32`), confirmed the link addressing, and requested my loopback + any customer prefixes.
+- **N → E:** Replied with my loopback `10.255.14.1/32` only, explicitly noting I have no customer prefixes. Confirmed I had installed the default via `10.1.9.2`.
+- **E → N:** Confirmed it had installed a return route to `10.255.14.1` via `10.1.9.1` and asked me to verify reachability.
+- **N → E:** Confirmed successful pings to E's loopback and to several other destinations, validating end-to-end transit.
+
+I did not disclose policy details, preferences, or the fact that E is my sole provider beyond what was operationally necessary (E already knows it is my provider). No other agents contacted me, and I initiated no outbound contact beyond E.
+
+## Final State
+
+```
+default via 10.1.9.2 dev N-eth0
+10.1.9.2 dev N-eth0 scope link
+```
+
+Revenue posture: I pay E only for my own originated/received traffic. I provide transit to no one, consistent with stub-AS economics.
