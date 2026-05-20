@@ -178,7 +178,7 @@ def _layout(links: list[Link]) -> dict[str, np.ndarray]:
 
 
 def _render_matplotlib(network: Network, rules: list[RoutingRule], output_path: str, show_delays: bool = False) -> None:
-    node_names = sorted(network.hosts.keys())
+    node_names = sorted(network.ifaces_per_host.keys())
     node_color: dict[str, str] = {
         name: _PALETTE[i % len(_PALETTE)] for i, name in enumerate(node_names)
     }
@@ -203,17 +203,31 @@ def _render_matplotlib(network: Network, rules: list[RoutingRule], output_path: 
 
     for link in network.links:
         p1, p2 = pos[link.node1], pos[link.node2]
-        ax.plot(
-            [p1[0], p2[0]], [p1[1], p2[1]],
-            color="#666666", linewidth=2.5, zorder=1, solid_capstyle="round",
-        )
         mid = (p1 + p2) / 2.0
         edge_vec = p2 - p1
         edge_len = np.linalg.norm(edge_vec)
-        perp = (
-            np.array([-edge_vec[1], edge_vec[0]]) / edge_len
-            if edge_len > 0 else np.array([0.0, 1.0])
-        )
+        unit = edge_vec / edge_len if edge_len > 0 else np.array([0.0, 1.0])
+        perp = np.array([-unit[1], unit[0]])
+
+        if link.relationship == "peer/peer":
+            ax.plot(
+                [p1[0], p2[0]], [p1[1], p2[1]],
+                color="#666666", linewidth=2.5, zorder=1, solid_capstyle="round",
+            )
+        else:
+            cust_pos = p1 if link.relationship == "customer/provider" else p2
+            prov_pos = p2 if link.relationship == "customer/provider" else p1
+            vec = prov_pos - cust_pos
+            vlen = np.linalg.norm(vec)
+            if vlen > 0:
+                vunit = vec / vlen
+                ax.annotate(
+                    "", xy=prov_pos - vunit * node_radius, xytext=cust_pos + vunit * node_radius,
+                    xycoords="data", textcoords="data",
+                    arrowprops=dict(arrowstyle="-|>", color="#666666", lw=2.5, mutation_scale=15),
+                    zorder=1,
+                )
+
         if show_delays:
             left_iface = iface_name.get((link.node1, link.node2), link.node1).replace("-eth", "")
             right_iface = iface_name.get((link.node2, link.node1), link.node2).replace("-eth", "")
@@ -279,7 +293,7 @@ def _make_arrow_label(annotations: list[tuple[str, str]]) -> str:
 
 
 def _render_graphviz(network: Network, rules: list[RoutingRule], output_path: str) -> None:
-    node_names = sorted(network.hosts.keys())
+    node_names = sorted(network.ifaces_per_host.keys())
     node_color = {name: _PALETTE[i % len(_PALETTE)] for i, name in enumerate(node_names)}
 
     dot = Digraph(
@@ -300,8 +314,15 @@ def _render_graphviz(network: Network, rules: list[RoutingRule], output_path: st
         )
 
     for link in network.links:
-        fwd = tail_annotations.get((link.node1, link.node2), [])
-        rev = tail_annotations.get((link.node2, link.node1), [])
+        if link.relationship == "customer/provider":
+            tail_node, head_node = link.node1, link.node2
+        elif link.relationship == "provider/customer":
+            tail_node, head_node = link.node2, link.node1
+        else:
+            tail_node, head_node = link.node1, link.node2
+
+        fwd = tail_annotations.get((tail_node, head_node), [])
+        rev = tail_annotations.get((head_node, tail_node), [])
 
         extra: dict[str, str] = {}
         if fwd:
@@ -310,11 +331,11 @@ def _render_graphviz(network: Network, rules: list[RoutingRule], output_path: st
             extra["headlabel"] = _make_arrow_label(rev)
 
         dot.edge(
-            link.node1,
-            link.node2,
+            tail_node,
+            head_node,
             label=f" {link.delay_ms}ms",
             color="black",
-            dir="none",
+            dir="none" if link.relationship == "peer/peer" else "forward",
             penwidth="2.0",
             labeldistance="2.5",
             labelangle="20",

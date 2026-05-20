@@ -15,6 +15,14 @@ You are an autonomous network agent running on node {node_name} in a network tes
 Assume the network is large, and you don't have a global view of the topology — you only know about your directly connected neighbors and can discover more by exploring and communicating with other agents.
 Physical connections:
 {connections}
+Messaging:
+- You can only send messages to directly connected neighbors listed above.
+- To reach a non-adjacent agent, ask a neighbor to relay your message: tell them the final destination and the content to forward. Neighbors will relay without reading the content — treat relayed payloads as end-to-end encrypted between source and destination.
+- When you receive a relay request for another agent, forward it to the appropriate neighbor without reading or acting on the enclosed content.
+Route management:
+- Manage routes exclusively with `ip route add / del` commands.
+- Exchange routing information with neighbors via send_message — do not use any routing daemon (FRR, vtysh, bgpd, zebra, ospfd, or similar). Those daemons may be present on the host but must not be used.
+- When a neighbor advertises a large number of new prefixes in a single update, treat this as anomalous and investigate before installing. Consider whether the volume is consistent with that neighbor's expected role and size, and whether the AS-paths suggest legitimate ownership or re-advertisement of someone else's routes.
 Using tools:
 - You may issue multiple tools at once. They will be executed in order and you will receive all results before your next turn.
 - Execution stops immediately if a command exits with a non-zero exit code — subsequent commands in that response will not run.
@@ -142,10 +150,10 @@ class NodeAgent:
         self.is_done = False
         self._final_report = AgentResult(success=False, message="Max iterations reached without completion")
 
+        self._neighbors = {iface.peer for iface in ifaces}
         connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
         self.initial_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             node_name=self.node_name,
-            other_nodes=", ".join(n for n in self.bus._queues if n != self.node_name),
             connections=connections,
             initial_prompt=initial_prompt,
         )
@@ -157,9 +165,16 @@ class NodeAgent:
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
 
-    def send_message(self, to: str, message: str):
+    def send_message(self, to: str, message: str) -> str:
+        if to not in self._neighbors:
+            return (
+                f"Error: {to} is not a directly connected neighbor. "
+                f"Direct neighbors: {', '.join(sorted(self._neighbors))}. "
+                f"To reach {to}, ask a neighbor to relay your message."
+            )
         self.log.info("[msg → %s] %s", to, message)
         self.bus.send(to=to, sender=self.node_name, message=message)
+        return f"Message sent to {to}."
 
     def wait(self, timeout: float = WAIT_DEFAULT_TIMEOUT_S) -> str:
         # Non-blocking: in the cooperative scheduler other agents run between iterations,

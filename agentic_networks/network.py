@@ -20,6 +20,7 @@ class Link:
     delay_ms: int
     node1_ip: str
     node2_ip: str
+    relationship: str = "peer/peer"  # "customer/provider", "provider/customer", or "peer/peer"
 
 
 @dataclass
@@ -331,6 +332,8 @@ def load_topology(path: str | Path) -> list[Link]:
         for row in csv.reader(f):
             if not row or row[0].lstrip().startswith("#"):
                 continue
-            host1, host2, delay_ms, host1_ip, host2_ip = [c.strip() for c in row]
-            links.append(Link(host1, host2, int(delay_ms), host1_ip, host2_ip))
+            cols = [c.strip() for c in row]
+            host1, host2, delay_ms, host1_ip, host2_ip = cols[:5]
+            relationship = cols[5] if len(cols) > 5 else "peer/peer"
+            links.append(Link(host1, host2, int(delay_ms), host1_ip, host2_ip, relationship))
     return links

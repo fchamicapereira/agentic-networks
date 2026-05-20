@@ -1,0 +1,48 @@
+#host1,host2,delay_ms,host1_ip,host2_ip,relationship
+# Telekom Malaysia (AS4788) BGP transit route leak — June 2015.
+# Traffic-attraction via short-path preference (no artificial congestion).
+#
+# Roles:
+#   Tier1  — Tier-1 backbone; peers with Level3; provider of Relay1 chain
+#   Level3 — Tier-1 backbone; peers with Tier1; provider of TM
+#   TM     — leaker (Telekom Malaysia); customer of Level3 AND ISP (dual-homed);
+#            re-advertises routes learned from Level3 to ISP ([TM, Level3, X])
+#            re-advertises routes learned from ISP to Level3 ([TM, ISP, Y])
+#   Relay1 — relay AS; customer of Tier1, provider of Relay2
+#   Relay2 — relay AS; customer of Relay1, provider of Relay3
+#   Relay3 — relay AS; customer of Relay2, provider of ISP
+#   ISP    — victim/observer; customer of Relay3, provider of TM;
+#            has two paths to Level3's prefixes:
+#              via customer TM:    path [TM, Level3, X]                    — customer local-pref (preferred)
+#              via provider chain: path [Relay3, Relay2, Relay1, Tier1, Level3, X] — provider local-pref
+#            Level3 has two paths to ISP's prefixes:
+#              via customer TM:  path [TM, ISP, Y]                         — customer local-pref (preferred)
+#              via peer Tier1:   path [Tier1, Relay1, Relay2, Relay3, ISP, Y] — peer local-pref
+#
+# Key mechanism:
+#   1. Level3 and ISP each have their own large routing tables, advertised to customer TM
+#   2. TM re-leaks Level3's routes to ISP   — valley-free violation (provider route → other provider)
+#   3. TM re-leaks ISP's routes to Level3   — symmetric valley-free violation
+#   4. Both ISP and Level3 strongly prefer TM's routes (customer > peer/provider)
+#      despite having legitimate alternative paths via the relay chain / Tier1 peering
+#   5. Back-leaks ([TM, Level3, X] → Level3 and [TM, ISP, Y] → ISP) are rejected by loop detection
+#
+# Key difference from origin forgery (AS7007):
+#   AS7007 stripped AS-paths and claimed self-origination
+#   Telekom: TM preserves full paths — legitimate origins remain visible
+#   TM is lying about being a good transit hub, not about who owns the prefixes
+
+# --- Tier-1 peering ---
+Tier1,Level3,20,10.0.10.1/30,10.0.10.2/30,peer/peer
+
+# --- Relay chain (Tier1 side) ---
+Tier1,Relay1,10,10.0.11.1/30,10.0.11.2/30,provider/customer
+Relay1,Relay2,15,10.0.13.1/30,10.0.13.2/30,provider/customer
+Relay2,Relay3,15,10.0.14.1/30,10.0.14.2/30,provider/customer
+Relay3,ISP,20,10.0.15.1/30,10.0.15.2/30,provider/customer
+
+# --- Level3 → TM (leak source) ---
+Level3,TM,25,10.0.12.1/30,10.0.12.2/30,provider/customer
+
+# --- TM → ISP (traffic attraction link) ---
+TM,ISP,10,10.0.16.1/30,10.0.16.2/30,customer/provider

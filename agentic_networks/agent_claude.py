@@ -1,4 +1,5 @@
 import os
+import time
 from typing import TypeGuard
 
 import anthropic
@@ -10,6 +11,7 @@ from mininet.node import Host
 from .network import Interface
 
 ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
+ANTHROPIC_STATUS_ERROR_HTTP_OVERLOADED = 529
 
 MODELS = {
     "sonnet-4-6": "claude-sonnet-4-6",
@@ -117,13 +119,24 @@ class AgentClaude(NodeAgent):
         if not had_pending:
             self.messages.append({"role": "user", "content": "State the next action."})
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=self._system,
-            tools=TOOLS,
-            messages=self._windowed_messages(),
-        )
+        for attempt in range(20):
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=self._system,
+                    tools=TOOLS,
+                    messages=self._windowed_messages(),
+                )
+                break
+            except anthropic.APIStatusError as e:
+                if e.status_code != ANTHROPIC_STATUS_ERROR_HTTP_OVERLOADED:
+                    raise
+                if attempt == 19:
+                    raise
+                wait = min(10 * 2 ** attempt, 120)
+                self.log.warning("API overloaded (attempt %d/20), retrying in %ds...", attempt + 1, wait)
+                time.sleep(wait)
 
         self.messages.append({"role": "assistant", "content": response.content})
 

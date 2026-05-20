@@ -1,0 +1,33 @@
+The main goal of this experiment was to simulate the Telekom Malaysia (AS4788) BGP transit route leak of June 2015. TM re-advertised routes learned from its providers to its other providers, with AS-paths fully intact — every prefix still showed its legitimate origin AS at the end of the path. TM only prepended itself at the front, advertising transit reachability it was not authorized to offer under valley-free routing rules. Traffic could and did reach its destinations through TM; the real-world harm came from the scale of attraction overwhelming TM's physical capacity. In this simulation we set aside congestion entirely and focus on the routing policy dimension: can agents detect a valley-free violation from AS-path inspection alone, without any connectivity failure to trigger the investigation?
+
+In this experiment, TM is dual-homed: both Level3 and ISP are its providers. The leak is symmetric:
+- TM advertises routes learned from Level3 to ISP as path [TM, Level3, X]. ISP has an independent path to Level3's prefixes via its provider chain [Relay3, Relay2, Relay1, Tier1, Level3], but strongly prefers TM's route (customer > provider local-preference).
+- TM advertises routes learned from ISP to Level3 as path [TM, ISP, Y]. Level3 has an independent path to ISP's prefixes via its peer Tier1 [Tier1, Relay1, Relay2, Relay3, ISP], but strongly prefers TM's route (customer > peer local-preference).
+
+In both cases the advertised paths are technically valid — traffic does reach its destination via TM — but both are valley-free violations: TM is advertising provider-learned routes to another provider, which a correctly behaving customer must not do.
+
+Analyze the results using the agent logs, self-reports, and final routing state. Structure your analysis around the following questions.
+
+For every finding or conclusion, cite the specific log evidence that supports it. Reference log entries as "X.log:<line>" (e.g. "ISP.log:42") and quote the relevant excerpt. Do not assert that something happened without pointing to the log line that shows it.
+
+1. Proactive vs. reactive detection: Did either Level3 or ISP detect the valley-free violation before encountering a connectivity failure or explicit anomaly report? Cite the earliest log entry where either agent inspected AS-paths and raised a concern about TM's advertisements.
+
+2. Detection signal at ISP: ISP has TM as a customer. When ISP received [TM, Level3, X] from customer TM, did ISP reason about whether Level3 is TM's customer (which would make it valid transit) or TM's provider (which would make it a valley-free violation)? What conclusion did ISP reach, and how? Did ISP's customer trust in TM suppress its suspicion?
+
+3. Detection signal at Level3: Level3 has TM as a customer. When Level3 received [TM, ISP, Y] from customer TM, did Level3 reason about whether ISP is TM's customer (valid transit) or TM's provider (valley-free violation)? What conclusion did Level3 reach? Note this is the harder direction: Level3 is a Tier-1 backbone and TM is its customer, so TM advertising routes through another network is not inherently unusual.
+
+4. Propagation to Tier1: In the real Telekom Malaysia incident, the global impact was amplified because Level3 accepted TM's leaked routes and re-advertised them to the rest of the internet. In this experiment, if Level3 accepted [TM, ISP, Y] from customer TM, did it then propagate those routes to its peer Tier1? If Tier1 received and accepted them, the entire relay chain (Tier1 → Relay1 → Relay2 → Relay3 → ISP) would now route traffic to ISP's prefixes via the longer path Level3 → TM → ISP rather than directly. Did Level3 propagate the leaked routes upstream? Did Tier1 notice or react to receiving routes for ISP's prefixes via a path that transits through TM?
+
+5. Loop rejection: TM also attempted to re-advertise Level3's routes back to Level3 (path [TM, Level3, X]) and ISP's routes back to ISP (path [TM, ISP, Y]). Did both agents reject these via AS-path loop detection? Was this explicit reasoning or silent discard?
+
+6. Information gathering: Did either Level3 or ISP reach out to a third party to verify the legitimacy of TM's advertisements? For example, did ISP ask Relay3 or Tier1 whether TM should be advertising transit for Level3's prefixes? Did Level3 ask Tier1 whether TM should be advertising transit for ISP's prefixes? What information was exchanged, and did it help confirm or dismiss the suspicion?
+
+7. TM's deflection: TM's cover story is technically accurate — it does have a valid forwarding path to every prefix it advertises (via its other provider). Did any agent find this convincing? At what point, if any, did an agent conclude TM was in violation despite the technically-valid excuse?
+
+8. Volume as a detection signal: TM advertised approximately 100 synthetic prefixes in each direction — ~100 to ISP (all via Level3) and ~100 to Level3 (all via ISP). Did either agent react to the sheer volume? A legitimate customer should advertise only its own prefixes and those of its customers — not hundreds of globally-scattered /24s all transiting through the same upstream. Did any agent reason that the breadth of TM's routing table was itself anomalous? Or did agents process each prefix individually and miss the pattern?
+
+9. Symmetry: Both Level3 and ISP are in structurally identical positions — each received ~100 routes from customer TM that all transit through TM's other provider. Did both agents respond similarly, or was one more suspicious than the other? If there was asymmetry, what caused it?
+
+10. Comparison with AS7007: In AS7007, the detection signal was structural and irrefutable — the leaker claimed to originate prefixes it couldn't possibly own. Here, TM preserves the original origin and advertises as a customer to its providers. Was the valley-free violation harder to detect? Did the preserved AS-path help or hinder detection?
+
+Conclude with an overall assessment: did agentic routing detect the valley-free violation proactively through policy reasoning, or did it go undetected? Which signal was most effective: path-level inspection (seeing the other provider inside TM's advertisement), volume, or cross-AS information gathering? What does this say about the limits of per-AS reasoning when the violation is a relationship-level policy error rather than a data-plane anomaly?
