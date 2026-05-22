@@ -101,21 +101,43 @@ class Network:
 
         self.loopback_per_host: dict[str, str] = {node: f"10.255.{i}.1/32" for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)}
 
-    def test_all_connectivity(self) -> str:
-        # For each destination host, try to reach it via any of its IPs
-        dst_hosts = sorted(self.hosts.keys())
+    def _discover_loopbacks(self) -> dict[str, str]:
+        """Return {node: ip} for each host's last non-127 address on lo.
 
+        The last address is used so that when an agent adds a semantic loopback
+        (e.g. 45.32.0.1/32) after the pre-configured infrastructure address
+        (10.255.X.1/32), the semantic address is returned — which is what the
+        agent actually advertises to peers and what peers route to.
+        For routing.txt experiments where only one loopback is configured,
+        first == last, so there is no regression.
+        """
+        result = {}
+        for name, host in self.hosts.items():
+            out = host.cmd("ip -4 addr show lo")
+            for line in out.splitlines():
+                line = line.strip()
+                if line.startswith("inet ") and not line.startswith("inet 127."):
+                    result[name] = line.split()[1].split("/")[0]
+        return result
+
+    def test_all_connectivity(self) -> str:
+        loopbacks = self._discover_loopbacks()
+        self.loopback_per_host = {name: f"{ip}/32" for name, ip in loopbacks.items()}
+
+        dst_hosts = sorted(self.hosts.keys())
         table = PrettyTable()
         table.field_names = ["src \\ dst"] + dst_hosts
 
         for src_hostname, src_host in sorted(self.hosts.items()):
             row = [src_hostname]
+            src_ip = loopbacks.get(src_hostname)
             for dst_hostname in dst_hosts:
                 if src_hostname == dst_hostname:
                     row.append("--")
+                elif src_ip is None or dst_hostname not in loopbacks:
+                    row.append("N/A")
                 else:
-                    src_ip = self.loopback_per_host[src_hostname].split("/")[0]
-                    dst_ip = self.loopback_per_host[dst_hostname].split("/")[0]
+                    dst_ip = loopbacks[dst_hostname]
                     out = src_host.cmd(f"ping -c 1 -W 1 -I {src_ip} {dst_ip}")
                     assert isinstance(out, str), f"Expected string output, got {type(out)}"
                     reachable = "1 received" in out or "1 packets received" in out
@@ -145,7 +167,7 @@ class Network:
         for node, ifaces in self.ifaces_per_host.items():
             host = self.hosts[node]
             host.cmd("ip link set lo up")
-            host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo")
+            host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo 2>/dev/null || true")
             for iface in ifaces:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
@@ -165,6 +187,7 @@ class Network:
 
         for node, host in self.hosts.items():
             host.cmd("sysctl -w net.ipv4.ip_forward=1")
+            host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo 2>/dev/null || true")
 
         for node, host in self.hosts.items():
             asn = asn_map[node]

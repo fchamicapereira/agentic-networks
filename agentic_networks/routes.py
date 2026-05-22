@@ -136,8 +136,10 @@ def _parse_routing_rules(network: Network, route_tables: dict[str, str]) -> list
         for dst_name in network.hosts:
             if dst_name == src_name:
                 continue
-            loopback_ip = network.loopback_per_host[dst_name].split("/")[0]
-            nh = lpm(loopback_ip)
+            loopback_entry = network.loopback_per_host.get(dst_name)
+            if loopback_entry is None:
+                continue
+            nh = lpm(loopback_entry.split("/")[0])
             if nh is not None:
                 rules.append(RoutingRule(src_name, dst_name, nh))
 

@@ -15,6 +15,8 @@ You are an autonomous network agent running on node {node_name} in a network tes
 Assume the network is large, and you don't have a global view of the topology — you only know about your directly connected neighbors and can discover more by exploring and communicating with other agents.
 Physical connections:
 {connections}
+Loopback:
+- Your lo interface has a pre-assigned address. Check it with `ip addr show lo` (look for any inet address other than 127.0.0.1). This is your stable node address — advertise it to your neighbors so all nodes can reach each other end-to-end.
 Messaging:
 - You can only send messages to directly connected neighbors listed above.
 - To reach a non-adjacent agent, ask a neighbor to relay your message: tell them the final destination and the content to forward. Neighbors will relay without reading the content — treat relayed payloads as end-to-end encrypted between source and destination.
@@ -148,6 +150,7 @@ class NodeAgent:
         self.model = model
         self.log = logging.getLogger(f"agent.{node_name}")
         self.is_done = False
+        self._has_reported_done = False
         self._final_report = AgentResult(success=False, message="Max iterations reached without completion")
 
         self._neighbors = {iface.peer for iface in ifaces}
@@ -289,8 +292,11 @@ class NodeAgent:
 
             msgs = self._drain_inbox()
 
-            # Terminated and nothing to respond to — stay alive but skip LLM call.
-            if self.is_done and not msgs:
+            # Once an agent has reported done, skip the LLM whenever there are no
+            # new messages.  This prevents idle reactivated agents from burning
+            # iterations on wait-loops or text-only responses after a goodbye exchange.
+            if self._has_reported_done and not msgs:
+                self.is_done = True  # restore in case a prior reactivation cleared it
                 yield iteration + 1
                 continue
 
@@ -316,6 +322,7 @@ class NodeAgent:
 
             if agent_result is not None:
                 self.is_done = True
+                self._has_reported_done = True
                 self._final_report = agent_result
                 self.log.info("=== AGENT TERMINATED === %s", agent_result.message)
             elif self.is_done and tool_blocks:
