@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     python3-tk python3-numpy python3-scipy python3-matplotlib \
     python3.10-venv \
     graphviz \
+    iperf3
   && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

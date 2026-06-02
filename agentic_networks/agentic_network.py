@@ -29,6 +29,8 @@ def _create_agent(
     openai_base_url: str,
     ifaces: list,
     window_size: int,
+    extra_tools: list[dict] | None = None,
+    context_fn: "Callable[[], str] | None" = None,
 ) -> NodeAgent:
     model = MODELS[model_key]
     if model_key in CLAUDE_MODELS:
@@ -42,6 +44,8 @@ def _create_agent(
             max_tokens=max_tokens,
             ifaces=ifaces,
             window_size=window_size,
+            extra_tools=extra_tools,
+            context_fn=context_fn,
         )
     else:
         return AgentOpenAI(
@@ -87,11 +91,15 @@ class AgenticNetwork:
         openai_base_url: str,
         window_size: int,
         reactors: list[Reactor] = [],
+        post_reactors: list[Reactor] = [],
+        extra_tools: list[dict] | None = None,
+        context_fns: "dict[str, Callable[[], str]] | None" = None,
     ):
         self.logger = logging.getLogger("main")
         self.network = network
         self.bus = MessageBus(list(network.hosts.keys()))
         self.reactors: list[Reactor] = reactors
+        self.post_reactors: list[Reactor] = post_reactors
         self._stopped: set[str] = set()
         self.agents: list[NodeAgent] = [
             _create_agent(
@@ -107,6 +115,8 @@ class AgenticNetwork:
                 openai_base_url=openai_base_url,
                 ifaces=network.ifaces_per_host[name],
                 window_size=window_size,
+                extra_tools=extra_tools,
+                context_fn=context_fns.get(name) if context_fns else None,
             )
             for name, host in network.hosts.items()
         ]
@@ -197,6 +207,9 @@ class AgenticNetwork:
 
                     self.logger.info("Agent %s finished.", agent.node_name)
             active = still_active
+
+            for reactor in self.post_reactors:
+                reactor(self, global_iter)
 
             if active and all(agent.is_done for agent, _ in active):
                 self.logger.info("All agents have terminated. Stopping experiment early.")
@@ -300,6 +313,9 @@ class AgenticNetwork:
 
             if errors:
                 raise RuntimeError("An agent crashed — see logs above for details.")
+
+            for reactor in self.post_reactors:
+                reactor(self, step)
 
             active = still_active
 

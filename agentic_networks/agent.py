@@ -141,8 +141,11 @@ class NodeAgent:
         max_iterations: int,
         max_tokens: int,
         ifaces: list[Interface],
+        extra_tools: list[dict] | None = None,
+        context_fn: "Callable[[], str] | None" = None,
     ):
         self.node_name = node_name
+        self.context_fn = context_fn
         self.mininet_host = MininetHost(node_name, host)
         self.bus = bus
         self.max_iterations = max_iterations
@@ -167,6 +170,15 @@ class NodeAgent:
             "wait": self.wait,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
+
+        self.extra_tool_defs: list[dict] = []
+        for tool in (extra_tools or []):
+            self.extra_tool_defs.append({
+                "name": tool["name"],
+                "description": tool["description"],
+                "schema": tool["schema"],
+            })
+            self.tools[tool["name"]] = tool["handler"]
 
     def send_message(self, to: str, message: str) -> str:
         if to not in self._neighbors:

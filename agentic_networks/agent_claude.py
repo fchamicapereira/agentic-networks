@@ -49,8 +49,10 @@ class AgentClaude(NodeAgent):
         max_tokens: int,
         ifaces: list[Interface],
         window_size: int,
+        extra_tools: list[dict] | None = None,
+        context_fn: "Callable[[], str] | None" = None,
     ):
-        super().__init__(node_name, host, bus, initial_prompt, model, max_iterations, max_tokens, ifaces)
+        super().__init__(node_name, host, bus, initial_prompt, model, max_iterations, max_tokens, ifaces, extra_tools=extra_tools, context_fn=context_fn)
 
         if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
             print("Error: ANTHROPIC_API_KEY environment variable is not set.")
@@ -117,7 +119,9 @@ class AgentClaude(NodeAgent):
         self._flush_pending()
 
         if not had_pending:
-            self.messages.append({"role": "user", "content": "State the next action."})
+            context = self.context_fn() if self.context_fn else ""
+            content = f"{context}\n\nState the next action." if context else "State the next action."
+            self.messages.append({"role": "user", "content": content})
 
         for attempt in range(20):
             try:
@@ -125,7 +129,10 @@ class AgentClaude(NodeAgent):
                     model=self.model,
                     max_tokens=self.max_tokens,
                     system=self._system,
-                    tools=TOOLS,
+                    tools=[
+                        *TOOLS,
+                        *({"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in self.extra_tool_defs),
+                    ],
                     messages=self._windowed_messages(),
                 )
                 break

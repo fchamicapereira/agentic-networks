@@ -120,7 +120,7 @@ class Network:
                     result[name] = line.split()[1].split("/")[0]
         return result
 
-    def test_all_connectivity(self) -> str:
+    def test_all_connectivity(self, label: str = "Final Connectivity Matrix") -> str:
         loopbacks = self._discover_loopbacks()
         self.loopback_per_host = {name: f"{ip}/32" for name, ip in loopbacks.items()}
 
@@ -144,7 +144,7 @@ class Network:
                     row.append("OK" if reachable else "FAIL")
             table.add_row(row)
 
-        print("\n=== Final Connectivity Matrix ===")
+        print(f"\n=== {label} ===")
         print(table)
         print()
 
@@ -160,7 +160,10 @@ class Network:
         self.hosts = {name: cast(NetworkHost, self.net.addHost(name, ip=None)) for name in self.ifaces_per_host}
 
         for link in self.links:
-            self.net.addLink(self.hosts[link.node1], self.hosts[link.node2], delay=f"{link.delay_ms}ms")
+            # netem's default queue limit is 1000 packets; at high rates on high-delay
+            # links this causes drops. Size it to hold ~2x the in-flight packets at 1 Gbps.
+            queue_size = max(1000, link.delay_ms * 200)
+            self.net.addLink(self.hosts[link.node1], self.hosts[link.node2], delay=f"{link.delay_ms}ms", max_queue_size=queue_size)
 
         self.net.start()
 
