@@ -1,7 +1,6 @@
 import logging
 import subprocess
 import time
-from pathlib import Path
 
 from .billing_clock import BillingClock
 from .network import Network
@@ -21,17 +20,6 @@ class TrafficSampler:
 
     The caller supplies an elapsed_days label so samples can be spaced at
     any desired virtual interval (e.g. every 15 simulated minutes).
-
-    JSON format written to output_path:
-        [
-          {
-            "elapsed_days": 1.0,
-            "mbps": {
-              "203.0.113.0/24": {"via_Expensive": 98.4, "via_Cheap": 0.0}
-            }
-          },
-          ...
-        ]
     """
 
     MEASUREMENT_WINDOW_SECONDS = 0.2
@@ -43,7 +31,7 @@ class TrafficSampler:
         monitored_prefixes: list[str],
         provider_ifaces: dict[str, str],
         billing_clock: BillingClock,
-        output_path: str = "/tmp/traffic-samples.json",
+
     ):
         """
         provider_ifaces: maps provider name to the output interface name on billing_node,
@@ -56,7 +44,6 @@ class TrafficSampler:
         self.monitored_prefixes = monitored_prefixes
         self.provider_ifaces = provider_ifaces
         self.clock = billing_clock
-        self.output_path = Path(output_path)
 
         self._samples: list[dict] = []
 

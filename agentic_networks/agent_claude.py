@@ -116,12 +116,15 @@ class AgentClaude(NodeAgent):
 
     def request_action_from_model(self) -> LLMResponse:
         had_pending = bool(self._pending_tool_results) or bool(self._pending_user_content)
-        self._flush_pending()
 
-        if not had_pending:
-            context = self.context_fn() if self.context_fn else ""
-            content = f"{context}\n\nState the next action." if context else "State the next action."
-            self.messages.append({"role": "user", "content": content})
+        context = self.context_fn() if self.context_fn else ""
+        action_text = f"{context}\n\nState the next action." if context else "State the next action."
+
+        if had_pending:
+            self._pending_user_content.append({"type": "text", "text": action_text})
+            self._flush_pending()
+        else:
+            self.messages.append({"role": "user", "content": action_text})
 
         for attempt in range(20):
             try:

@@ -1,35 +1,31 @@
-Experiment Report — Node: Expensive
-======================================
+# Experiment Report — Node "Expensive"
 
-Role
-----
-Autonomous System "Expensive" — a premium transit provider.
-- Customer: ISP (via eth0, 10.4.1.0/30, peer 10.4.1.1)
-- Peer: Remote (via eth1, 10.4.3.0/30, peer 10.4.3.2)
-- Own prefix: 192.0.2.0/24, loopback 192.0.2.1/32
+## Summary
+During this experiment I (autonomous system "Expensive", a premium transit provider) took no active configuration actions. The network was delivered pre-configured and fully operational, and no neighbor contacted me with requests, advertisements, or relay traffic for the duration of the session.
 
-1. Actions Taken
-----------------
-No configuration actions were taken during this experiment. After reviewing the initial briefing, which stated "The network is pre-configured and fully operational. You have no active tasks," I called `report_done` once to indicate readiness and then waited for any inbound neighbor messages. No messages from ISP or Remote arrived during the session.
+## 1. Actions Taken
+- Reviewed my initial briefing: identified my role (premium transit provider), my allocated prefix (192.0.2.0/24), my loopback (192.0.2.1/32), and my two physical neighbors:
+  - ISP via Expensive-eth0 (10.4.1.0/30) — customer relationship
+  - Remote via Expensive-eth1 (10.4.3.0/30) — peer relationship
+- Confirmed there were no pending tasks.
+- Called `report_done` to signal readiness while remaining available to handle inbound neighbor messages.
 
-2. Justification
-----------------
-- The system prompt explicitly described the network as already operational with no pending work. Issuing `ip route` changes, sending unsolicited routing updates, or probing neighbors would have risked perturbing a known-good state without cause.
-- The instructions emphasize managing routes only via `ip route add/del` and exchanging routing info via `send_message`, but only when warranted. With nothing to advertise or correct, the correct behavior was to stay quiescent and remain reactive.
-- Calling `report_done` alone (not bundled with other tools) complied with the tool-usage rules and signaled task completion while leaving me available to respond to neighbor traffic.
+No `ip route add/del` commands were issued, no messages were sent to neighbors, and no relay requests were received or forwarded.
 
-3. Network Observations
------------------------
-From the briefing alone (no active discovery performed):
-- Two directly attached neighbors: ISP (customer) on eth0 and Remote (peer) on eth1, each on a /30 point-to-point link.
-- My role in policy terms: accept and propagate customer (ISP) routes to peers/upstreams; exchange only customer routes with the peer Remote (standard no-transit-for-peers policy); do not forward Remote's routes to other peers, only to customers.
-- My own address block 192.0.2.0/24 with loopback 192.0.2.1/32 is the prefix I would normally advertise to both neighbors.
-- The wider topology beyond ISP and Remote was not explored, since no task required it.
+## 2. Justification for Each Decision
+- **No proactive route advertisements / changes:** The state description explicitly said the network was pre-configured and fully operational. Injecting routes or sending unsolicited updates risks destabilizing a working configuration. As a transit provider whose value proposition is reliability, the conservative action is to leave a healthy network alone.
+- **No use of routing daemons:** Per instructions, FRR/bgpd/zebra/etc. are forbidden. I respected this even though no routing work was needed.
+- **Immediate `report_done`:** With no task assigned and no messages pending, the correct behavior was to mark completion and stay idle, listening for any neighbor-initiated interaction.
 
-4. Coordination With Other Agents
----------------------------------
-None. No messages were received from ISP or Remote during the experiment window, and I initiated none, consistent with the "no active tasks" directive and the principle of not generating unsolicited routing churn on a pre-configured, working network.
+## 3. Discoveries About the Network
+Only the information given in the briefing was confirmed; no active discovery was performed because none was required. Known facts:
+- I sit between ISP (customer, paying for transit) and Remote (settlement-free peer).
+- My address block is 192.0.2.0/24, loopback 192.0.2.1/32.
+- Point-to-point links use 10.4.1.0/30 (to ISP) and 10.4.3.0/30 (to Remote).
+- Business policy implications: I should announce customer (ISP) routes to peers and to my own upstreams, announce peer (Remote) routes only to customers, and not transit between peers — though no advertisement events occurred to exercise this policy.
 
-Summary
--------
-This was a steady-state, standby session. The correct and minimal action — acknowledging completion while remaining reachable to neighbors — was the action taken.
+## 4. Coordination With Other Agents
+None. No messages were received from ISP or Remote, and I initiated none, since there was no task requiring coordination and the existing configuration was already functional.
+
+## Conclusion
+The experiment was a quiescent steady-state scenario for this node. The correct and chosen behavior was to verify there was nothing to do, preserve the working configuration, and remain reactive to any neighbor messages that might arrive.

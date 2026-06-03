@@ -12,7 +12,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def generate_throughput_plot(data_path: Path, output_path: Path, logger: logging.Logger) -> None:
+def generate_throughput_plot(
+    data_path: Path,
+    output_path: Path,
+    logger: logging.Logger,
+    notes: list[tuple[float, str]] | None = None,
+) -> None:
     data = json.loads(data_path.read_text())
     samples = data["samples"]
     p = data["params"]
@@ -24,15 +29,14 @@ def generate_throughput_plot(data_path: Path, output_path: Path, logger: logging
     baseline_mbps = p["baseline_mbps"]
     spike_mbps = p["spike_mbps"]
     total_days = p["total_days"]
-    spike_hours: list[float] = p["spike_hours"]
-    spike_duration_hours: float = p["spike_duration_hours"]
+    spikes: list[dict] = p["spikes"]
     step_hours: float = p.get("step_hours", 8.0)
     step_days = step_hours / 24.0
     # Use step-rounded boundaries so windows match the actual sample data.
     spike_windows = [
-        (round(h / step_hours) * step_days,
-         round((h + spike_duration_hours) / step_hours) * step_days)
-        for h in sorted(spike_hours)
+        (round(s["time"] / step_hours) * step_days,
+         round((s["time"] + s["duration"]) / step_hours) * step_days)
+        for s in sorted(spikes, key=lambda s: s["time"])
     ]
 
     times = [s["elapsed_days"] for s in samples]
@@ -54,6 +58,10 @@ def generate_throughput_plot(data_path: Path, output_path: Path, logger: logging
     ax.plot(times, via_cheap, "b-", linewidth=2, label="Via Cheap")
     for i, (spike_start, spike_end) in enumerate(spike_windows):
         ax.axvspan(spike_start, spike_end, alpha=0.08, color="orange", label="Spike window" if i == 0 else "")
+    for day, text in (notes or []):
+        ax.axvline(day, color="gray", linewidth=1, linestyle=":")
+        ymin, ymax = ax.get_ylim()
+        ax.text(day, (ymin + ymax) / 2, text, rotation=90, va="center", ha="right", fontsize=7, color="gray")
     ax.set_xlabel("Elapsed simulated time (days)")
     ax.set_ylabel("Throughput (Mbps)")
     ax.set_title("ISP Traffic Routing Over Billing Period")
@@ -72,6 +80,16 @@ def main():
     parser = argparse.ArgumentParser(description="Regenerate throughput plot from experiment data")
     parser.add_argument("data_json", metavar="DATA_JSON", help="Path to *-data.json file")
     parser.add_argument("--output", "-o", metavar="PNG", help="Output PNG path (default: same stem as data JSON)")
+
+    def note(s: str) -> tuple[float, str]:
+        try:
+            hour_str, text = s.split(":", 1)
+            return float(hour_str) / 24.0, text
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Expected HOUR:TEXT, got {s!r}")
+
+    parser.add_argument("--note", type=note, action="append", default=[], metavar="HOUR:TEXT",
+                        help="Add an annotated marker at HOUR (elapsed hours, fractional allowed) with label TEXT")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -83,7 +101,7 @@ def main():
 
     output_path = Path(args.output) if args.output else data_path.with_name(data_path.name.replace("-data.json", "-tput.png"))
 
-    generate_throughput_plot(data_path, output_path, logger)
+    generate_throughput_plot(data_path, output_path, logger, notes=args.note)
 
 
 if __name__ == "__main__":

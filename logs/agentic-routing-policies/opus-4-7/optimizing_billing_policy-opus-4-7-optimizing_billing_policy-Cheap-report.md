@@ -1,36 +1,41 @@
-Experiment Report - Node Cheap (Economy Transit Provider)
-================================================================
+# Experiment Report — Node "Cheap" (Economy Transit Provider)
 
-1. Actions Taken
-----------------
-During this experiment, I took no operational actions. My single tool invocation was `report_done` with a success status, indicating I had nothing to do.
+## 1. Actions Taken
 
-2. Justification
-----------------
-The initial state description explicitly stated:
-- "The network is pre-configured and fully operational."
-- "You have no active tasks."
+During this experiment, I took no operational actions on the network. My only action was to immediately call `report_done` after assessing the initial state, as instructed by my task description.
 
-Given that the network was already operational and no task was assigned, taking unsolicited actions (such as probing neighbors, modifying routes, or sending unprompted advertisements) carried risk of disrupting a working configuration without benefit. The correct behavior for an autonomous agent in a steady-state, task-free situation is to remain idle and responsive, which is what `report_done` signals while keeping the agent available for incoming neighbor messages.
+No commands were executed — no `ip route add/del`, no `ip addr` inspections, no `ping`/`traceroute` probes, and no messages were sent to neighbors.
 
-I also did not run discovery commands (e.g., `ip addr`, `ip route`) because:
-- The topology and addressing were already provided in my briefing (eth0 to ISP customer, eth1 to Remote peer, loopback 198.18.0.1/32, allocated prefix 198.18.0.0/24).
-- No verification task was requested.
+## 2. Justification
 
-3. Network Discoveries
-----------------------
-No new discoveries were made beyond what was provided in the initial briefing:
-- I am AS Cheap, an economy transit provider.
-- My prefix is 198.18.0.0/24, loopback 198.18.0.1/32.
-- Directly connected neighbors:
-  - ISP (customer) via eth0 — 10.4.2.0/30, peer 10.4.2.1.
-  - Remote (peer, settlement-free) via eth1 — 10.4.4.0/30, peer 10.4.4.2.
-- Business relationships imply standard transit policy: advertise customer (ISP) routes to peers; advertise peer (Remote) routes only to customers; do not transit peer-to-peer traffic for free.
+The initial state I was given explicitly said:
 
-4. Coordination With Other Agents
----------------------------------
-No messages were sent or received during this experiment. No coordination took place because no task required it and no neighbor initiated contact.
+> "The network is pre-configured and fully operational. You have no active tasks."
 
-Summary
--------
-This was a no-op experiment from Cheap's perspective. The node remained in its pre-configured operational state, ready to respond to neighbor messages or future tasks, and reported completion immediately as instructed.
+My system instructions further directed: *"Call report_done immediately. You will remain available to respond to any messages from neighbours if they contact you."*
+
+Given those directives, the correct behavior was to:
+- Avoid making speculative changes to a working network (any unsolicited route changes could destabilize transit for my customer ISP or my peer Remote).
+- Avoid generating spurious messages to neighbors, which could be interpreted as routing updates and trigger unnecessary work.
+- Remain idle and reactive, ready to relay messages or respond to advertisements if any arrived.
+
+No neighbor messages arrived during the experiment window, so no reactive actions were warranted either.
+
+## 3. Network Discoveries
+
+I did not actively probe the network, so my knowledge is limited to what was provided in my configuration:
+
+- **My role:** AS "Cheap", an economy transit provider prioritizing capacity/coverage over latency.
+- **My prefix:** 198.18.0.0/24, with loopback 198.18.0.1/32.
+- **Direct neighbors:**
+  - **ISP** via `Cheap-eth0` — customer relationship (ISP pays me for transit). Link: 10.4.2.0/30, my side 10.4.2.2, peer 10.4.2.1.
+  - **Remote** via `Cheap-eth1` — peer relationship (settlement-free). Link: 10.4.4.0/30, my side 10.4.4.1, peer 10.4.4.2.
+- **Implied topology:** There are other agents beyond my direct neighbors (the instructions mention non-adjacent agents and relaying), but I did not discover their identities or prefixes since no advertisements were exchanged.
+
+## 4. Coordination With Other Agents
+
+None. I neither sent nor received any messages from ISP or Remote during the experiment. No relay requests passed through me, and no prefix advertisements were exchanged.
+
+## Summary
+
+This was a passive/standby experiment for the Cheap node. The network was pre-configured to a working state, no tasks were assigned, and no neighbor activity occurred. The appropriate response — and the one I took — was to acknowledge readiness via `report_done` and remain available without perturbing the operational state.

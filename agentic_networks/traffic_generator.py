@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 from .network import Network
@@ -60,11 +61,13 @@ class TrafficGenerator:
         """Increase flow to spike_mbps."""
         logger.info("Traffic spike: %.0f → %.0f Mbps", self._current_mbps, self.spike_mbps)
         self._launch(self.spike_mbps)
+        time.sleep(1)
 
     def restore(self) -> None:
         """Restore flow to baseline_mbps."""
         logger.info("Traffic restore: %.0f → %.0f Mbps", self._current_mbps, self.baseline_mbps)
         self._launch(self.baseline_mbps)
+        time.sleep(1)
 
     def _launch(self, mbps: float) -> None:
         self._current_mbps = mbps

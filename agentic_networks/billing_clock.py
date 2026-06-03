@@ -1,7 +1,3 @@
-import json
-from pathlib import Path
-
-
 class BillingClock:
     """Iteration-driven billing clock.
 
@@ -22,13 +18,3 @@ class BillingClock:
     def elapsed_days(self) -> float:
         return self._elapsed_days
 
-    def to_dict(self) -> dict:
-        elapsed = min(self._elapsed_days, self.total_days)
-        return {
-            "elapsed_days": round(elapsed, 3),
-            "total_days": self.total_days,
-            "elapsed_pct": round(elapsed / self.total_days * 100, 1),
-        }
-
-    def write(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2))

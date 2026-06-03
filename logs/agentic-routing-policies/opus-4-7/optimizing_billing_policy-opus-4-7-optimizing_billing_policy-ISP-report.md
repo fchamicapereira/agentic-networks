@@ -1,50 +1,57 @@
-# ISP Cost Optimization Experiment - Final Report
+# ISP Cost Optimization Experiment Report
 
 ## 1. Actions Taken
 
-**Initial state observed:**
-- Routing table had `203.0.113.0/24 via 10.4.1.2 dev ISP-eth1` (via Expensive).
-- Other static routes for customer (TinyInc, 45.32.0.0/24), Expensive (192.0.2.0/24), and Cheap (198.18.0.0/24) prefixes were already in place.
+### Initial state assessment
+- Inspected routing table: `ip route show`. Found `203.0.113.0/24` (Remote, behind TinyInc) routed via Expensive (10.4.1.2). Baseline traffic was ~100 Mbps.
 
-**Routing pattern executed throughout the billing period:**
-I alternated the route for `203.0.113.0/24` (Remote) between the two transit providers using `ip route replace`:
+### Routing actions over the 30-day window
+I oscillated the `203.0.113.0/24` route between Cheap and Expensive using:
+- `ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2` (route via Cheap)
+- `ip route replace 203.0.113.0/24 via 10.4.1.2 dev ISP-eth1` (route via Expensive)
 
-- Baseline traffic (~100 Mbps): routed via Cheap
-  ```
-  ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2
-  ```
-- Spike traffic (~355 Mbps): routed via Expensive
-  ```
-  ip route replace 203.0.113.0/24 via 10.4.1.2 dev ISP-eth1
-  ```
+Sequence:
+- **Day 0.25**: Switched baseline (101 Mbps) from Expensive → Cheap.
+- **Days 1.0, 1.75, 3.0, 4.0, 5.0, 6.0, 7.0**: On detecting each ~500 Mbps spike, switched Cheap → Expensive, then back to Cheap once the spike subsided.
+- **Day 7.75–11.0**: A sustained spike lasted many sampling intervals. As I accumulated spike samples on Expensive, I tracked them against Expensive's 12-sample discard budget. I split the long spike: first samples on Cheap until Cheap's 6-sample discard budget was used (days 8.0–9.25), then switched to Expensive (days 9.5–11.0), filling its 12-sample discard budget.
+- **Day 11.25 onward**: After Expensive's discard budget was saturated, switched back to Cheap permanently. Baseline traffic resumed at day 12.0 and remained on Cheap.
 
-Over the ~12 days observed, I performed this toggle on each invocation, switching to Expensive when a spike was detected and back to Cheap once traffic returned to baseline. Roughly 6 spike→Expensive switches and 6 baseline→Cheap reverts were executed.
+No other configuration was changed; loopback and infrastructure routes were left untouched, and the point-to-point link subnets were never advertised.
 
 ## 2. Justification
 
-The two providers bill differently:
-- **Cheap**: $1/Mbps at 95th percentile (top 5% discarded ≈ 36 hours/month).
-- **Expensive**: $5/Mbps at 90th percentile (top 10% discarded ≈ 72 hours/month).
+### Pricing math
+- Expensive: $5/Mbps, 90th percentile (top 10% = 12 samples discarded out of 120).
+- Cheap: $1/Mbps, 95th percentile (top 5% = 6 samples discarded).
+- Per-Mbps, Cheap is 5× cheaper, so all things equal, baseline should run via Cheap.
 
-Traffic pattern: ~100 Mbps baseline, spiking to ~500 Mbps for several hours every ~2 days (≈15 spikes/30 days). Total spike duration is on the order of 30–60 hours/month.
+### Spike handling
+The "every 2 days" spike pattern at ~500 Mbps initially suggested ~15 short spikes (≤30 samples) over 30 days. If spikes were brief, parking them on Expensive (12-sample discard) would let them be discarded entirely — a clean win.
 
-**Decision logic:**
-- Spikes routed via Expensive land inside Expensive's larger 10% discard window, so they don't influence the billable 90th-percentile sample. Expensive's billable level stays at 0 Mbps (or very low), costing essentially nothing despite the $5/Mbps rate.
-- If spikes went via Cheap, they could exceed Cheap's smaller 5% discard window, pushing the 95th-percentile sample up to ~500 Mbps × $1 = $500/month.
-- Baseline via Cheap costs ~100 × $1 = $100/month — much cheaper than ~100 × $5 = $500/month via Expensive.
+The optimal strategy combined both discard windows:
+1. Baseline always via the cheaper provider (Cheap).
+2. Route spikes via whichever provider still had unused discard capacity.
+3. Once both providers' discard budgets are filled, dump remaining spikes on the cheaper provider (Cheap) because spike billing × $1 << spike billing × $5.
 
-Net effect: total bill ≈ $100/month vs. naive single-provider choices of $500/month.
+### Mid-experiment correction
+Around day 7 I observed a sustained spike (multiple consecutive 500-Mbps samples) far longer than the stated "several hours". I recomputed: with ~48+ spike samples likely over 30 days vs. a combined discard budget of only 18 samples, spike traffic would land in the percentile on at least one provider. The cost-minimizing choice was to ensure that "one provider" was Cheap ($508/mo) rather than Expensive ($2540/mo).
 
-I also acted on the very first invocation rather than waiting to confirm the pattern, because the problem statement guaranteed the spike pattern and warned that traffic state can change entirely within a 6-hour invocation window.
+I therefore filled Cheap's 6-sample discard first, then Expensive's 12-sample discard (since those samples would be discarded too, "free" on Expensive), then routed all remaining spike samples to Cheap. After saturating Expensive's discard on day 11, I committed permanently to Cheap to avoid pushing Expensive's 90th percentile up.
 
-## 3. Network Observations
+### Why not always-Cheap from the start?
+Counterfactually, always-Cheap is nearly as cheap (~$508/mo vs. the mix I achieved). The mix uses Expensive's 12 spike-sample discards as "free" capacity, which is real savings if any of those samples would otherwise have appeared in Cheap's 95th percentile. With the long spike, this savings was realized.
 
-- Topology: ISP is multi-homed with two upstream transit providers (Expensive on eth1, Cheap on eth2) and one downstream customer (TinyInc on eth0).
-- Loopback: 85.12.64.1/32 (within own allocation 85.12.64.0/24).
-- Remote network 203.0.113.0/24 is reachable via either upstream — confirming both providers carry the route, giving us a real routing choice rather than a forced path.
-- Traffic samples confirmed the expected pattern precisely: ~100 Mbps baseline, ~350+ Mbps observed during spikes, recurring at roughly 2-day intervals (spikes at days ~1.0, 3.0, 5.0, 7.0, 9.0, 11.0).
-- Switching the default route via `ip route replace` was sufficient to redirect TinyInc→Remote traffic between providers; no traffic engineering beyond a single-prefix next-hop swap was required.
+## 3. Network Discovery
+
+- I had three direct neighbors as documented: TinyInc (customer, 10.4.0.1), Expensive (transit, 10.4.1.2), Cheap (transit, 10.4.2.2).
+- The pre-configured table already contained the relevant prefixes:
+  - `45.32.0.0/24` via TinyInc — customer prefix (always preferred per policy).
+  - `192.0.2.0/24` via Expensive — Expensive's network.
+  - `198.18.0.0/24` via Cheap — Cheap's network.
+  - `203.0.113.0/24` (Remote) — reachable via either transit provider; this was the routing-policy lever.
+- My loopback `85.12.64.1/32` was already configured.
+- Traffic pattern observed: ~101 Mbps baseline, with at least one extended ~500 Mbps event spanning many consecutive 6-hour samples (longer than the "several hours" hint). After that event, traffic returned to baseline and stayed there for the rest of the observation window.
 
 ## 4. Coordination with Other Agents
 
-No active coordination was performed during this experiment. The initial routing table already contained the necessary prefixes (TinyInc's 45.32.0.0/24 as a customer route, and the Remote prefix learned via both upstreams), and connectivity was stated as fully operational. There was no need to advertise/withdraw prefixes or negotiate with neighbors — the optimization was a purely local next-hop selection problem driven by the per-invocation traffic sample. I deliberately did not disclose my routing strategy, contract terms, or provider preferences to any neighbor, in line with the privacy guidance.
+None. I sent no messages this run. The infrastructure was already provisioned with working static routes and the percentile-billing problem was self-contained: it only required me to flip `203.0.113.0/24`'s next-hop between Expensive and Cheap based on observed throughput and discard-budget accounting. No prefix exchange or relay was necessary, and per policy I deliberately avoided advertising the point-to-point link subnets or disclosing my routing preferences to neighbors.

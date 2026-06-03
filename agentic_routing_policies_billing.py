@@ -13,6 +13,7 @@ period. A throughput plot is generated at the end.
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
@@ -35,6 +36,17 @@ from experiment import (
 from agentic_routing_policies_billing_plot_tput import generate_throughput_plot
 
 # ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SpikeWindow:
+    time: float   # hours from experiment start
+    duration: float  # hours
+
+
+# ---------------------------------------------------------------------------
 # Fixed address assignments for this topology
 # ---------------------------------------------------------------------------
 
@@ -50,8 +62,6 @@ LOOPBACKS: dict[str, tuple[str, str]] = {
 REMOTE_PREFIX = "203.0.113.0/24"
 REMOTE_LOOPBACK = "203.0.113.1"
 
-CLOCK_PATH = "/tmp/billing-clock.json"
-SAMPLES_PATH = "/tmp/traffic-samples.json"
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +149,7 @@ def save_plot_data(
     samples: list[dict],
     baseline_mbps: float,
     spike_mbps: float,
-    spike_hours: list[float],
-    spike_duration_hours: float,
+    spikes: list[SpikeWindow],
     total_days: int,
     step_hours: float,
     output_path: Path,
@@ -149,8 +158,7 @@ def save_plot_data(
         "params": {
             "baseline_mbps": baseline_mbps,
             "spike_mbps": spike_mbps,
-            "spike_hours": spike_hours,
-            "spike_duration_hours": spike_duration_hours,
+            "spikes": [{"time": s.time, "duration": s.duration} for s in spikes],
             "total_days": total_days,
             "step_hours": step_hours,
         },
@@ -183,8 +191,19 @@ def parse_args():
     parser.add_argument("--step-hours", type=float, default=6.0, metavar="H", help="Simulated hours per iteration (default: 6)")
     parser.add_argument("--baseline-mbps", type=float, default=100.0, metavar="M", help="Baseline traffic flow rate in Mbps (default: 100)")
     parser.add_argument("--spike-mbps", type=float, default=500.0, metavar="M", help="Spike traffic flow rate in Mbps (default: 500)")
-    parser.add_argument("--spike-hours", type=float, nargs="+", default=[24.0, 72.0, 120.0, 168.0, 216.0, 264.0], metavar="H", help="Hours from start at which each spike begins (default: 24 72 120 168 216 264)")
-    parser.add_argument("--spike-duration-hours", type=float, default=8.0, metavar="H", help="Duration of each spike in hours (default: 8)")
+    def spike_window(s: str) -> SpikeWindow:
+        try:
+            time_str, dur_str = s.split(":")
+            return SpikeWindow(time=float(time_str), duration=float(dur_str))
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Expected HOUR:DURATION, got {s!r}")
+
+    parser.add_argument(
+        "--spike-hours", type=spike_window, nargs="+",
+        default=[SpikeWindow(t, 8.0) for t in (24.0, 72.0, 120.0, 168.0, 216.0, 264.0)],
+        metavar="HOUR:DURATION",
+        help="Spike windows as HOUR:DURATION pairs (default: 24:8 72:8 120:8 168:8 216:8 264:8)",
+    )
     parser.add_argument("--sample-interval-minutes", type=float, default=15.0, metavar="M", help="Virtual minutes between billing samples (default: 15)")
     return parser.parse_args()
 
@@ -220,7 +239,14 @@ def main():
 
     # Load prompts
     prompts_dir = Path(args.prompts_dir)
-    prompts = {f.stem: f.read_text() for f in sorted(prompts_dir.glob("*.txt")) if f.stem != "final-report"}
+    step_hours_val = int(args.step_hours) if args.step_hours == int(args.step_hours) else args.step_hours
+    billing_samples_val = round(30 * 24 / args.step_hours)
+    template_vars = {"step_hours": str(step_hours_val), "billing_samples": str(billing_samples_val)}
+    def _render(text: str) -> str:
+        for key, val in template_vars.items():
+            text = text.replace("{" + key + "}", val)
+        return text
+    prompts = {f.stem: _render(f.read_text()) for f in sorted(prompts_dir.glob("*.txt")) if f.stem != "final-report"}
     if not prompts:
         raise SystemExit(f"No prompt files found in {prompts_dir}")
 
@@ -245,7 +271,6 @@ def main():
         monitored_prefixes=[REMOTE_PREFIX],
         provider_ifaces=provider_ifaces,
         billing_clock=clock,
-        output_path=SAMPLES_PATH,
     )
 
     # Traffic generator (iperf3)
@@ -261,7 +286,6 @@ def main():
     generator.start_servers()
     time.sleep(1)  # Let servers initialise
 
-    clock.write(CLOCK_PATH)  # day 0 — written once before agents start
     sampler.start()
     generator.start_flow()
     time.sleep(2)  # Let traffic establish before agents begin
@@ -273,7 +297,7 @@ def main():
     step_days = step_hours / 24.0
     max_iterations = round(args.days * 24.0 / step_hours)
 
-    spike_events: list[tuple[int, int]] = sorted((round(h / step_hours), round((h + args.spike_duration_hours) / step_hours)) for h in args.spike_hours)
+    spike_events: list[tuple[int, int]] = sorted((round(s.time / step_hours), round((s.time + s.duration) / step_hours)) for s in args.spike_hours)
     pending_events = list(spike_events)
     active_restore_iter: list[int | None] = [None]
 
@@ -304,7 +328,6 @@ def main():
 
     def clock_reactor(_, step: int) -> None:
         clock.set_elapsed(step * step_days)
-        clock.write(CLOCK_PATH)
 
     extra_tools = [
         {
@@ -333,7 +356,6 @@ def main():
 
         # Capture the final step's routing state (step max_iterations-1)
         clock.set_elapsed(args.days)
-        clock.write(CLOCK_PATH)
         final_elapsed_start = (max_iterations - 1) * step_days
         for i in range(samples_per_step):
             sampler.sample(elapsed_override=final_elapsed_start + i * sample_interval_days)
@@ -392,8 +414,7 @@ def main():
         samples=sampler.samples,
         baseline_mbps=args.baseline_mbps,
         spike_mbps=args.spike_mbps,
-        spike_hours=args.spike_hours,
-        spike_duration_hours=args.spike_duration_hours,
+        spikes=args.spike_hours,
         total_days=args.days,
         step_hours=step_hours,
         output_path=data_path,
