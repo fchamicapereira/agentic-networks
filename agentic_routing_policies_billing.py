@@ -24,7 +24,6 @@ from agentic_networks.traffic_sampler import TrafficSampler
 from experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
-    check_vllm_server_or_exit,
     collect_node_logs,
     collect_route_tables,
     generate_routes_pdf,
@@ -222,7 +221,6 @@ def main():
     logger = setup_logging(args.log_level)
 
     vllm_base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
-    check_vllm_server_or_exit(args.model, vllm_base_url, logger)
 
     # Load topology and start network
     logger.info("Building Mininet network...")

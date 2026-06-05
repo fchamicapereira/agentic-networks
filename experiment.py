@@ -12,8 +12,7 @@ from mininet.log import setLogLevel
 import anthropic
 from openai import OpenAI
 
-from agentic_networks.agent import AgentResult
-from agentic_networks.agent_vllm import check_server
+from agentic_networks.network_agent import AgentResult
 from agentic_networks.agent_vllm import MODELS as VLLM_MODELS
 from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS
 from agentic_networks.agent_openai import MODELS as GPT_MODELS
@@ -62,13 +61,6 @@ def setup_logging(log_level: str) -> logging.Logger:
     setLogLevel("warning")  # Suppress Mininet's verbose output
     return logging.getLogger("main")
 
-
-def check_vllm_server_or_exit(model: str, base_url: str, logger: logging.Logger) -> None:
-    """Exit if the model requires an OpenAI-compatible server that isn't responding."""
-    if model in VLLM_MODELS:
-        if not check_server(base_url, api_key="none"):
-            logger.error("No OpenAI-compatible server responding at %s", base_url)
-            exit(1)
 
 
 def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> None:

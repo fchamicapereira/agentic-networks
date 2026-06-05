@@ -1,18 +1,16 @@
 import json
+import logging
 import re
 import uuid
 import pprint
-from typing import Callable
 
 from openai import OpenAI, APIConnectionError
 from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam, ChatCompletionToolParam
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
-from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
-from .message_bus import MessageBus
-from mininet.node import Host
-from .network import Interface
+from .agent import Agent, LLMResponse, REPORT_PROMPT, StopReason, ToolUseBlock
+from .agent import DEFAULT_SYSTEM_PROMPT, DEFAULT_MAX_TOKENS, DEFAULT_TOOL_DEFS, DEFAULT_WINDOW_SIZE
 
 MODELS = {
     "qwen2.5-72b-awq": "Qwen/Qwen2.5-72B-Instruct-AWQ",
@@ -27,18 +25,6 @@ MODELS = {
     "gemma-3-27b": "google/gemma-3-27b-it",
 }
 
-TOOLS: list[ChatCompletionToolParam] = [
-    {
-        "type": "function",
-        "function": {
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": t["schema"],
-        },
-    }
-    for t in AGENT_TOOLS_DEFINITIONS
-]
-
 _FINISH_REASON_MAP: dict[str, StopReason] = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
@@ -46,13 +32,13 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 
-def _build_tool_guide() -> str:
+def _build_tool_guide(tool_defs: list[dict]) -> str:
     lines = [
         "To call a tool, output a <tool_call> block anywhere in your response:",
         '<tool_call>{"name": "<tool_name>", "arguments": {"param": "value", ...}}</tool_call>',
         "You may call multiple tools per response. Available tools:",
     ]
-    for t in AGENT_TOOLS_DEFINITIONS:
+    for t in tool_defs:
         props = t["schema"].get("properties", {})
         required = set(t["schema"].get("required", []))
         sig = ", ".join((p if p in required else f"[{p}]") for p in props)
@@ -64,7 +50,6 @@ def _build_tool_guide() -> str:
 
 
 def _split_json_objects(text: str) -> list[str]:
-    """Extract top-level JSON objects from text that may contain several concatenated ones."""
     objects = []
     depth = 0
     start = None
@@ -89,7 +74,6 @@ def _strip_thinking(content: str) -> str:
     subsequent iteration. The tool calls extracted from the content are stored separately,
     so stripping the thinking block loses no operational information.
     """
-    # Some models (QwQ) emit <think>...</think>; others (DeepSeek-R1) omit the opening tag.
     stripped = re.sub(r"(<think>)?.*?</think>", "", content, flags=re.DOTALL).strip()
     if stripped == content:
         print("Content:", content, flush=True)
@@ -98,8 +82,7 @@ def _strip_thinking(content: str) -> str:
 
 
 def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
-    # Tool call text format (in addition to the structured tool_calls API field):
-    #   <tool_call>JSON</tool_call>  — Qwen/Hermes native and our explicit system prompt format.
+    # Tool call text format: <tool_call>JSON</tool_call>  — Qwen/Hermes native format.
     call_tag_regex = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
     results = []
     for match in call_tag_regex.finditer(content):
@@ -136,42 +119,40 @@ def check_server(base_url: str, api_key: str) -> bool:
         return False
 
 
-class AgentVLLM(NodeAgent):
-    """NodeAgent backed by a local OpenAI-compatible API (vLLM, Ollama, etc.)."""
+class AgentVLLM(Agent):
+    """Agent backed by a local OpenAI-compatible API (vLLM, Ollama, etc.)."""
 
     def __init__(
         self,
-        node_name: str,
-        host: Host,
-        bus: MessageBus,
-        initial_prompt: str,
         model: str,
-        max_iterations: int,
-        max_tokens: int,
         base_url: str,
-        api_key: str,
-        ifaces: list[Interface],
-        window_size: int = 0,
-        extra_tools: list[dict] | None = None,
-        context_fn: "Callable[[], str] | None" = None,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        window_size: int = DEFAULT_WINDOW_SIZE,
     ):
-        # Append the tool guide so every model can fall back to text-based calls.
-        augmented_prompt = f"{initial_prompt.rstrip()}\n\n{_build_tool_guide()}"
-        super().__init__(
-            node_name,
-            host,
-            bus,
-            augmented_prompt,
-            model,
-            max_iterations,
-            max_tokens,
-            ifaces,
-            extra_tools=extra_tools,
-            context_fn=context_fn,
-        )
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        # Augment the system prompt with a text-based tool guide so local models
+        # can fall back to <tool_call> tags if structured tool_calls fails.
+        augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
+        super().__init__(model, augmented_prompt, max_tokens, tool_defs, window_size)
+
+        self.log = logging.getLogger(__name__)
+        if not check_server(base_url, api_key="none"):
+            print(f"Error: no vLLM server responding at {base_url}")
+            exit(1)
+        self.client = OpenAI(base_url=base_url, api_key="none")
         self.messages: list[ChatCompletionMessageParam] = []
-        self.window_size = window_size
+        self._tools: list[ChatCompletionToolParam] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["schema"],
+                },
+            }
+            for t in self.tool_defs
+        ]
 
     def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
         msgs = self.messages
@@ -182,28 +163,11 @@ class AgentVLLM(NodeAgent):
             trimmed.pop(0)
         return trimmed
 
-    def _all_tools(self) -> list[ChatCompletionToolParam]:
-        if not self.extra_tool_defs:
-            return TOOLS
-        extra: list[ChatCompletionToolParam] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["schema"],
-                },
-            }
-            for t in self.extra_tool_defs
-        ]
-        return TOOLS + extra
-
     def _do_completion(self, messages: list[ChatCompletionMessageParam]) -> tuple:
-        """Call the model and return (response, msg, finish_reason, tool_calls, assistant_content)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            tools=self._all_tools(),
+            tools=self._tools,
             messages=messages,
         )
         assert len(response.choices) == 1, "Expected exactly one choice from the model"
@@ -227,17 +191,13 @@ class AgentVLLM(NodeAgent):
 
         return response, msg, finish_reason, tool_calls, assistant_content
 
-    def request_action_from_model(self) -> LLMResponse:
+    def request_action(self, user_message: str) -> LLMResponse:
         # Don't inject a user turn if the last message is already a tool result —
         # Mistral (and some other models) reject user → tool → user sequences.
         if not self.messages or self.messages[-1]["role"] != "tool":
-            context = self.context_fn() if self.context_fn else ""
-            action_text = f"{context}\n\nState the next action." if context else "State the next action."
-            self.messages.append({"role": "user", "content": action_text})
+            self.messages.append({"role": "user", "content": user_message})
 
-        # System prompt is prepended on every call; not stored in self.messages
-        # so the history stays clean (user/assistant/tool turns only).
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
         full_messages: list[ChatCompletionMessageParam] = [system_message] + self._windowed_messages()
 
         self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
@@ -260,7 +220,6 @@ class AgentVLLM(NodeAgent):
             "content": assistant_content,
             "tool_calls": tool_calls_param,
         }
-
         self.messages.append(assistant_message)
 
         # If the model produced text but no tool calls, inject a brief warning.
@@ -291,21 +250,20 @@ class AgentVLLM(NodeAgent):
 
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
 
-    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str):
-        # OpenAI expects one message per tool result (no batching required)
+    def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
         self.messages.append(
             {
                 "role": "tool",
-                "tool_call_id": tool_use_block.id,
-                "content": tool_result,
+                "tool_call_id": block.id,
+                "content": result,
             }
         )
 
-    def process_received_message(self, sender: str, message: str):
-        self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})
+    def add_user_message(self, content: str) -> None:
+        self.messages.append({"role": "user", "content": content})
 
     def request_report(self) -> str:
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
         messages = [system_message] + self._windowed_messages() + [{"role": "user", "content": REPORT_PROMPT}]
         response = self.client.chat.completions.create(
             model=self.model,

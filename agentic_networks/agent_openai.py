@@ -1,16 +1,15 @@
 import json
+import logging
 import os
-from typing import Callable
+import time
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam, ChatCompletionToolParam
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
-from .agent import AGENT_TOOLS_DEFINITIONS, LLMResponse, NodeAgent, REPORT_PROMPT, StopReason, ToolUseBlock
-from .message_bus import MessageBus
-from mininet.node import Host
-from .network import Interface
+from .agent import Agent, LLMResponse, REPORT_PROMPT, StopReason, ToolUseBlock
+from .agent import DEFAULT_SYSTEM_PROMPT, DEFAULT_MAX_TOKENS, DEFAULT_TOOL_DEFS, DEFAULT_WINDOW_SIZE
 
 OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
 
@@ -24,18 +23,6 @@ MODELS = {
     "o4-mini": "o4-mini",
 }
 
-TOOLS: list[ChatCompletionToolParam] = [
-    {
-        "type": "function",
-        "function": {
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": t["schema"],
-        },
-    }
-    for t in AGENT_TOOLS_DEFINITIONS
-]
-
 _FINISH_REASON_MAP: dict[str, StopReason] = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
@@ -43,63 +30,27 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 
-class AgentOpenAI(NodeAgent):
-    """NodeAgent backed by the OpenAI GPT cloud API."""
+class AgentOpenAI(Agent):
+    """Agent backed by the OpenAI GPT cloud API."""
 
     def __init__(
         self,
-        node_name: str,
-        host: Host,
-        bus: MessageBus,
-        initial_prompt: str,
         model: str,
-        max_iterations: int,
-        max_tokens: int,
-        ifaces: list[Interface],
-        window_size: int,
-        extra_tools: list[dict] | None = None,
-        context_fn: "Callable[[], str] | None" = None,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        window_size: int = DEFAULT_WINDOW_SIZE,
     ):
-        super().__init__(
-            node_name,
-            host,
-            bus,
-            initial_prompt,
-            model,
-            max_iterations,
-            max_tokens,
-            ifaces,
-            extra_tools=extra_tools,
-            context_fn=context_fn,
-        )
+        super().__init__(model, system_prompt, max_tokens, tool_defs, window_size)
 
         if OPENAI_API_KEY_ENV_VAR not in os.environ:
             print(f"Error: {OPENAI_API_KEY_ENV_VAR} environment variable is not set.")
             exit(1)
 
+        self.log = logging.getLogger(__name__)
         self.client = OpenAI(api_key=os.getenv(OPENAI_API_KEY_ENV_VAR))
         self.messages: list[ChatCompletionMessageParam] = []
-        self.window_size = window_size
-
-    def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
-        msgs = self.messages
-        if len(msgs) <= self.window_size:
-            return msgs
-
-        trimmed = list(msgs[-self.window_size :])
-
-        # Don't start mid-exchange: skip until we find a user message.
-        # This avoids orphaned tool messages whose tool_call_id references
-        # an assistant message that was trimmed away.
-        while trimmed and trimmed[0]["role"] != "user":
-            trimmed.pop(0)
-
-        return trimmed
-
-    def _all_tools(self) -> list[ChatCompletionToolParam]:
-        if not self.extra_tool_defs:
-            return TOOLS
-        extra: list[ChatCompletionToolParam] = [
+        self._tools: list[ChatCompletionToolParam] = [
             {
                 "type": "function",
                 "function": {
@@ -108,25 +59,44 @@ class AgentOpenAI(NodeAgent):
                     "parameters": t["schema"],
                 },
             }
-            for t in self.extra_tool_defs
+            for t in self.tool_defs
         ]
-        return TOOLS + extra
 
-    def request_action_from_model(self) -> LLMResponse:
+    def _call_api(self, messages: list[ChatCompletionMessageParam], tools: list[ChatCompletionToolParam] | None = None):
+        for attempt in range(20):
+            try:
+                kwargs = {"model": self.model, "max_tokens": self.max_tokens, "messages": messages}
+                if tools:
+                    kwargs["tools"] = tools
+                return self.client.chat.completions.create(**kwargs)
+            except RateLimitError as e:
+                if "insufficient_quota" in str(e):
+                    print("Error: OpenAI quota exceeded. Check your plan and billing details.")
+                    exit(1)
+                if attempt == 19:
+                    raise
+                wait = min(10 * 2**attempt, 120)
+                self.log.warning("Rate limited (attempt %d/20), retrying in %ds...", attempt + 1, wait)
+                time.sleep(wait)
+        raise RuntimeError("unreachable")
+
+    def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
+        msgs = self.messages
+        if len(msgs) <= self.window_size:
+            return msgs
+        trimmed = list(msgs[-self.window_size :])
+        while trimmed and trimmed[0]["role"] != "user":
+            trimmed.pop(0)
+        return trimmed
+
+    def request_action(self, user_message: str) -> LLMResponse:
         if not self.messages or self.messages[-1]["role"] != "tool":
-            context = self.context_fn() if self.context_fn else ""
-            action_text = f"{context}\n\nState the next action." if context else "State the next action."
-            self.messages.append({"role": "user", "content": action_text})
+            self.messages.append({"role": "user", "content": user_message})
 
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
         full_messages = [system_message] + self._windowed_messages()
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            tools=self._all_tools(),
-            messages=full_messages,
-        )
+        response = self._call_api(full_messages, self._tools or None)
         assert len(response.choices) == 1
         msg = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
@@ -160,24 +130,20 @@ class AgentOpenAI(NodeAgent):
         stop_reason: StopReason = _FINISH_REASON_MAP.get(finish_reason, "unknown")
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
 
-    def store_tool_results(self, tool_use_block: ToolUseBlock, tool_result: str):
+    def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
         self.messages.append(
             {
                 "role": "tool",
-                "tool_call_id": tool_use_block.id,
-                "content": tool_result,
+                "tool_call_id": block.id,
+                "content": result,
             }
         )
 
-    def process_received_message(self, sender: str, message: str):
-        self.messages.append({"role": "user", "content": f"[Message from {sender}]: {message}"})
+    def add_user_message(self, content: str) -> None:
+        self.messages.append({"role": "user", "content": content})
 
     def request_report(self) -> str:
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.initial_prompt}
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
         messages = [system_message] + self._windowed_messages() + [{"role": "user", "content": REPORT_PROMPT}]
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=messages,
-        )
+        response = self._call_api(messages)
         return response.choices[0].message.content or ""

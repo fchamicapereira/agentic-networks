@@ -5,22 +5,22 @@ from tqdm import tqdm
 from typing import Callable
 from mininet.node import Host
 
-from .agent import AgentResult, NodeAgent
+from .network_agent import AGENT_TOOLS_DEFINITIONS, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
 from .message_bus import MessageBus
 from .network import Network
 from .agent_claude import AgentClaude
 from .agent_claude import MODELS as CLAUDE_MODELS
-from .agent_vllm import AgentVLLM
-from .agent_vllm import MODELS as VLLM_MODELS
 from .agent_openai import AgentOpenAI
 from .agent_openai import MODELS as GPT_MODELS
+from .agent_vllm import AgentVLLM
+from .agent_vllm import MODELS as VLLM_MODELS
 
 MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS}
 
 Reactor = Callable[["AgenticNetwork", int], None]
 
 
-def _create_agent(
+def _create_network_agent(
     node_name: str,
     host: Host,
     bus: MessageBus,
@@ -33,66 +33,53 @@ def _create_agent(
     window_size: int,
     extra_tools: list[dict] | None = None,
     context_fn: "Callable[[], str] | None" = None,
-) -> NodeAgent:
+) -> NetworkAgent:
     model = MODELS[model_key]
+
+    connections = "\n".join(
+        f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})"
+        for iface in ifaces
+    )
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        node_name=node_name,
+        connections=connections,
+        initial_prompt=initial_prompt,
+    )
+
+    extra_defs = [
+        {"name": t["name"], "description": t["description"], "schema": t["schema"]}
+        for t in (extra_tools or [])
+    ]
+    tool_defs = AGENT_TOOLS_DEFINITIONS + extra_defs
+
     if model_key in CLAUDE_MODELS:
-        return AgentClaude(
-            node_name=node_name,
-            host=host,
-            bus=bus,
-            initial_prompt=initial_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-            ifaces=ifaces,
-            window_size=window_size,
-            extra_tools=extra_tools,
-            context_fn=context_fn,
-        )
+        llm_agent = AgentClaude(model, system_prompt, max_tokens, tool_defs, window_size)
     elif model_key in GPT_MODELS:
-        return AgentOpenAI(
-            node_name=node_name,
-            host=host,
-            bus=bus,
-            initial_prompt=initial_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-            ifaces=ifaces,
-            window_size=window_size,
-            extra_tools=extra_tools,
-            context_fn=context_fn,
-        )
+        llm_agent = AgentOpenAI(model, system_prompt, max_tokens, tool_defs, window_size)
     else:
-        return AgentVLLM(
-            node_name=node_name,
-            host=host,
-            bus=bus,
-            initial_prompt=initial_prompt,
-            model=model,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-            base_url=vllm_base_url,
-            api_key="none",
-            ifaces=ifaces,
-            window_size=window_size,
-            extra_tools=extra_tools,
-            context_fn=context_fn,
-        )
+        llm_agent = AgentVLLM(model, vllm_base_url, system_prompt, max_tokens, tool_defs, window_size)
+
+    return NetworkAgent(
+        node_name=node_name,
+        host=host,
+        bus=bus,
+        agent=llm_agent,
+        ifaces=ifaces,
+        max_iterations=max_iterations,
+        context_fn=context_fn,
+        extra_tools=extra_tools,
+    )
 
 
 class AgenticNetwork:
     """Scheduler for a Mininet network.
 
-    Creates one agent per host and drives them either sequentially round-robin
-    (one LLM request in-flight at a time) or concurrently (each agent runs in
-    its own thread).
+    Creates one NetworkAgent per host and drives them either sequentially
+    round-robin or concurrently (each agent in its own thread).
 
     ``reactors`` is an optional list of callables with signature
     ``(net: AgenticNetwork, iteration: int) -> None``.  They are called on
-    every scheduler tick (after each round in sequential mode; every
-    REACTOR_POLL_INTERVAL_S seconds in concurrent mode) and can inspect or
-    mutate network state — e.g. crash a node, inject messages, etc.
+    every scheduler tick and can inspect or mutate network state.
 
     ``initial_prompts`` may be a single string (shared by all agents) or a
     dict mapping node names to individual prompt strings.
@@ -120,8 +107,8 @@ class AgenticNetwork:
         self.reactors: list[Reactor] = reactors
         self.post_reactors: list[Reactor] = post_reactors
         self._stopped: set[str] = set()
-        self.agents: list[NodeAgent] = [
-            _create_agent(
+        self.agents: list[NetworkAgent] = [
+            _create_network_agent(
                 node_name=name,
                 host=host,
                 bus=self.bus,
@@ -139,15 +126,13 @@ class AgenticNetwork:
         ]
 
     def stop_agent(self, node_name: str) -> None:
-        """Mark an agent as stopped; it will be excluded from all future steps."""
         self._stopped.add(node_name)
 
     def gather_reports(self) -> dict[str, str]:
-        """Ask each non-stopped agent to write a report. Returns {node_name: report_text}."""
         reports: dict[str, str] = {}
         lock = threading.Lock()
 
-        def fetch(agent: NodeAgent) -> None:
+        def fetch(agent: NetworkAgent) -> None:
             try:
                 text = agent.request_report()
             except Exception as exc:
@@ -205,19 +190,15 @@ class AgenticNetwork:
                 bar.refresh()
                 try:
                     iteration = next(gen)
-
                     bar.n = iteration
                     bar.set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
                     bar.refresh()
-
                     still_active.append((agent, gen))
                 except StopIteration as e:
                     results[agent.node_name] = e.value
-
-                    bar.n = min(bar.n + 1, bar.total)  # account for final iteration if it didn't yield
+                    bar.n = min(bar.n + 1, bar.total)
                     bar.set_description(f"✓ {agent.node_name}")
                     bar.refresh()
-
                     self.logger.info("Agent %s finished.", agent.node_name)
             active = still_active
 
@@ -235,17 +216,10 @@ class AgenticNetwork:
 
             global_iter += 1
 
-        tqdm.write("")  # newline after all bars
+        tqdm.write("")
         return results
 
     def _run_concurrent(self) -> dict[str, AgentResult]:
-        """Step-based concurrent execution.
-
-        On every step all active agents run exactly one iteration in parallel.
-        Once all threads for that step have joined, reactors are called, then
-        the next step begins.  This keeps reactor invocations fully synchronous
-        and deterministic with respect to agent progress.
-        """
         results: dict[str, AgentResult] = {}
         active = [(agent, agent.run()) for agent in self.agents]
 
@@ -279,7 +253,7 @@ class AgenticNetwork:
             step_results: dict[str, tuple] = {}
             step_lock = threading.Lock()
 
-            def run_step(agent: NodeAgent, gen) -> None:
+            def run_step(agent: NetworkAgent, gen) -> None:
                 bar = bars[agent.node_name]
                 bar.set_description(f"> {agent.node_name}")
                 bar.refresh()
@@ -343,5 +317,5 @@ class AgenticNetwork:
 
             step += 1
 
-        tqdm.write("")  # newline after all bars
+        tqdm.write("")
         return results

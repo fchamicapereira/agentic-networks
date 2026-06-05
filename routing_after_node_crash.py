@@ -20,7 +20,6 @@ from agentic_networks.agentic_network import AgenticNetwork, MODELS
 from experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
-    check_vllm_server_or_exit,
     collect_route_tables,
     generate_routes_pdf,
     setup_logging,
@@ -95,7 +94,6 @@ def main():
     logger = setup_logging(args.log_level)
 
     vllm_base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
-    check_vllm_server_or_exit(args.model, vllm_base_url, logger)
 
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
