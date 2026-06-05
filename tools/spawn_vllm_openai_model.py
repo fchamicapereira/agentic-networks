@@ -8,53 +8,64 @@ MODELS = {
     "qwen2.5-72b-awq": {
         "id": "Qwen/Qwen2.5-72B-Instruct-AWQ",
         "tool_call_parser": "hermes",
+        "max_model_len": 32768,
         "description": "Qwen 2.5 72B (AWQ 4-bit) — current default, ~36GB",
     },
     "qwen2.5-72b-gptq": {
         "id": "Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4",
         "tool_call_parser": "hermes",
+        "max_model_len": 32768,
         "description": "Qwen 2.5 72B (GPTQ Int4) — better quality than AWQ, ~36GB",
     },
     "qwq-32b": {
         "id": "Qwen/QwQ-32B",
         "tool_call_parser": "hermes",
+        "max_model_len": 65536,
         "description": "QwQ 32B reasoning model (FP16) — recommended, ~64GB",
     },
     "deepseek-r1-32b": {
         "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         "tool_call_parser": "hermes",
         "reasoning_parser": "deepseek_r1",
+        "max_model_len": 65536,
         "description": "DeepSeek R1 distilled into Qwen 32B (FP16) — strong reasoning, ~64GB",
     },
     "llama3.3-70b-awq": {
         "id": "casperhansen/llama-3.3-70b-instruct-awq",
         "tool_call_parser": "llama3_json",
+        "max_model_len": 32768,
         "description": "Llama 3.3 70B (AWQ 4-bit) — ~35GB",
     },
     "deepseek-r1-70b-awq": {
         "id": "Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ",
         "tool_call_parser": None,
         "reasoning_parser": "deepseek_r1",
+        "max_model_len": 32768,
         "description": "DeepSeek R1 distilled into Llama 70B (AWQ 4-bit) — ~35GB",
     },
     "qwq-32b-awq": {
         "id": "Qwen/QwQ-32B-AWQ",
         "tool_call_parser": "hermes",
+        "max_model_len": 65536,
         "description": "QwQ 32B reasoning model (AWQ 4-bit) — fits on 1 GPU, ~18GB",
     },
     "mistral-small-24b": {
         "id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         "tool_call_parser": "mistral",
+        "max_model_len": 65536,
         "description": "Mistral Small 3.1 24B (FP16) — Apache 2.0, ~48GB FP16",
     },
     "phi-4-14b": {
         "id": "microsoft/phi-4",
         "tool_call_parser": "pythonic",
+        "trust_remote_code": True,
+        "max_model_len": 16384,
         "description": "Phi-4 14B (FP16) — MIT license, ~28GB",
     },
     "gemma-3-27b": {
         "id": "google/gemma-3-27b-it",
         "tool_call_parser": "pythonic",
+        "max_model_len": 65536,
         "description": "Gemma 3 27B (FP16) — ~54GB FP16",
     },
 }
@@ -92,12 +103,17 @@ def build_docker_command(model_key: str, tensor_parallel: int, port: int, max_mo
     cmd += ["vllm/vllm-openai:latest"]              # image
     cmd += ["--model", model["id"]]
     cmd += ["--tensor-parallel-size", str(tensor_parallel)]
+    cmd += ["--gpu-memory-utilization", "0.95"]
+    cmd += ["--enable-prefix-caching"]
+    if model.get("trust_remote_code"):
+        cmd += ["--trust-remote-code"]
     if model.get("tool_call_parser"):
         cmd += ["--enable-auto-tool-choice", "--tool-call-parser", model["tool_call_parser"]]
     if model.get("reasoning_parser"):
         cmd += ["--reasoning-parser", model["reasoning_parser"]]
-    if max_model_len is not None:
-        cmd += ["--max-model-len", str(max_model_len)]
+    effective_max_len = max_model_len if max_model_len is not None else model.get("max_model_len")
+    if effective_max_len is not None:
+        cmd += ["--max-model-len", str(effective_max_len)]
     return cmd
 
 

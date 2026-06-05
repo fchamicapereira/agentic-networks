@@ -130,11 +130,13 @@ class AgentVLLM(Agent):
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
+        temperature: float = 0.3,
     ):
         # Augment the system prompt with a text-based tool guide so local models
         # can fall back to <tool_call> tags if structured tool_calls fails.
         augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
         super().__init__(model, augmented_prompt, max_tokens, tool_defs, window_size)
+        self.temperature = temperature
 
         self.log = logging.getLogger(__name__)
         if not check_server(base_url, api_key="none"):
@@ -167,6 +169,7 @@ class AgentVLLM(Agent):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=self.temperature,
             tools=self._tools,
             messages=messages,
         )
