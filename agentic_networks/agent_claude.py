@@ -1,6 +1,6 @@
 import os
 import time
-from typing import TypeGuard
+from typing import Callable, TypeGuard
 
 import anthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolUnionParam, ToolUseBlockParam
@@ -52,7 +52,18 @@ class AgentClaude(NodeAgent):
         extra_tools: list[dict] | None = None,
         context_fn: "Callable[[], str] | None" = None,
     ):
-        super().__init__(node_name, host, bus, initial_prompt, model, max_iterations, max_tokens, ifaces, extra_tools=extra_tools, context_fn=context_fn)
+        super().__init__(
+            node_name,
+            host,
+            bus,
+            initial_prompt,
+            model,
+            max_iterations,
+            max_tokens,
+            ifaces,
+            extra_tools=extra_tools,
+            context_fn=context_fn,
+        )
 
         if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
             print("Error: ANTHROPIC_API_KEY environment variable is not set.")
@@ -144,7 +155,7 @@ class AgentClaude(NodeAgent):
                     raise
                 if attempt == 19:
                     raise
-                wait = min(10 * 2 ** attempt, 120)
+                wait = min(10 * 2**attempt, 120)
                 self.log.warning("API overloaded (attempt %d/20), retrying in %ds...", attempt + 1, wait)
                 time.sleep(wait)
 

@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 import time
@@ -127,7 +128,6 @@ class TrafficSampler:
         Called by agents via the get_traffic_sample tool to get the current
         traffic rate at the moment of calling, independent of stored history.
         """
-        import json
         t_start = time.monotonic()
         before = self._read_tx_bytes()
         time.sleep(self.MEASUREMENT_WINDOW_SECONDS)

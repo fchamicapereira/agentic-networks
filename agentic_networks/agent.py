@@ -1,7 +1,7 @@
 import logging
 import pprint
 
-from typing import Literal, Optional, TypeAlias
+from typing import Literal, Optional, TypeAlias, Callable
 
 from .message_bus import MessageBus
 from .mininet_host import MininetHost
@@ -172,21 +172,19 @@ class NodeAgent:
         }
 
         self.extra_tool_defs: list[dict] = []
-        for tool in (extra_tools or []):
-            self.extra_tool_defs.append({
-                "name": tool["name"],
-                "description": tool["description"],
-                "schema": tool["schema"],
-            })
+        for tool in extra_tools or []:
+            self.extra_tool_defs.append(
+                {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "schema": tool["schema"],
+                }
+            )
             self.tools[tool["name"]] = tool["handler"]
 
     def send_message(self, to: str, message: str) -> str:
         if to not in self._neighbors:
-            return (
-                f"Error: {to} is not a directly connected neighbor. "
-                f"Direct neighbors: {', '.join(sorted(self._neighbors))}. "
-                f"To reach {to}, ask a neighbor to relay your message."
-            )
+            return f"Error: {to} is not a directly connected neighbor. " f"Direct neighbors: {', '.join(sorted(self._neighbors))}. " f"To reach {to}, ask a neighbor to relay your message."
         self.log.info("[msg → %s] %s", to, message)
         self.bus.send(to=to, sender=self.node_name, message=message)
         return f"Message sent to {to}."

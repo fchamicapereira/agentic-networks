@@ -9,10 +9,14 @@ from typing import Iterable
 from tqdm import tqdm
 from mininet.log import setLogLevel
 
+import anthropic
+from openai import OpenAI
+
 from agentic_networks.agent import AgentResult
-from agentic_networks.agent_openai import check_server
-from agentic_networks.agent_openai import MODELS as OPENAI_MODELS
+from agentic_networks.agent_vllm import check_server
+from agentic_networks.agent_vllm import MODELS as VLLM_MODELS
 from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS
+from agentic_networks.agent_openai import MODELS as GPT_MODELS
 from agentic_networks.agentic_network import MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
@@ -59,9 +63,9 @@ def setup_logging(log_level: str) -> logging.Logger:
     return logging.getLogger("main")
 
 
-def check_openai_server_or_exit(model: str, base_url: str, logger: logging.Logger) -> None:
+def check_vllm_server_or_exit(model: str, base_url: str, logger: logging.Logger) -> None:
     """Exit if the model requires an OpenAI-compatible server that isn't responding."""
-    if model in OPENAI_MODELS:
+    if model in VLLM_MODELS:
         if not check_server(base_url, api_key="none"):
             logger.error("No OpenAI-compatible server responding at %s", base_url)
             exit(1)
@@ -102,7 +106,7 @@ def write_agent_reports(reports: dict[str, str], log_dir: Path, run_stem: str, l
 
 def write_final_report(
     model_key: str,
-    openai_base_url: str,
+    vllm_base_url: str,
     max_tokens: int,
     final_prompt: str,
     agent_reports: dict[str, str],
@@ -143,7 +147,6 @@ def write_final_report(
 
     logger.info("Generating final report with model %s...", model_key)
     if model_key in CLAUDE_MODELS:
-        import anthropic
         client = anthropic.Anthropic()
         response = client.messages.create(
             model=CLAUDE_MODELS[model_key],
@@ -152,9 +155,19 @@ def write_final_report(
             messages=[{"role": "user", "content": context}],
         )
         text = "\n".join(b.text for b in response.content if b.type == "text")
+    elif model_key in GPT_MODELS:
+        client = OpenAI()
+        response = client.chat.completions.create(
+            model=GPT_MODELS[model_key],
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": final_prompt},
+                {"role": "user", "content": context},
+            ],
+        )
+        text = response.choices[0].message.content or ""
     else:
-        from openai import OpenAI
-        client = OpenAI(base_url=openai_base_url, api_key="none")
+        client = OpenAI(base_url=vllm_base_url, api_key="none")
         response = client.chat.completions.create(
             model=MODELS[model_key],
             max_tokens=max_tokens,

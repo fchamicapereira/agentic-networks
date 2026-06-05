@@ -10,10 +10,12 @@ from .message_bus import MessageBus
 from .network import Network
 from .agent_claude import AgentClaude
 from .agent_claude import MODELS as CLAUDE_MODELS
+from .agent_vllm import AgentVLLM
+from .agent_vllm import MODELS as VLLM_MODELS
 from .agent_openai import AgentOpenAI
-from .agent_openai import MODELS as OPENAI_MODELS
+from .agent_openai import MODELS as GPT_MODELS
 
-MODELS = {**CLAUDE_MODELS, **OPENAI_MODELS}
+MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS}
 
 Reactor = Callable[["AgenticNetwork", int], None]
 
@@ -26,7 +28,7 @@ def _create_agent(
     model_key: str,
     max_iterations: int,
     max_tokens: int,
-    openai_base_url: str,
+    vllm_base_url: str,
     ifaces: list,
     window_size: int,
     extra_tools: list[dict] | None = None,
@@ -47,7 +49,7 @@ def _create_agent(
             extra_tools=extra_tools,
             context_fn=context_fn,
         )
-    else:
+    elif model_key in GPT_MODELS:
         return AgentOpenAI(
             node_name=node_name,
             host=host,
@@ -56,9 +58,26 @@ def _create_agent(
             model=model,
             max_iterations=max_iterations,
             max_tokens=max_tokens,
-            base_url=openai_base_url,
+            ifaces=ifaces,
+            window_size=window_size,
+            extra_tools=extra_tools,
+            context_fn=context_fn,
+        )
+    else:
+        return AgentVLLM(
+            node_name=node_name,
+            host=host,
+            bus=bus,
+            initial_prompt=initial_prompt,
+            model=model,
+            max_iterations=max_iterations,
+            max_tokens=max_tokens,
+            base_url=vllm_base_url,
             api_key="none",
             ifaces=ifaces,
+            window_size=window_size,
+            extra_tools=extra_tools,
+            context_fn=context_fn,
         )
 
 
@@ -88,7 +107,7 @@ class AgenticNetwork:
         model_key: str,
         max_iterations: int,
         max_tokens: int,
-        openai_base_url: str,
+        vllm_base_url: str,
         window_size: int,
         reactors: list[Reactor] = [],
         post_reactors: list[Reactor] = [],
@@ -106,13 +125,11 @@ class AgenticNetwork:
                 node_name=name,
                 host=host,
                 bus=self.bus,
-                initial_prompt=(
-                    initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts
-                ),
+                initial_prompt=(initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts),
                 model_key=model_key,
                 max_iterations=max_iterations,
                 max_tokens=max_tokens,
-                openai_base_url=openai_base_url,
+                vllm_base_url=vllm_base_url,
                 ifaces=network.ifaces_per_host[name],
                 window_size=window_size,
                 extra_tools=extra_tools,
@@ -139,11 +156,7 @@ class AgenticNetwork:
             with lock:
                 reports[agent.node_name] = text
 
-        threads = [
-            threading.Thread(target=fetch, args=(agent,))
-            for agent in self.agents
-            if agent.node_name not in self._stopped
-        ]
+        threads = [threading.Thread(target=fetch, args=(agent,)) for agent in self.agents if agent.node_name not in self._stopped]
         for t in threads:
             t.start()
         for t in threads:

@@ -31,7 +31,7 @@ from agentic_routing_policies_billing_plot_tput import generate_throughput_plot
 from experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
-    check_openai_server_or_exit,
+    check_vllm_server_or_exit,
     collect_node_logs,
     collect_route_tables,
     generate_routes_pdf,
@@ -74,8 +74,8 @@ def parse_args():
     parser.add_argument("--topology", required=True, metavar="FILE")
     parser.add_argument("--prompts-dir", default=DEFAULT_PROMPTS, metavar="DIR")
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
-    parser.add_argument("--openai-host", default="localhost", metavar="HOST")
-    parser.add_argument("--openai-port", type=int, default=8000, metavar="PORT")
+    parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
+    parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
     parser.add_argument("--final-report-prompt", default=f"{DEFAULT_PROMPTS}/final-report.txt", metavar="FILE")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N")
 
@@ -106,8 +106,8 @@ def main():
 
     logger = setup_logging(args.log_level)
 
-    openai_base_url = f"http://{args.openai_host}:{args.openai_port}/v1"
-    check_openai_server_or_exit(args.model, openai_base_url, logger)
+    vllm_base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
+    check_vllm_server_or_exit(args.model, vllm_base_url, logger)
 
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
@@ -226,7 +226,7 @@ def main():
             model_key=args.model,
             max_iterations=max_iterations,
             max_tokens=args.max_tokens,
-            openai_base_url=openai_base_url,
+            vllm_base_url=vllm_base_url,
             window_size=args.window_size,
             reactors=[sample_reactor, spike_restore_reactor, clock_reactor],
             post_reactors=[],
@@ -264,7 +264,7 @@ def main():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
                 model_key=args.model,
-                openai_base_url=openai_base_url,
+                vllm_base_url=vllm_base_url,
                 max_tokens=args.max_tokens,
                 final_prompt=final_prompt,
                 agent_reports=agent_reports,
