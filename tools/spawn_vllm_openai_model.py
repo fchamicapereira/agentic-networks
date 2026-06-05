@@ -20,7 +20,7 @@ MODELS = {
     "qwq-32b": {
         "id": "Qwen/QwQ-32B",
         "tool_call_parser": "hermes",
-        "max_model_len": 65536,
+        "max_model_len": 40960,
         "description": "QwQ 32B reasoning model (FP16) — recommended, ~64GB",
     },
     "deepseek-r1-32b": {
@@ -46,7 +46,7 @@ MODELS = {
     "qwq-32b-awq": {
         "id": "Qwen/QwQ-32B-AWQ",
         "tool_call_parser": "hermes",
-        "max_model_len": 65536,
+        "max_model_len": 40960,
         "description": "QwQ 32B reasoning model (AWQ 4-bit) — fits on 1 GPU, ~18GB",
     },
     "mistral-small-24b": {
