@@ -13,7 +13,7 @@ import anthropic
 from openai import OpenAI
 
 from agentic_networks.network_agent import AgentResult
-from agentic_networks.agent_vllm import MODELS as VLLM_MODELS
+from agentic_networks.agent_vllm import MODELS as VLLM_MODELS, LogSummarizer, _count_tokens
 from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS
 from agentic_networks.agent_openai import MODELS as GPT_MODELS
 from agentic_networks.agentic_network import MODELS
@@ -160,12 +160,38 @@ def write_final_report(
         text = response.choices[0].message.content or ""
     else:
         client = OpenAI(base_url=vllm_base_url, api_key="none")
+        model_id = MODELS[model_key]
+        log_summarizer = LogSummarizer(client, model_id)
+        compressed_logs: dict[str, str] = {}
+        for name, log_text in node_logs.items():
+            if _count_tokens(log_text) > 5_000:
+                logger.info("Compressing log for %s (%d chars)...", name, len(log_text))
+                summary = log_summarizer.summarize(log_text)
+                logger.info("Log %s compressed: %d → %d chars", name, len(log_text), len(summary))
+                compressed_logs[name] = summary
+            else:
+                compressed_logs[name] = log_text
+        compressed_logs_section = "\n\n".join(
+            f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items())
+        )
+        vllm_context = (
+            "=== Agent Final Results ===\n\n"
+            + results_section
+            + "\n\n=== Agent Self-Reports ===\n\n"
+            + reports_section
+            + "\n\n=== Agent Logs ===\n\n"
+            + compressed_logs_section
+            + "\n\n=== Connectivity Matrix ===\n\n"
+            + connectivity
+            + "\n\n=== Routing Tables ===\n\n"
+            + routing_section
+        )
         response = client.chat.completions.create(
-            model=MODELS[model_key],
-            max_tokens=max_tokens,
+            model=model_id,
+            max_tokens=min(max_tokens, 4096),
             messages=[
                 {"role": "system", "content": final_prompt},
-                {"role": "user", "content": context},
+                {"role": "user", "content": vllm_context},
             ],
         )
         text = response.choices[0].message.content or ""

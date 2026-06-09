@@ -8,7 +8,7 @@ IMAGE_NAME="agentic-networks"
 
 usage() {
     echo "Usage: $0 <script.py> [args...]"
-    echo "  Runs the given Python script inside the Docker container."
+    echo "  Builds the Docker image and runs the given Python script inside it."
     exit 1
 }
 
@@ -42,5 +42,6 @@ docker run --rm -it \
     -v "$PROJECT_ROOT:/workspace" \
     -w /workspace \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    -e TQDM_DISABLE="${TQDM_DISABLE:-}" \
     "$IMAGE_NAME" \
     sudo -E /app/env/bin/python3 "$PYTHON_SCRIPT_REL" $SCRIPT_ARGS

@@ -31,6 +31,50 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
     "length": "max_tokens",
 }
 
+_VERBOSE_THRESHOLD_WORDS = 100  # untagged content longer than this gets summarized
+_VLLM_CONTEXT_LIMIT = 40_960  # token context window for vLLM models
+_HISTORY_COMPRESS_AT = 0.70  # compress when history exceeds this fraction of the limit
+_SUMMARIZER_INPUT_CAP_TOKENS = 20_000  # beyond this, summarizer input is trimmed to first+last halves
+
+# Conservative word↔token conversion: actual average is ~1.33 tokens/word for English prose,
+# but technical/network output skews higher. Overestimating prevents exceeding the token budget.
+_TOKENS_PER_WORD = 1.5
+
+_SUMMARIZER_SYSTEM_PROMPT = (
+    "You are a reasoning summarizer. When given the internal thinking of an AI agent, "
+    "write a concise first-person summary covering: (1) what was observed, "
+    "(2) what was decided, and (3) why. "
+    "Do not restate known context — focus only on what is specific to this step. "
+    "Be brief and direct."
+)
+
+_HISTORY_SUMMARIZER_SYSTEM_PROMPT = (
+    "You are summarizing the decision history of an autonomous AI agent. "
+    "Write a concise first-person summary covering: (1) the overall goal established, "
+    "(2) the key decisions made and their outcomes so far, and "
+    "(3) the current state of the system. "
+    "Be brief and factual. Do not re-explain the task setup."
+)
+
+_LOG_SUMMARIZER_SYSTEM_PROMPT = (
+    "You are summarizing a network agent's activity log. "
+    "Write a concise first-person summary covering: (1) what the agent's goal was, "
+    "(2) the key actions taken and their outcomes (routing changes, traffic measurements, "
+    "messages sent/received), and (3) the final configuration state. "
+    "Include specific values, addresses, and metrics where relevant. "
+    "Be factual and direct."
+)
+
+
+def _count_tokens(text: str) -> int:
+    """Conservative token count estimate for a string. Overestimates to prevent exceeding budget."""
+    return int(len(text.split()) * _TOKENS_PER_WORD)
+
+
+def _tokens_to_words(token_count: int) -> int:
+    """Convert a token budget to a conservative word-count limit."""
+    return int(token_count / _TOKENS_PER_WORD)
+
 
 def _build_tool_guide(tool_defs: list[dict]) -> str:
     lines = [
@@ -66,19 +110,87 @@ def _split_json_objects(text: str) -> list[str]:
     return objects
 
 
-def _strip_thinking(content: str) -> str:
-    """Remove <think>...</think> blocks from assistant content before storing in history.
+class _Summarizer:
+    """Shared base: calls the model with no tools, strips its own <think> block,
+    returns only the after-</think> answer, or None if no clean answer exists."""
 
-    Reasoning models (QwQ) emit multi-thousand-token thinking blocks that
-    are scratch-pad reasoning — useful once, but dead weight when re-sent on every
-    subsequent iteration. The tool calls extracted from the content are stored separately,
-    so stripping the thinking block loses no operational information.
-    """
-    stripped = re.sub(r"(<think>)?.*?</think>", "", content, flags=re.DOTALL).strip()
-    if stripped == content:
-        print("Content:", content, flush=True)
-        assert stripped != content, "Expected to find and strip a <think> block from the assistant content"
-    return stripped
+    _max_tokens: int = 512
+    _system_prompt: str = ""
+
+    def __init__(self, client: OpenAI, model: str) -> None:
+        self._client = client
+        self._model = model
+        self._log = logging.getLogger(__name__)
+
+    def summarize(self, text: str) -> str:
+        if _count_tokens(text) > _SUMMARIZER_INPUT_CAP_TOKENS:
+            half = _tokens_to_words(_SUMMARIZER_INPUT_CAP_TOKENS) // 2
+            words = text.split()
+            text = " ".join(words[:half]) + "\n...[middle omitted]...\n" + " ".join(words[-half:])
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": text},
+                ],
+            )
+            raw = response.choices[0].message.content or ""
+        except Exception as exc:
+            raise RuntimeError(f"summarizer API call failed: {exc}") from exc
+
+        match = re.search(r"(?:<think>)?(.*?)</think>(.*)", raw, re.DOTALL)
+        if match:
+            answer = match.group(2).strip()
+            if answer:
+                return answer
+            failure = "produced a </think> block but wrote no summary after it"
+        else:
+            answer = raw.strip()
+            if answer:
+                # No </think> — model answered directly without think tags
+                return answer
+            failure = "produced an empty response"
+
+        self._log.error(
+            "[summarizer %s]\n--- input ---\n%s\n--- raw output ---\n%s",
+            failure, text, raw,
+        )
+        raise RuntimeError(f"summarizer {failure}")
+
+
+class ThinkingSummarizer(_Summarizer):
+    """Condenses a single verbose reasoning block into a brief first-person summary."""
+
+    _max_tokens = 4096
+    _system_prompt = _SUMMARIZER_SYSTEM_PROMPT
+
+
+class HistorySummarizer(_Summarizer):
+    """Condenses the full accumulated conversation history into a compact summary."""
+
+    _max_tokens = 4096
+    _system_prompt = _HISTORY_SUMMARIZER_SYSTEM_PROMPT
+
+
+class LogSummarizer(_Summarizer):
+    """Condenses a node activity log into a compact summary for final report generation."""
+
+    _max_tokens = 4096
+    _system_prompt = _LOG_SUMMARIZER_SYSTEM_PROMPT
+
+
+def _serialize_messages(messages: list[ChatCompletionMessageParam]) -> str:
+    """Flatten a message list to a readable text dump for the history summarizer."""
+    parts = []
+    for m in messages:
+        role = m.get("role", "?")
+        content = m.get("content") or ""
+        if content:
+            parts.append(f"[{role}]: {content}")
+    return "\n\n".join(parts)
 
 
 def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
@@ -143,6 +255,8 @@ class AgentVLLM(Agent):
             print(f"Error: no vLLM server responding at {base_url}")
             exit(1)
         self.client = OpenAI(base_url=base_url, api_key="none")
+        self._summarizer = ThinkingSummarizer(self.client, self.model)
+        self._history_summarizer = HistorySummarizer(self.client, self.model)
         self.messages: list[ChatCompletionMessageParam] = []
         self._tools: list[ChatCompletionToolParam] = [
             {
@@ -155,6 +269,43 @@ class AgentVLLM(Agent):
             }
             for t in self.tool_defs
         ]
+
+    def _strip_thinking(self, content: str) -> str:
+        """Replace <think> blocks with a concise first-person summary."""
+        if "<think>" in content or "</think>" in content:
+            match = re.search(r"(?:<think>)?(.*?)</think>(.*)", content, re.DOTALL)
+            if match:
+                thinking, after = match.group(1).strip(), match.group(2).strip()
+                self.log.debug("[thinking]\n%s", thinking)
+                summary = self._summarizer.summarize(thinking)
+                self.log.info("[thinking summarized: %d → %d chars]", len(thinking), len(summary))
+                return f"{summary}\n{after}".strip() if after else summary
+            # Malformed tags — strip whatever we can
+            return re.sub(r"(<think>)?.*?</think>", "", content, flags=re.DOTALL).strip()
+
+        if len(content.split()) > _VERBOSE_THRESHOLD_WORDS:
+            summary = self._summarizer.summarize(content)
+            self.log.info("[content summarized: %d → %d chars]", len(content), len(summary))
+            return summary
+
+        return content
+
+    def _maybe_compress_history(self) -> None:
+        """Compress self.messages into a single summary when approaching the context limit."""
+        estimated_tokens = _count_tokens(self.system_prompt) + sum(_count_tokens(str(m.get("content", ""))) for m in self.messages)
+        if estimated_tokens < int(_VLLM_CONTEXT_LIMIT * _HISTORY_COMPRESS_AT):
+            return
+
+        n = len(self.messages)
+        history_text = _serialize_messages(self.messages)
+        summary = self._history_summarizer.summarize(history_text)
+        self.messages = [
+            {"role": "user", "content": "What is the context from prior iterations?"},
+            {"role": "assistant", "content": f"[History compressed — {n} messages]\n\n{summary}"},
+        ]
+        msg = f"[history compressed: {n} messages, {len(history_text)} → {len(summary)} chars]"
+        print(msg, flush=True)
+        self.log.info(msg)
 
     def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
         msgs = self.messages
@@ -195,6 +346,8 @@ class AgentVLLM(Agent):
         return response, msg, finish_reason, tool_calls, assistant_content
 
     def request_action(self, user_message: str) -> LLMResponse:
+        self._maybe_compress_history()
+
         # Don't inject a user turn if the last message is already a tool result —
         # Mistral (and some other models) reject user → tool → user sequences.
         if not self.messages or self.messages[-1]["role"] != "tool":
@@ -206,8 +359,8 @@ class AgentVLLM(Agent):
         self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
         response, _, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
 
-        if assistant_content and ("<think>" in assistant_content or "</think>" in assistant_content):
-            assistant_content = _strip_thinking(assistant_content)
+        if assistant_content:
+            assistant_content = self._strip_thinking(assistant_content)
 
         tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
             {
@@ -274,6 +427,4 @@ class AgentVLLM(Agent):
             messages=messages,
         )
         content = response.choices[0].message.content or ""
-        if "<think>" in content or "</think>" in content:
-            content = _strip_thinking(content)
-        return content
+        return self._strip_thinking(content)
