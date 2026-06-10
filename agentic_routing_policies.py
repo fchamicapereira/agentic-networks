@@ -41,9 +41,6 @@ def parse_args():
                               help="Single prompt file given to every agent")
     prompt_group.add_argument("--prompts-dir", metavar="DIR",
                               help="Directory of per-node prompt files ({node}.txt)")
-    parser.add_argument("--final-report-prompt", metavar="FILE",
-                        help="Optional file containing a one-shot analysis request sent to the model "
-                             "after all agents finish; output is written to {run_stem}-final-report.md")
     return parser.parse_args()
 
 
@@ -53,7 +50,7 @@ def load_prompts(args) -> tuple[str | dict[str, str], str]:
         p = Path(args.prompt)
         return p.read_text(), p.stem
     d = Path(args.prompts_dir)
-    prompts = {f.stem: f.read_text() for f in sorted(d.glob("*.txt"))}
+    prompts = {f.stem: f.read_text() for f in sorted(d.glob("*.txt")) if f.stem != "final-report"}
     if not prompts:
         raise SystemExit(f"No .txt files found in {d}")
     return prompts, d.name
@@ -91,8 +88,6 @@ def main():
 
     logger = setup_logging(args.log_level)
 
-    vllm_base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
-
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
     network.start()
@@ -113,7 +108,8 @@ def main():
             model_key=args.model,
             max_iterations=args.max_iterations,
             max_tokens=args.max_tokens,
-            vllm_base_url=vllm_base_url,
+            vllm_host=args.vllm_host,
+            vllm_port=args.vllm_port,
             window_size=args.window_size,
         )
         results = anet.run(concurrent=not args.sequential)
@@ -129,14 +125,15 @@ def main():
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
 
-        if args.final_report_prompt:
-            final_prompt = Path(args.final_report_prompt).read_text()
+        final_report_file = Path(args.prompts_dir) / "final-report.txt" if args.prompts_dir else None
+        if final_report_file and final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
                 model_key=args.model,
-                vllm_base_url=vllm_base_url,
+                vllm_host=args.vllm_host,
+                vllm_port=args.vllm_port,
                 max_tokens=args.max_tokens,
-                final_prompt=final_prompt,
+                final_prompt=final_report_file.read_text(),
                 agent_reports=agent_reports,
                 agent_results=results,
                 node_logs=node_logs,
@@ -146,6 +143,8 @@ def main():
                 run_stem=run_stem,
                 logger=logger,
             )
+        elif final_report_file:
+            print("No final-report.txt found in prompts directory, skipping final report generation.")
 
         network.stop()
     finally:

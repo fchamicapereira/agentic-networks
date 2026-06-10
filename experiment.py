@@ -9,14 +9,10 @@ from typing import Iterable
 from tqdm import tqdm
 from mininet.log import setLogLevel
 
-import anthropic
-from openai import OpenAI
-
 from agentic_networks.network_agent import AgentResult
-from agentic_networks.agent_vllm import MODELS as VLLM_MODELS, LogSummarizer, _count_tokens
-from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS
-from agentic_networks.agent_openai import MODELS as GPT_MODELS
-from agentic_networks.agentic_network import MODELS
+from agentic_networks.agent_vllm import AgentVLLM, MODELS as VLLM_MODELS
+from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
+from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
 
@@ -26,8 +22,6 @@ DEFAULT_LOG_DIR = SCRIPT_DIR / "logs"
 
 
 class TqdmHandler(logging.StreamHandler):
-    """Log handler that writes through tqdm.write() to avoid overwriting progress bars."""
-
     def emit(self, record: logging.LogRecord) -> None:
         try:
             tqdm.write(self.format(record))
@@ -36,7 +30,6 @@ class TqdmHandler(logging.StreamHandler):
 
 
 def chown_to_user(path: Path) -> None:
-    """Recursively restore ownership to the user who invoked sudo."""
     uid = os.environ.get("SUDO_UID")
     gid = os.environ.get("SUDO_GID")
     if not (uid and gid):
@@ -49,10 +42,9 @@ def chown_to_user(path: Path) -> None:
 
 
 def setup_logging(log_level: str) -> logging.Logger:
-    """Configure the root logger with a TqdmHandler and return the 'main' logger."""
     handler = TqdmHandler()
     handler.setFormatter(logging.Formatter(
-        "%(asctime)s  [%(name)-14s]  %(levelname)s  %(message)s",
+        "%(asctime)s  [%(name)-20s]  %(levelname)s  %(message)s",
         datefmt="%H:%M:%S",
     ))
     logging.root.setLevel(getattr(logging, log_level))
@@ -64,7 +56,6 @@ def setup_logging(log_level: str) -> logging.Logger:
 
 
 def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> None:
-    """Attach a per-node file handler to each agent.<name> logger."""
     for name in node_names:
         handler = logging.FileHandler(log_dir / f"{run_stem}-{name}.log", mode="w")
         handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", datefmt="%H:%M:%S"))
@@ -74,12 +65,10 @@ def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> 
 
 
 def collect_route_tables(network: Network) -> dict[str, str]:
-    """Read the routing table from every host and return {node_name: routes}."""
     return {name: host.cmd("ip route show").strip() for name, host in network.hosts.items()}
 
 
 def collect_node_logs(log_dir: Path, run_stem: str, node_names: Iterable[str]) -> dict[str, str]:
-    """Read per-node log files from disk and return {node_name: log_text}."""
     logs = {}
     for name in node_names:
         path = log_dir / f"{run_stem}-{name}.log"
@@ -89,7 +78,6 @@ def collect_node_logs(log_dir: Path, run_stem: str, node_names: Iterable[str]) -
 
 
 def write_agent_reports(reports: dict[str, str], log_dir: Path, run_stem: str, logger: logging.Logger) -> None:
-    """Save pre-gathered agent self-reports to {run_stem}-{name}-report.md."""
     for name, text in reports.items():
         path = log_dir / f"{run_stem}-{name}-report.md"
         path.write_text(text)
@@ -98,7 +86,8 @@ def write_agent_reports(reports: dict[str, str], log_dir: Path, run_stem: str, l
 
 def write_final_report(
     model_key: str,
-    vllm_base_url: str,
+    vllm_host: str,
+    vllm_port: int,
     max_tokens: int,
     final_prompt: str,
     agent_reports: dict[str, str],
@@ -110,7 +99,6 @@ def write_final_report(
     run_stem: str,
     logger: logging.Logger,
 ) -> None:
-    """Send a one-shot analysis request to the model and write the result to {run_stem}-final-report.md."""
     results_section = "\n".join(
         f"{name}: {'SUCCESS' if r.success else f'INCOMPLETE — {r.message}'}"
         for name, r in sorted(agent_results.items())
@@ -138,43 +126,20 @@ def write_final_report(
     )
 
     logger.info("Generating final report with model %s...", model_key)
+
     if model_key in CLAUDE_MODELS:
-        client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=CLAUDE_MODELS[model_key],
-            max_tokens=max_tokens,
-            system=final_prompt,
-            messages=[{"role": "user", "content": context}],
-        )
-        text = "\n".join(b.text for b in response.content if b.type == "text")
+        agent = AgentClaude(CLAUDE_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=max_tokens)
+        report_context = context
     elif model_key in GPT_MODELS:
-        client = OpenAI()
-        response = client.chat.completions.create(
-            model=GPT_MODELS[model_key],
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": final_prompt},
-                {"role": "user", "content": context},
-            ],
-        )
-        text = response.choices[0].message.content or ""
+        agent = AgentOpenAI(GPT_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=max_tokens)
+        report_context = context
     else:
-        client = OpenAI(base_url=vllm_base_url, api_key="none")
-        model_id = MODELS[model_key]
-        log_summarizer = LogSummarizer(client, model_id)
-        compressed_logs: dict[str, str] = {}
-        for name, log_text in node_logs.items():
-            if _count_tokens(log_text) > 5_000:
-                logger.info("Compressing log for %s (%d chars)...", name, len(log_text))
-                summary = log_summarizer.summarize(log_text)
-                logger.info("Log %s compressed: %d → %d chars", name, len(log_text), len(summary))
-                compressed_logs[name] = summary
-            else:
-                compressed_logs[name] = log_text
+        agent = AgentVLLM(VLLM_MODELS[model_key], "final-report", vllm_host, vllm_port, system_prompt=final_prompt, max_tokens=max_tokens)
+        compressed_logs = {name: agent.log_summarizer.summarize(log_text, name) for name, log_text in node_logs.items()}
         compressed_logs_section = "\n\n".join(
             f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items())
         )
-        vllm_context = (
+        report_context = (
             "=== Agent Final Results ===\n\n"
             + results_section
             + "\n\n=== Agent Self-Reports ===\n\n"
@@ -186,16 +151,8 @@ def write_final_report(
             + "\n\n=== Routing Tables ===\n\n"
             + routing_section
         )
-        response = client.chat.completions.create(
-            model=model_id,
-            max_tokens=min(max_tokens, 4096),
-            messages=[
-                {"role": "system", "content": final_prompt},
-                {"role": "user", "content": vllm_context},
-            ],
-        )
-        text = response.choices[0].message.content or ""
 
+    text = agent.request_action(report_context).extract_text()
     path = log_dir / f"{run_stem}-final-report.md"
     path.write_text(text)
     logger.info("Final report written to %s", path)

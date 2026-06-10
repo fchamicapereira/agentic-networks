@@ -28,7 +28,8 @@ def _create_network_agent(
     model_key: str,
     max_iterations: int,
     max_tokens: int,
-    vllm_base_url: str,
+    vllm_host: str,
+    vllm_port: int,
     ifaces: list,
     window_size: int,
     extra_tools: list[dict] | None = None,
@@ -53,11 +54,11 @@ def _create_network_agent(
     tool_defs = AGENT_TOOLS_DEFINITIONS + extra_defs
 
     if model_key in CLAUDE_MODELS:
-        llm_agent = AgentClaude(model, system_prompt, max_tokens, tool_defs, window_size)
+        llm_agent = AgentClaude(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
     elif model_key in GPT_MODELS:
-        llm_agent = AgentOpenAI(model, system_prompt, max_tokens, tool_defs, window_size)
+        llm_agent = AgentOpenAI(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
     else:
-        llm_agent = AgentVLLM(model, vllm_base_url, system_prompt, max_tokens, tool_defs, window_size)
+        llm_agent = AgentVLLM(model, node_name, vllm_host, vllm_port, system_prompt, max_tokens, tool_defs, window_size)
 
     return NetworkAgent(
         node_name=node_name,
@@ -94,7 +95,8 @@ class AgenticNetwork:
         model_key: str,
         max_iterations: int,
         max_tokens: int,
-        vllm_base_url: str,
+        vllm_host: str,
+        vllm_port: int,
         window_size: int,
         reactors: list[Reactor] = [],
         post_reactors: list[Reactor] = [],
@@ -116,7 +118,8 @@ class AgenticNetwork:
                 model_key=model_key,
                 max_iterations=max_iterations,
                 max_tokens=max_tokens,
-                vllm_base_url=vllm_base_url,
+                vllm_host=vllm_host,
+                vllm_port=vllm_port,
                 ifaces=network.ifaces_per_host[name],
                 window_size=window_size,
                 extra_tools=extra_tools,

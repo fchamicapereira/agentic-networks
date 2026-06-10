@@ -36,18 +36,17 @@ class AgentOpenAI(Agent):
     def __init__(
         self,
         model: str,
+        name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
-        super().__init__(model, system_prompt, max_tokens, tool_defs, window_size)
+        super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
 
         if OPENAI_API_KEY_ENV_VAR not in os.environ:
-            print(f"Error: {OPENAI_API_KEY_ENV_VAR} environment variable is not set.")
+            self.log.error("%s environment variable is not set.", OPENAI_API_KEY_ENV_VAR)
             exit(1)
-
-        self.log = logging.getLogger(__name__)
         self.client = OpenAI(api_key=os.getenv(OPENAI_API_KEY_ENV_VAR))
         self.messages: list[ChatCompletionMessageParam] = []
         self._tools: list[ChatCompletionToolParam] = [
@@ -71,7 +70,7 @@ class AgentOpenAI(Agent):
                 return self.client.chat.completions.create(**kwargs)
             except RateLimitError as e:
                 if "insufficient_quota" in str(e):
-                    print("Error: OpenAI quota exceeded. Check your plan and billing details.")
+                    self.log.error("OpenAI quota exceeded. Check your plan and billing details.")
                     exit(1)
                 if attempt == 19:
                     raise

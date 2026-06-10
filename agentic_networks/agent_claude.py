@@ -29,18 +29,17 @@ class AgentClaude(Agent):
     def __init__(
         self,
         model: str,
+        name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
-        super().__init__(model, system_prompt, max_tokens, tool_defs, window_size)
+        super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
 
         if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
-            print("Error: ANTHROPIC_API_KEY environment variable is not set.")
+            self.log.error("ANTHROPIC_API_KEY environment variable is not set.")
             exit(1)
-
-        self.log = logging.getLogger(__name__)
         self.client = anthropic.Anthropic(api_key=os.getenv(ANTHROPIC_API_KEY_ENV_VAR))
         self.messages: list[MessageParam] = []
         self._system: list[TextBlockParam] = [

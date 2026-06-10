@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import glob
 import os
 import sys
 
@@ -91,14 +92,28 @@ def select_model_interactive() -> str:
         print(f"Please enter a number between 1 and {len(keys)}.")
 
 
+def gpu_device_args() -> list[str]:
+    """Return --gpus / --device flags by probing /dev for NVIDIA devices."""
+    gpu_devs = sorted(glob.glob("/dev/nvidia[0-9]*"))
+    if not gpu_devs:
+        return []
+    args = ["--gpus", "all"]
+    for dev in gpu_devs:
+        args += ["--device", f"{dev}:{dev}"]
+    for dev in ["/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset"]:
+        if os.path.exists(dev):
+            args += ["--device", f"{dev}:{dev}"]
+    return args
+
+
 def build_docker_command(model_key: str, tensor_parallel: int, port: int, max_model_len: int | None) -> list[str]:
     model = MODELS[model_key]
     hf_cache = f"{os.path.expanduser('~')}/.cache/huggingface:/root/.cache/huggingface"
 
     cmd = ["docker", "run"]
-    cmd += ["--rm", "-it"]                          # container lifecycle
-    cmd += ["--runtime", "nvidia", "--gpus", "all"] # GPU access
-    cmd += ["-p", f"{port}:8000", "--ipc=host"]     # networking / shared memory
+    cmd += ["--rm", "-it"]                      # container lifecycle
+    cmd += gpu_device_args()                    # GPU access
+    cmd += ["-p", f"{port}:8000", "--ipc=host"] # networking / shared memory
     cmd += ["-v", hf_cache]                         # model cache volume
     cmd += ["vllm/vllm-openai:latest"]              # image
     cmd += ["--model", model["id"]]

@@ -36,9 +36,19 @@ docker build -t "$IMAGE_NAME" \
 
 echo "Running: $PYTHON_SCRIPT_REL $SCRIPT_ARGS"
 
+# Collect GPU device flags if NVIDIA devices are present
+GPU_ARGS=()
+if ls /dev/nvidia[0-9]* 2>/dev/null | grep -q .; then
+    GPU_ARGS+=(--gpus all)
+    for dev in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset; do
+        [ -e "$dev" ] && GPU_ARGS+=(--device "$dev:$dev")
+    done
+fi
+
 docker run --rm -it \
     --privileged \
     --network host \
+    "${GPU_ARGS[@]}" \
     -v "$PROJECT_ROOT:/workspace" \
     -w /workspace \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \

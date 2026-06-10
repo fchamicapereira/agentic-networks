@@ -4,8 +4,8 @@ import re
 import uuid
 import pprint
 
-from openai import OpenAI, APIConnectionError
-from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam, ChatCompletionToolParam
+from openai import omit, OpenAI, APIConnectionError
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
@@ -65,14 +65,14 @@ _LOG_SUMMARIZER_SYSTEM_PROMPT = (
     "Be factual and direct."
 )
 
+_MAX_TOOL_CALL_RETRIES = 3
+
 
 def _count_tokens(text: str) -> int:
-    """Conservative token count estimate for a string. Overestimates to prevent exceeding budget."""
     return int(len(text.split()) * _TOKENS_PER_WORD)
 
 
 def _tokens_to_words(token_count: int) -> int:
-    """Convert a token budget to a conservative word-count limit."""
     return int(token_count / _TOKENS_PER_WORD)
 
 
@@ -111,16 +111,13 @@ def _split_json_objects(text: str) -> list[str]:
 
 
 class _Summarizer:
-    """Shared base: calls the model with no tools, strips its own <think> block,
-    returns only the after-</think> answer, or None if no clean answer exists."""
-
     _max_tokens: int = 512
     _system_prompt: str = ""
 
     def __init__(self, client: OpenAI, model: str) -> None:
         self._client = client
         self._model = model
-        self._log = logging.getLogger(__name__)
+        self._log = logging.getLogger("Summarizer")
 
     def summarize(self, text: str) -> str:
         if _count_tokens(text) > _SUMMARIZER_INPUT_CAP_TOKENS:
@@ -162,28 +159,34 @@ class _Summarizer:
 
 
 class ThinkingSummarizer(_Summarizer):
-    """Condenses a single verbose reasoning block into a brief first-person summary."""
-
     _max_tokens = 4096
     _system_prompt = _SUMMARIZER_SYSTEM_PROMPT
 
 
 class HistorySummarizer(_Summarizer):
-    """Condenses the full accumulated conversation history into a compact summary."""
-
     _max_tokens = 4096
     _system_prompt = _HISTORY_SUMMARIZER_SYSTEM_PROMPT
 
 
 class LogSummarizer(_Summarizer):
-    """Condenses a node activity log into a compact summary for final report generation."""
-
     _max_tokens = 4096
     _system_prompt = _LOG_SUMMARIZER_SYSTEM_PROMPT
 
+    def __init__(self, client: OpenAI, model: str, min_tokens: int = 5_000) -> None:
+        super().__init__(client, model)
+        self._min_tokens = min_tokens
+
+    def summarize(self, text: str, name: str = "") -> str:
+        if _count_tokens(text) <= self._min_tokens:
+            return text
+        label = f" for {name}" if name else ""
+        self._log.info("Compressing log%s (%d chars)...", label, len(text))
+        summary = super().summarize(text)
+        self._log.info("Log%s compressed: %d → %d chars", label, len(text), len(summary))
+        return summary
+
 
 def _serialize_messages(messages: list[ChatCompletionMessageParam]) -> str:
-    """Flatten a message list to a readable text dump for the history summarizer."""
     parts = []
     for m in messages:
         role = m.get("role", "?")
@@ -222,22 +225,21 @@ def _parse_call_tags(content: str) -> list[tuple[str, str, dict]]:
     return results
 
 
-def check_server(base_url: str, api_key: str) -> bool:
-    """Return True if the OpenAI-compatible server is reachable and responding."""
+def check_server(base_url: str) -> bool:
     try:
-        OpenAI(base_url=base_url, api_key=api_key).models.list()
+        OpenAI(base_url=base_url, api_key="none").models.list()
         return True
     except APIConnectionError:
         return False
 
 
 class AgentVLLM(Agent):
-    """Agent backed by a local OpenAI-compatible API (vLLM, Ollama, etc.)."""
-
     def __init__(
         self,
         model: str,
-        base_url: str,
+        name: str,
+        host: str,
+        port: int,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
@@ -247,16 +249,18 @@ class AgentVLLM(Agent):
         # Augment the system prompt with a text-based tool guide so local models
         # can fall back to <tool_call> tags if structured tool_calls fails.
         augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
-        super().__init__(model, augmented_prompt, max_tokens, tool_defs, window_size)
+        super().__init__(model, name, augmented_prompt, max_tokens, tool_defs, window_size)
         self.temperature = temperature
 
-        self.log = logging.getLogger(__name__)
-        if not check_server(base_url, api_key="none"):
-            print(f"Error: no vLLM server responding at {base_url}")
+        base_url = f"http://{host}:{port}/v1"
+        if not check_server(base_url):
+            self.log.error("No vLLM server responding at %s", base_url)
             exit(1)
+
         self.client = OpenAI(base_url=base_url, api_key="none")
-        self._summarizer = ThinkingSummarizer(self.client, self.model)
-        self._history_summarizer = HistorySummarizer(self.client, self.model)
+        self.thinking_summarizer = ThinkingSummarizer(self.client, self.model)
+        self.history_summarizer = HistorySummarizer(self.client, self.model)
+        self.log_summarizer = LogSummarizer(self.client, self.model)
         self.messages: list[ChatCompletionMessageParam] = []
         self._tools: list[ChatCompletionToolParam] = [
             {
@@ -271,41 +275,37 @@ class AgentVLLM(Agent):
         ]
 
     def _strip_thinking(self, content: str) -> str:
-        """Replace <think> blocks with a concise first-person summary."""
         if "<think>" in content or "</think>" in content:
             match = re.search(r"(?:<think>)?(.*?)</think>(.*)", content, re.DOTALL)
             if match:
                 thinking, after = match.group(1).strip(), match.group(2).strip()
                 self.log.debug("[thinking]\n%s", thinking)
-                summary = self._summarizer.summarize(thinking)
+                summary = self.thinking_summarizer.summarize(thinking)
                 self.log.info("[thinking summarized: %d → %d chars]", len(thinking), len(summary))
                 return f"{summary}\n{after}".strip() if after else summary
             # Malformed tags — strip whatever we can
             return re.sub(r"(<think>)?.*?</think>", "", content, flags=re.DOTALL).strip()
 
         if len(content.split()) > _VERBOSE_THRESHOLD_WORDS:
-            summary = self._summarizer.summarize(content)
+            summary = self.thinking_summarizer.summarize(content)
             self.log.info("[content summarized: %d → %d chars]", len(content), len(summary))
             return summary
 
         return content
 
     def _maybe_compress_history(self) -> None:
-        """Compress self.messages into a single summary when approaching the context limit."""
         estimated_tokens = _count_tokens(self.system_prompt) + sum(_count_tokens(str(m.get("content", ""))) for m in self.messages)
         if estimated_tokens < int(_VLLM_CONTEXT_LIMIT * _HISTORY_COMPRESS_AT):
             return
 
         n = len(self.messages)
         history_text = _serialize_messages(self.messages)
-        summary = self._history_summarizer.summarize(history_text)
+        summary = self.history_summarizer.summarize(history_text)
         self.messages = [
             {"role": "user", "content": "What is the context from prior iterations?"},
             {"role": "assistant", "content": f"[History compressed — {n} messages]\n\n{summary}"},
         ]
-        msg = f"[history compressed: {n} messages, {len(history_text)} → {len(summary)} chars]"
-        print(msg, flush=True)
-        self.log.info(msg)
+        self.log.info("[history compressed: %d messages, %d → %d chars]", n, len(history_text), len(summary))
 
     def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
         msgs = self.messages
@@ -321,8 +321,9 @@ class AgentVLLM(Agent):
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            tools=self._tools,
             messages=messages,
+            # vLLM rejects tools=[] — omit drops the field entirely when there are no tools.
+            tools=self._tools if self._tools else omit,
         )
         assert len(response.choices) == 1, "Expected exactly one choice from the model"
         msg = response.choices[0].message
@@ -353,44 +354,50 @@ class AgentVLLM(Agent):
         if not self.messages or self.messages[-1]["role"] != "tool":
             self.messages.append({"role": "user", "content": user_message})
 
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
-        full_messages: list[ChatCompletionMessageParam] = [system_message] + self._windowed_messages()
+        tool_calls: list[tuple[str, str, dict]] = []
+        finish_reason = "stop"
+        assistant_content: str | None = None
 
-        self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
-        response, _, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
+        for attempt in range(1, _MAX_TOOL_CALL_RETRIES + 1):
+            system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
+            full_messages: list[ChatCompletionMessageParam] = [system_message] + self._windowed_messages()
 
-        if assistant_content:
-            assistant_content = self._strip_thinking(assistant_content)
+            self.log.debug("Messages sent to model:\n%s", pprint.pformat(full_messages, indent=2))
+            response, _, finish_reason, tool_calls, assistant_content = self._do_completion(full_messages)
 
-        tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
-            {
-                "id": tid,
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args)},
-            }
-            for tid, name, args in tool_calls
-        ]
+            if assistant_content:
+                assistant_content = self._strip_thinking(assistant_content)
 
-        assistant_message: ChatCompletionAssistantMessageParam = {
-            "role": "assistant",
-            "content": assistant_content,
-            "tool_calls": tool_calls_param,
-        }
-        self.messages.append(assistant_message)
-
-        # If the model produced text but no tool calls, inject a brief warning.
-        if not tool_calls and finish_reason == "stop" and (assistant_content or "").strip():
-            self.log.warning("No tool call detected in response. Injecting feedback for next iteration.")
-            self.messages.append(
+            tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
                 {
+                    "id": tid,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+                for tid, name, args in tool_calls
+            ]
+            self.messages.append({
+                "role": "assistant",
+                "content": assistant_content,
+                "tool_calls": tool_calls_param,
+            })
+
+            if tool_calls:
+                break
+
+            if finish_reason == "stop" and (assistant_content or "").strip():
+                if attempt < _MAX_TOOL_CALL_RETRIES:
+                    self.log.warning("No tool call detected (attempt %d/%d), retrying.", attempt, _MAX_TOOL_CALL_RETRIES)
+                else:
+                    self.log.warning("No tool call detected after %d attempts, advancing iteration.", _MAX_TOOL_CALL_RETRIES)
+                self.messages.append({
                     "role": "user",
                     "content": (
                         "Warning: your last response contained no tool call. "
                         "You MUST issue a tool call for every action, including report_done. "
                         "Plain text descriptions of actions are ignored — only tool calls are executed."
                     ),
-                }
-            )
+                })
 
         content: list[ToolUseBlock | str] = []
         if assistant_content:

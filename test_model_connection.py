@@ -5,7 +5,7 @@ import argparse
 from agentic_networks.agentic_network import MODELS
 from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
 from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
-from agentic_networks.agent_vllm import AgentVLLM
+from agentic_networks.agent_vllm import AgentVLLM, MODELS as VLLM_MODELS
 
 
 def main():
@@ -21,12 +21,14 @@ def main():
     print(f"Testing model: {model_key} ({model_name})")
 
     if model_key in CLAUDE_MODELS:
-        agent = AgentClaude(model=model_name)
+        agent = AgentClaude(model_name, "test")
     elif model_key in GPT_MODELS:
-        agent = AgentOpenAI(model=model_name)
+        agent = AgentOpenAI(model_name, "test")
+    elif model_key in VLLM_MODELS:
+        agent = AgentVLLM(model_name, "test", args.vllm_host, args.vllm_port)
     else:
-        base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
-        agent = AgentVLLM(model=model_name, base_url=base_url)
+        print(f"Unknown model key: {model_key}")
+        exit(1)
 
     response = agent.request_action("Say hello.")
     print(response.extract_text())

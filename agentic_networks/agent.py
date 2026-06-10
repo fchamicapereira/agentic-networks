@@ -1,5 +1,7 @@
 """Generic LLM agent interface, independent of any network or experiment logic."""
 
+import logging
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -58,11 +60,14 @@ class Agent(ABC):
     def __init__(
         self,
         model: str,
+        name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
+        self.name = name
+        self.log = logging.getLogger(f"Agent {name}")
         self.system_prompt = system_prompt
         self.model = model
         self.max_tokens = max_tokens

@@ -5,7 +5,7 @@ from pathlib import Path
 from .network import Network
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Traffic Generator")
 
 _SCRIPTS_DIR = Path(__file__).parent
 

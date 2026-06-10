@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+
 import argparse
 import subprocess
 import sys
 
 import tomli as tomllib
 from pathlib import Path
+
+from agentic_networks.agentic_network import MODELS as AVAILABLE_MODELS
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DOCKER_RUNNER = SCRIPT_DIR / "tools" / "run_in_docker.sh"
@@ -18,10 +21,11 @@ RESET = "\033[0m"
 _META_FIELDS = {"name", "script"}
 
 
-def experiment_to_args(exp: dict) -> list[str]:
+def experiment_to_args(exp: dict, exp_args_overrides: dict) -> list[str]:
     """Convert experiment fields to CLI arguments."""
+    merged = {**exp, **exp_args_overrides}
     args = []
-    for key, value in exp.items():
+    for key, value in merged.items():
         if key in _META_FIELDS:
             continue
         cli_flag = "--" + key.replace("_", "-")
@@ -33,17 +37,17 @@ def experiment_to_args(exp: dict) -> list[str]:
     return args
 
 
-def build_command(exp: dict, docker: bool) -> list[str]:
+def build_command(exp: dict, docker: bool, exp_args_overrides: dict) -> list[str]:
     script = exp["script"]
-    exp_args = experiment_to_args(exp)
+    exp_args = experiment_to_args(exp, exp_args_overrides)
     if docker:
         return ["bash", str(DOCKER_RUNNER), script] + exp_args
     else:
         return [sys.executable, script] + exp_args
 
 
-def run_experiment(exp: dict, docker: bool, index: int, total: int) -> None:
-    cmd = build_command(exp, docker)
+def run_experiment(exp: dict, docker: bool, index: int, total: int, exp_args_overrides: dict) -> None:
+    cmd = build_command(exp, docker, exp_args_overrides)
     print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
     print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']}{RESET}")
     print(f"{BOLD}{CYAN}{'='*60}{RESET}\n")
@@ -66,34 +70,28 @@ def load_toml(path: str) -> tuple[Path, list[dict]]:
     return toml_path, experiments
 
 
-def parse_args(experiments: list[dict]):
-    models = sorted({exp["model"] for exp in experiments if "model" in exp})
-    model_help = f"Run only experiments whose model contains any of these substrings (available: {', '.join(models)})"
-
+def parse_args():
     parser = argparse.ArgumentParser(description="Run experiments from a TOML file")
-    parser.add_argument("--experiments-file", "-f", default="experiments.toml",
+    parser.add_argument("--experiments-file", default="experiments.toml",
                         metavar="FILE", help="Path to the TOML experiments file (default: experiments.toml)")
-    parser.add_argument("--filter", "-e", nargs="+", metavar="NAME",
-                        help="Run only experiments whose name contains any of these substrings")
-    parser.add_argument("--model", "-m", nargs="+", metavar="MODEL", help=model_help)
+    models = sorted(AVAILABLE_MODELS)
+    parser.add_argument("--model", "-m", required=True, choices=models, metavar="MODEL",
+                        help=f"Model to use for all experiments. Choices: {{{', '.join(models)}}}")
+    parser.add_argument("--filter", "-f", nargs="+", metavar="NAME",
+                        help="Run only experiments with these exact names")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List available experiment names and exit")
     parser.add_argument("--docker", "-d", action="store_true",
                         help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
+    parser.add_argument("--vllm-host", metavar="HOST",
+                        help="vLLM server host to pass to each experiment (overrides TOML value)")
+    parser.add_argument("--vllm-port", metavar="PORT", type=int,
+                        help="vLLM server port to pass to each experiment (overrides TOML value)")
     return parser.parse_args()
 
 
 def main():
-    # Load TOML first so we can populate the --model help text with available models.
-    # Use a pre-parse to extract --experiments-file before building the real parser.
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--experiments-file", "-f", default="experiments.toml")
-    pre_args, _ = pre.parse_known_args()
-
-    _, experiments = load_toml(pre_args.experiments_file)
-    args = parse_args(experiments)
-
-    # Re-load in case --experiments-file was explicitly overridden from the default.
+    args = parse_args()
     _, experiments = load_toml(args.experiments_file)
 
     if args.list:
@@ -104,19 +102,21 @@ def main():
 
     selected = experiments
     if args.filter:
-        selected = [exp for exp in selected if any(f in exp["name"] for f in args.filter)]
+        selected = [exp for exp in selected if exp["name"] in args.filter]
         if not selected:
-            sys.exit(f"No experiments matched name filter: {args.filter}")
-    if args.model:
-        selected = [exp for exp in selected if any(f in exp.get("model", "") for f in args.model)]
-        if not selected:
-            sys.exit(f"No experiments matched model filter: {args.model}")
+            sys.exit(f"No experiments found with names: {args.filter}")
+
+    overrides = {"model": args.model}
+    if args.vllm_host is not None:
+        overrides["vllm_host"] = args.vllm_host
+    if args.vllm_port is not None:
+        overrides["vllm_port"] = args.vllm_port
 
     print(f"Running {len(selected)} experiment(s)" +
           (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
 
     for i, exp in enumerate(selected, 1):
-        run_experiment(exp, docker=args.docker, index=i, total=len(selected))
+        run_experiment(exp, docker=args.docker, index=i, total=len(selected), exp_args_overrides=overrides)
 
     print(f"\n{BOLD}{CYAN}All {len(selected)} experiment(s) completed successfully.{RESET}")
 

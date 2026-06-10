@@ -7,7 +7,7 @@ from .billing_clock import BillingClock
 from .network import Network
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Traffic Sampler")
 
 
 class TrafficSampler:

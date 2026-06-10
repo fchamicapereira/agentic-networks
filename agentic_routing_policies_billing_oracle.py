@@ -75,7 +75,6 @@ def parse_args():
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
-    parser.add_argument("--final-report-prompt", default=f"{DEFAULT_PROMPTS}/final-report.txt", metavar="FILE")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N")
 
     def spike_window(s: str) -> SpikeWindow:
@@ -104,8 +103,6 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = setup_logging(args.log_level)
-
-    vllm_base_url = f"http://{args.vllm_host}:{args.vllm_port}/v1"
 
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
@@ -224,7 +221,8 @@ def main():
             model_key=args.model,
             max_iterations=max_iterations,
             max_tokens=args.max_tokens,
-            vllm_base_url=vllm_base_url,
+            vllm_host=args.vllm_host,
+            vllm_port=args.vllm_port,
             window_size=args.window_size,
             reactors=[sample_reactor, spike_restore_reactor, clock_reactor],
             post_reactors=[],
@@ -257,14 +255,15 @@ def main():
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
 
-        if args.final_report_prompt:
-            final_prompt = Path(args.final_report_prompt).read_text()
+        final_report_file = prompts_dir / "final-report.txt"
+        if final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
                 model_key=args.model,
-                vllm_base_url=vllm_base_url,
+                vllm_host=args.vllm_host,
+                vllm_port=args.vllm_port,
                 max_tokens=args.max_tokens,
-                final_prompt=final_prompt,
+                final_prompt=final_report_file.read_text(),
                 agent_reports=agent_reports,
                 agent_results=results,
                 node_logs=node_logs,
@@ -274,6 +273,8 @@ def main():
                 run_stem=run_stem,
                 logger=logger,
             )
+        else:
+            print("No final-report.txt found in prompts directory, skipping final report generation.")
 
         generator.stop()
         sampler.stop()
