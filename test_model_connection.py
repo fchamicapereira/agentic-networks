@@ -1,4 +1,4 @@
-"""Quick connectivity test: asks a model to say hello, with no Mininet involved."""
+#!/usr/bin/env python3
 
 import argparse
 
@@ -30,8 +30,7 @@ def main():
         print(f"Unknown model key: {model_key}")
         exit(1)
 
-    response = agent.request_action("Say hello.")
-    print(response.extract_text())
+    print(agent.query("Say hello."))
 
 
 if __name__ == "__main__":

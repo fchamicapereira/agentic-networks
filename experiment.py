@@ -152,7 +152,7 @@ def write_final_report(
             + routing_section
         )
 
-    text = agent.request_action(report_context).extract_text()
+    text = agent.query(report_context)
     path = log_dir / f"{run_stem}-final-report.md"
     path.write_text(text)
     logger.info("Final report written to %s", path)

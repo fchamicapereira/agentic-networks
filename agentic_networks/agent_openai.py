@@ -39,7 +39,7 @@ class AgentOpenAI(Agent):
         name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
         super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
@@ -128,6 +128,13 @@ class AgentOpenAI(Agent):
 
         stop_reason: StopReason = _FINISH_REASON_MAP.get(finish_reason, "unknown")
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
+
+    def query(self, user_message: str) -> str:
+        response = self._call_api([
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message},
+        ])
+        return response.choices[0].message.content or ""
 
     def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
         self.messages.append(

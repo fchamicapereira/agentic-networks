@@ -77,11 +77,15 @@ def _tokens_to_words(token_count: int) -> int:
 
 
 def _build_tool_guide(tool_defs: list[dict]) -> str:
+    if not tool_defs:
+        return ""
+
     lines = [
         "To call a tool, output a <tool_call> block anywhere in your response:",
         '<tool_call>{"name": "<tool_name>", "arguments": {"param": "value", ...}}</tool_call>',
         "You may call multiple tools per response. Available tools:",
     ]
+
     for t in tool_defs:
         props = t["schema"].get("properties", {})
         required = set(t["schema"].get("required", []))
@@ -90,6 +94,7 @@ def _build_tool_guide(tool_defs: list[dict]) -> str:
         for pname, pinfo in props.items():
             opt = "" if pname in required else " (optional)"
             lines.append(f"    - {pname}{opt}: {pinfo['description']}")
+
     return "\n".join(lines)
 
 
@@ -153,7 +158,9 @@ class _Summarizer:
 
         self._log.error(
             "[summarizer %s]\n--- input ---\n%s\n--- raw output ---\n%s",
-            failure, text, raw,
+            failure,
+            text,
+            raw,
         )
         raise RuntimeError(f"summarizer {failure}")
 
@@ -242,7 +249,7 @@ class AgentVLLM(Agent):
         port: int,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
         temperature: float = 0.3,
     ):
@@ -376,11 +383,13 @@ class AgentVLLM(Agent):
                 }
                 for tid, name, args in tool_calls
             ]
-            self.messages.append({
-                "role": "assistant",
-                "content": assistant_content,
-                "tool_calls": tool_calls_param,
-            })
+            self.messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_content,
+                    "tool_calls": tool_calls_param,
+                }
+            )
 
             if tool_calls:
                 break
@@ -390,14 +399,16 @@ class AgentVLLM(Agent):
                     self.log.warning("No tool call detected (attempt %d/%d), retrying.", attempt, _MAX_TOOL_CALL_RETRIES)
                 else:
                     self.log.warning("No tool call detected after %d attempts, advancing iteration.", _MAX_TOOL_CALL_RETRIES)
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "Warning: your last response contained no tool call. "
-                        "You MUST issue a tool call for every action, including report_done. "
-                        "Plain text descriptions of actions are ignored — only tool calls are executed."
-                    ),
-                })
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Warning: your last response contained no tool call. "
+                            "You MUST issue a tool call for every action, including report_done. "
+                            "Plain text descriptions of actions are ignored — only tool calls are executed."
+                        ),
+                    }
+                )
 
         content: list[ToolUseBlock | str] = []
         if assistant_content:
@@ -412,6 +423,20 @@ class AgentVLLM(Agent):
             stop_reason = _FINISH_REASON_MAP.get(finish_reason, "unknown")
 
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
+
+    def query(self, user_message: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        match = re.search(r"(?:<think>)?.*?</think>(.*)", content, re.DOTALL)
+        return match.group(1).strip() if match else content.strip()
 
     def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
         self.messages.append(

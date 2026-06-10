@@ -46,24 +46,18 @@ REPORT_PROMPT = (
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant for managing a network node."
 DEFAULT_MAX_TOKENS = 16384
-DEFAULT_TOOL_DEFS: list[dict] | None = None
+DEFAULT_TOOL_DEFS: list[dict] = []
 DEFAULT_WINDOW_SIZE = 0
 
 
 class Agent(ABC):
-    """Generic LLM agent interface.
-
-    Owns message history, API client, windowing, and tool definitions for the
-    prompt. Knows nothing about Mininet, experiments, or tool execution.
-    """
-
     def __init__(
         self,
         model: str,
         name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
         self.name = name
@@ -85,6 +79,10 @@ class Agent(ABC):
     @abstractmethod
     def add_user_message(self, content: str) -> None:
         """Inject an arbitrary user-role message into the history (e.g. inter-agent messages)."""
+
+    @abstractmethod
+    def query(self, user_message: str) -> str:
+        """Send a plain-text message and return the model's reply. No tool calls, no history side-effects."""
 
     @abstractmethod
     def request_report(self) -> str:

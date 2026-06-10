@@ -32,7 +32,7 @@ class AgentClaude(Agent):
         name: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        tool_defs: list[dict] | None = DEFAULT_TOOL_DEFS,
+        tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
         super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
@@ -144,6 +144,15 @@ class AgentClaude(Agent):
 
         stop_reason: StopReason = response.stop_reason if response.stop_reason is not None else "unknown"
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
+
+    def query(self, user_message: str) -> str:
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=self.system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return "\n".join(b.text for b in response.content if b.type == "text")
 
     def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
         self._pending_tool_results.append(

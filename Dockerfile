@@ -32,7 +32,7 @@ ARG GID
 RUN test -n "${UID}" || { echo "ERROR: --build-arg UID is required"; exit 1; } && \
     test -n "${GID}" || { echo "ERROR: --build-arg GID is required"; exit 1; }
 
-RUN groupadd -g "${GID}" appgroup && \
+RUN groupadd -o -g "${GID}" appgroup && \
     useradd -u "${UID}" -g "${GID}" -m appuser && \
     echo "appuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     chown -R "${UID}:${GID}" /app

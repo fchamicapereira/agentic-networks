@@ -26,7 +26,7 @@ if [ ! -f "$PYTHON_SCRIPT_ABS" ]; then
     echo "Error: script not found: $PYTHON_SCRIPT_ABS"
     exit 1
 fi
-PYTHON_SCRIPT_REL=$(realpath --relative-to="$PROJECT_ROOT" "$PYTHON_SCRIPT_ABS")
+PYTHON_SCRIPT_REL="${PYTHON_SCRIPT_ABS#"$PROJECT_ROOT/"}"
 
 echo "Building image '$IMAGE_NAME'..."
 docker build -t "$IMAGE_NAME" \
