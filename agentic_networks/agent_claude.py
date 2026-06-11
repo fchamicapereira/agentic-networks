@@ -1,9 +1,10 @@
-import logging
 import os
+import sys
 import time
+import anthropic
+
 from typing import TypeGuard
 
-import anthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolResultBlockParam, ToolUnionParam, ToolUseBlockParam
 
 from .agent import Agent, LLMResponse, REPORT_PROMPT, StopReason, ToolUseBlock
@@ -16,6 +17,7 @@ MODELS = {
     "sonnet-4-6": "claude-sonnet-4-6",
     "opus-4-6": "claude-opus-4-6",
     "opus-4-7": "claude-opus-4-7",
+    "opus-4-8": "claude-opus-4-8",
 }
 
 
@@ -37,10 +39,11 @@ class AgentClaude(Agent):
     ):
         super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
 
-        if ANTHROPIC_API_KEY_ENV_VAR not in os.environ:
-            self.log.error("ANTHROPIC_API_KEY environment variable is not set.")
+        api_key = os.environ.get(ANTHROPIC_API_KEY_ENV_VAR, "").strip()
+        if not api_key:
+            print(f"error: {ANTHROPIC_API_KEY_ENV_VAR} is not set or empty", file=sys.stderr)
             exit(1)
-        self.client = anthropic.Anthropic(api_key=os.getenv(ANTHROPIC_API_KEY_ENV_VAR))
+        self.client = anthropic.Anthropic(api_key=api_key)
         self.messages: list[MessageParam] = []
         self._system: list[TextBlockParam] = [
             {
