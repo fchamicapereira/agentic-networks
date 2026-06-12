@@ -37,20 +37,14 @@ def _create_network_agent(
 ) -> NetworkAgent:
     model = MODELS[model_key]
 
-    connections = "\n".join(
-        f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})"
-        for iface in ifaces
-    )
+    connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         node_name=node_name,
         connections=connections,
         initial_prompt=initial_prompt,
     )
 
-    extra_defs = [
-        {"name": t["name"], "description": t["description"], "schema": t["schema"]}
-        for t in (extra_tools or [])
-    ]
+    extra_defs = [{"name": t["name"], "description": t["description"], "schema": t["schema"]} for t in (extra_tools or [])]
     tool_defs = AGENT_TOOLS_DEFINITIONS + extra_defs
 
     if model_key in CLAUDE_MODELS:
@@ -105,15 +99,14 @@ class AgenticNetwork:
     ):
         self.logger = logging.getLogger("main")
         self.network = network
-        self.bus = MessageBus(list(network.hosts.keys()))
+        self.message_bus = MessageBus(list(network.hosts.keys()))
         self.reactors: list[Reactor] = reactors
         self.post_reactors: list[Reactor] = post_reactors
-        self._stopped: set[str] = set()
         self.agents: list[NetworkAgent] = [
             _create_network_agent(
                 node_name=name,
                 host=host,
-                bus=self.bus,
+                bus=self.message_bus,
                 initial_prompt=(initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts),
                 model_key=model_key,
                 max_iterations=max_iterations,
@@ -127,6 +120,14 @@ class AgenticNetwork:
             )
             for name, host in network.hosts.items()
         ]
+
+        self._stopped: set[str] = set()
+
+    def send_message(self, to: str, sender: str, message: str) -> None:
+        valid = {agent.node_name for agent in self.agents}
+        if to not in valid:
+            raise ValueError(f"Unknown agent '{to}'. Valid agents: {sorted(valid)}")
+        self.message_bus.send(to, sender, message)
 
     def stop_agent(self, node_name: str) -> None:
         self._stopped.add(node_name)
@@ -144,11 +145,17 @@ class AgenticNetwork:
             with lock:
                 reports[agent.node_name] = text
 
-        threads = [threading.Thread(target=fetch, args=(agent,)) for agent in self.agents if agent.node_name not in self._stopped]
+        threads = []
+        for agent in self.agents:
+            if agent.node_name not in self._stopped:
+                threads.append(threading.Thread(target=fetch, args=(agent,)))
+
         for t in threads:
             t.start()
+
         for t in threads:
             t.join()
+
         return reports
 
     def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
@@ -280,16 +287,20 @@ class AgenticNetwork:
                     with step_lock:
                         step_results[agent.node_name] = ("error", None, exc)
 
-            threads = [threading.Thread(target=run_step, args=(agent, gen)) for agent, gen in active]
+            threads = []
+            for agent, gen in active:
+                threads.append(threading.Thread(target=run_step, args=(agent, gen)))
+
             for t in threads:
                 t.start()
+
             for t in threads:
                 t.join()
 
             still_active = []
             errors = []
             for agent, gen in active:
-                status, iteration, value = step_results[agent.node_name]
+                status, _, value = step_results[agent.node_name]
                 if status == "continue":
                     bars[agent.node_name].set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
                     bars[agent.node_name].refresh()

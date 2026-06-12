@@ -13,8 +13,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DOCKER_RUNNER = SCRIPT_DIR / "tools" / "run_in_docker.sh"
 
 # ANSI colors
-CYAN  = "\033[96m"
-BOLD  = "\033[1m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
 RESET = "\033[0m"
 
 # Fields that are metadata, not CLI arguments
@@ -53,7 +53,7 @@ def run_experiment(exp: dict, docker: bool, index: int, total: int, exp_args_ove
     print(f"{BOLD}{CYAN}{'='*60}{RESET}\n")
     result = subprocess.run(cmd, cwd=SCRIPT_DIR)
     if result.returncode != 0:
-        sys.exit(f"Experiment '{exp['name']}' failed (exit {result.returncode})")
+        exit(f"Experiment '{exp['name']}' failed (exit {result.returncode})")
 
 
 def load_toml(path: str) -> tuple[Path, list[dict]]:
@@ -61,32 +61,25 @@ def load_toml(path: str) -> tuple[Path, list[dict]]:
     if not toml_path.is_absolute():
         toml_path = SCRIPT_DIR / toml_path
     if not toml_path.exists():
-        sys.exit(f"Experiments file not found: {toml_path}")
+        exit(f"Experiments file not found: {toml_path}")
     with open(toml_path, "rb") as f:
         config = tomllib.load(f)
     experiments = config.get("experiment", [])
     if not experiments:
-        sys.exit("No [[experiment]] entries found in the TOML file.")
+        exit("No [[experiment]] entries found in the TOML file.")
     return toml_path, experiments
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run experiments from a TOML file")
-    parser.add_argument("--experiments-file", default="experiments.toml",
-                        metavar="FILE", help="Path to the TOML experiments file (default: experiments.toml)")
+    parser.add_argument("--experiments-file", default="experiments.toml", metavar="FILE", help="Path to the TOML experiments file (default: experiments.toml)")
     models = sorted(AVAILABLE_MODELS)
-    parser.add_argument("--model", "-m", required=True, choices=models, metavar="MODEL",
-                        help=f"Model to use for all experiments. Choices: {{{', '.join(models)}}}")
-    parser.add_argument("--filter", "-f", nargs="+", metavar="NAME",
-                        help="Run only experiments with these exact names")
-    parser.add_argument("--list", "-l", action="store_true",
-                        help="List available experiment names and exit")
-    parser.add_argument("--docker", "-d", action="store_true",
-                        help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
-    parser.add_argument("--vllm-host", metavar="HOST",
-                        help="vLLM server host to pass to each experiment (overrides TOML value)")
-    parser.add_argument("--vllm-port", metavar="PORT", type=int,
-                        help="vLLM server port to pass to each experiment (overrides TOML value)")
+    parser.add_argument("--model", "-m", required=True, choices=models, metavar="MODEL", help=f"Model to use for all experiments. Choices: {{{', '.join(models)}}}")
+    parser.add_argument("--filter", "-f", nargs="+", metavar="NAME", help="Run only experiments with these exact names")
+    parser.add_argument("--list", "-l", action="store_true", help="List available experiment names and exit")
+    parser.add_argument("--docker", "-d", action="store_true", help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
+    parser.add_argument("--vllm-host", metavar="HOST", help="vLLM server host to pass to each experiment (overrides TOML value)")
+    parser.add_argument("--vllm-port", metavar="PORT", type=int, help="vLLM server port to pass to each experiment (overrides TOML value)")
     return parser.parse_args()
 
 
@@ -104,7 +97,7 @@ def main():
     if args.filter:
         selected = [exp for exp in selected if exp["name"] in args.filter]
         if not selected:
-            sys.exit(f"No experiments found with names: {args.filter}")
+            exit(f"No experiments found with names: {args.filter}")
 
     overrides = {"model": args.model}
     if args.vllm_host is not None:
@@ -112,8 +105,7 @@ def main():
     if args.vllm_port is not None:
         overrides["vllm_port"] = args.vllm_port
 
-    print(f"Running {len(selected)} experiment(s)" +
-          (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
+    print(f"Running {len(selected)} experiment(s)" + (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
 
     for i, exp in enumerate(selected, 1):
         run_experiment(exp, docker=args.docker, index=i, total=len(selected), exp_args_overrides=overrides)

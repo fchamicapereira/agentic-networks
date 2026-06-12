@@ -16,7 +16,6 @@ from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
 
-
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_LOG_DIR = SCRIPT_DIR / "logs"
 
@@ -43,16 +42,17 @@ def chown_to_user(path: Path) -> None:
 
 def setup_logging(log_level: str) -> logging.Logger:
     handler = TqdmHandler()
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s  [%(name)-20s]  %(levelname)s  %(message)s",
-        datefmt="%H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s  [%(name)-20s]  %(levelname)s  %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
     logging.root.setLevel(getattr(logging, log_level))
     logging.root.addHandler(handler)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     setLogLevel("warning")  # Suppress Mininet's verbose output
     return logging.getLogger("main")
-
 
 
 def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> None:
@@ -99,19 +99,10 @@ def write_final_report(
     run_stem: str,
     logger: logging.Logger,
 ) -> None:
-    results_section = "\n".join(
-        f"{name}: {'SUCCESS' if r.success else f'INCOMPLETE — {r.message}'}"
-        for name, r in sorted(agent_results.items())
-    )
-    reports_section = "\n\n".join(
-        f"--- {name} ---\n{text}" for name, text in sorted(agent_reports.items())
-    )
-    logs_section = "\n\n".join(
-        f"--- {name} ---\n{text}" for name, text in sorted(node_logs.items())
-    )
-    routing_section = "\n\n".join(
-        f"--- {name} ---\n{route_tables.get(name, '(empty)')}" for name in sorted(route_tables)
-    )
+    results_section = "\n".join(f"{name}: {'SUCCESS' if r.success else f'INCOMPLETE — {r.message}'}" for name, r in sorted(agent_results.items()))
+    reports_section = "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(agent_reports.items()))
+    logs_section = "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(node_logs.items()))
+    routing_section = "\n\n".join(f"--- {name} ---\n{route_tables.get(name, '(empty)')}" for name in sorted(route_tables))
     context = (
         "=== Agent Final Results ===\n\n"
         + results_section
@@ -136,9 +127,7 @@ def write_final_report(
     else:
         agent = AgentVLLM(VLLM_MODELS[model_key], "final-report", vllm_host, vllm_port, system_prompt=final_prompt, max_tokens=max_tokens)
         compressed_logs = {name: agent.log_summarizer.summarize(log_text, name) for name, log_text in node_logs.items()}
-        compressed_logs_section = "\n\n".join(
-            f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items())
-        )
+        compressed_logs_section = "\n\n".join(f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items()))
         report_context = (
             "=== Agent Final Results ===\n\n"
             + results_section

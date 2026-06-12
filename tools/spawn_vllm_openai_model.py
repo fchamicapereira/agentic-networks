@@ -111,11 +111,11 @@ def build_docker_command(model_key: str, tensor_parallel: int, port: int, max_mo
     hf_cache = f"{os.path.expanduser('~')}/.cache/huggingface:/root/.cache/huggingface"
 
     cmd = ["docker", "run"]
-    cmd += ["--rm", "-it"]                      # container lifecycle
-    cmd += gpu_device_args()                    # GPU access
-    cmd += ["-p", f"{port}:8000", "--ipc=host"] # networking / shared memory
-    cmd += ["-v", hf_cache]                         # model cache volume
-    cmd += ["vllm/vllm-openai:latest"]              # image
+    cmd += ["--rm", "-it"]  # container lifecycle
+    cmd += gpu_device_args()  # GPU access
+    cmd += ["-p", f"{port}:8000", "--ipc=host"]  # networking / shared memory
+    cmd += ["-v", hf_cache]  # model cache volume
+    cmd += ["vllm/vllm-openai:latest"]  # image
     cmd += ["--model", model["id"]]
     cmd += ["--tensor-parallel-size", str(tensor_parallel)]
     cmd += ["--gpu-memory-utilization", "0.95"]
@@ -176,7 +176,7 @@ def main():
     if args.list:
         for key, m in MODELS.items():
             print(f"{key}\n  {m['description']}\n  HuggingFace: {m['id']}\n")
-        sys.exit(0)
+        exit(0)
 
     model_key = args.model or select_model_interactive()
     cmd = build_docker_command(model_key, args.tensor_parallel_size, args.port, args.max_model_len)

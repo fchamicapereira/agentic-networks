@@ -45,7 +45,7 @@ if ls /dev/nvidia[0-9]* 2>/dev/null | grep -q .; then
     done
 fi
 
-docker run --rm -it \
+docker run --rm \
     --privileged \
     --network host \
     "${GPU_ARGS[@]}" \
