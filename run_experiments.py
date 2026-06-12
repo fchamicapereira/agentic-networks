@@ -78,6 +78,7 @@ def parse_args():
     parser.add_argument("--filter", "-f", nargs="+", metavar="NAME", help="Run only experiments with these exact names")
     parser.add_argument("--list", "-l", action="store_true", help="List available experiment names and exit")
     parser.add_argument("--docker", "-d", action="store_true", help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
+    parser.add_argument("--print-commands", "-p", action="store_true", help="Print the command for each experiment and exit without running")
     parser.add_argument("--vllm-host", metavar="HOST", help="vLLM server host to pass to each experiment (overrides TOML value)")
     parser.add_argument("--vllm-port", metavar="PORT", type=int, help="vLLM server port to pass to each experiment (overrides TOML value)")
     return parser.parse_args()
@@ -104,6 +105,13 @@ def main():
         overrides["vllm_host"] = args.vllm_host
     if args.vllm_port is not None:
         overrides["vllm_port"] = args.vllm_port
+
+    if args.print_commands:
+        for exp in selected:
+            cmd = build_command(exp, docker=args.docker, exp_args_overrides=overrides)
+            print(f"# {exp['name']}")
+            print(" ".join(cmd))
+        return
 
     print(f"Running {len(selected)} experiment(s)" + (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
 

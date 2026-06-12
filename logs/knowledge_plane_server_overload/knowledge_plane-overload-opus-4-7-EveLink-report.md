@@ -2,45 +2,64 @@
 
 ## 1. Actions Taken
 
-1. **Inspected local state** with `ip addr show lo`, `ip addr show`, and `ip route show`.
-   - Discovered my loopback address `10.255.4.1/32`.
-   - Confirmed my single interface `EveLink-eth0` on `10.0.5.2/30` toward AS1 (`10.0.5.1`).
-   - Found a pre-existing default route via `10.0.5.1` — no extra routing configuration was required.
+**Initial discovery:**
+- `ip addr show lo` / `ip addr show` / `ip route show` — inspected interfaces and existing routes.
+- Found loopback 10.255.4.1/32, link interface EveLink-eth0 at 10.0.5.2/30 with peer 10.0.5.1, and a pre-installed default route via 10.0.5.1 (AS1) with `src 10.255.4.1`.
 
-2. **Advertised my prefix to AS1** via `send_message`, announcing `10.255.4.1/32` as the only prefix behind me and noting AS-path `[EveLink]`.
+**Neighbor reachability check:**
+- `ping -c 2 10.0.5.1` — confirmed the link to AS1 was up (RTT ~20 ms, 0% loss).
 
-3. **Verified link and upstream loopback reachability** with `ping -c 2 10.0.5.1` (~20 ms) and `ping -c 2 10.255.2.1` (~20 ms).
+**Initial coordination message to AS1:**
+- Sent a hello identifying myself, the link subnet, and my loopback (10.255.4.1/32). Asked AS1 to install and propagate a route to my loopback.
 
-4. **Confirmed end-to-end transit** with `ping -c 2 198.82.0.1` (~94 ms, ttl 61), validating that traffic through AS1 reaches the broader internet (specifically the ACM-served destination).
+**Route installation toward AS1's loopback:**
+- AS1 replied with its loopback 10.255.2.1/32. I installed:
+  - `ip route add 10.255.2.1/32 via 10.0.5.1 dev EveLink-eth0`
+- Then confirmed reachability: `ping -c 2 10.255.2.1` (0% loss).
 
-5. **Reported completion** via `report_done` once stable connectivity and prefix propagation were confirmed.
+**Confirmation and transit request:**
+- Replied to AS1 confirming the install, requesting default transit, and stating I had no other internal prefixes to advertise.
 
-## 2. Justification
+**End-to-end verification:**
+- `ping -c 2 -I 10.255.4.1 10.255.2.1` — loopback-sourced ping to AS1's loopback succeeded (0% loss), confirming bidirectional reachability of my advertised prefix.
+- After AS1 listed other reachable nodes, I verified each via loopback-sourced ping:
+  - 10.255.5.1 (Uni), 10.255.6.1 (User), 10.255.3.1 (AS2), 10.255.1.1 and 198.82.0.1 (ACM). All 0% loss, TTLs decreasing with hop count (61–63), consistent with default-route forwarding through AS1.
 
-- **Discovery first**: Per the instructions, I only know my direct neighbors; checking interfaces and routes is the prerequisite for any further action.
-- **No new `ip route` commands needed**: A default route via AS1 already existed and matched my desired policy (AS1 is my paid transit upstream — I should send everything not local to them). Adding redundant routes would have created noise.
-- **Advertising only my loopback**: In PASSIVE mode I must not claim address space I do not own. My loopback `10.255.4.1/32` is the only legitimate prefix behind me, so I advertised exactly that with a simple AS-path.
-- **Active verification**: The operating instructions require basing conclusions on direct tests. I pinged the link IP, AS1's loopback, and a remote destination (198.82.0.1) to validate each layer of reachability rather than assuming.
-- **No relay activity**: I received no relay requests, so no forwarding decisions were needed.
+**Idle/wait phase:**
+- Waited for further KP queries or routing updates. None arrived. Reported done.
 
-## 3. Discoveries About the Network
+## 2. Justification for Each Decision
 
-- **Topology fragment**: EveLink is a stub customer of AS1. My only neighbor is AS1 at `10.0.5.1` on subnet `10.0.5.0/30`.
-- **AS1's role and reach**: AS1 is a transit provider whose loopback is `10.255.2.1/32`. Through AS1 I can reach:
-  - AS2 (AS1's peer)
-  - Uni (AS1's other customer)
-  - ACM, which includes the destination `198.82.0.1`
-- **Link characteristics**: Local link RTT ~20 ms (notably high for a point-to-point link — likely netem-injected latency since the interface uses `qdisc netem`). End-to-end RTT to 198.82.0.1 is ~94 ms, suggesting ~3 hops of similar delay.
-- **Address plan**: The testbed uses `10.255.x.1/32` for node loopbacks and `10.0.x.0/30` for inter-node links.
+- **Inspect first, act later:** Per the autonomous-agent guidance, I needed to know my local state (loopback, link, existing routes) before touching anything. The pre-installed default route meant I didn't need to add one.
+- **Advertise loopback via message, not a routing daemon:** The instructions explicitly forbid FRR/BGPd/etc. Exchanging reachability via signed messages with neighbors is the sanctioned mechanism.
+- **Install only a /32 host route to AS1's loopback:** This is the minimum needed to reach the peer's stable node address; the default already covers everything else, so installing additional specific routes would be redundant and risk inconsistency.
+- **Use loopback-sourced pings for verification:** Loopback-to-loopback success proves both the forward path and that my advertised /32 has been propagated by AS1 such that return traffic reaches me. A link-IP-sourced ping wouldn't have tested propagation of my loopback.
+- **Did not install per-destination routes for Uni/User/AS2/ACM:** The default route via AS1 suffices, and AS1 is my paid transit provider. Adding specific routes would only matter if I had multiple upstreams or policy reasons — neither applies.
+- **Stayed PASSIVE:** Current mode says do not claim address space I don't own. I advertised only my own loopback. I did not advertise or accept 198.82.0.1 as mine.
+- **No security/ACL changes:** No firewall, ACL, or policy changes were needed or made — those require admin approval regardless.
+- **Reported done only after sustained idle and verified state:** All goals met (stable transit, reachability) and no outstanding requests.
 
-## 4. Coordination With Other Agents
+## 3. What I Discovered About the Network
 
-All coordination was with **AS1** (my only neighbor):
+- I am a stub regional ISP single-homed to AS1 (my paid upstream transit).
+- My link to AS1: 10.0.5.0/30; my loopback: 10.255.4.1/32.
+- AS1's loopback: 10.255.2.1/32.
+- AS1 provides default Internet transit and reports the following reachable nodes through it:
+  - 10.255.5.1 — Uni
+  - 10.255.6.1 — User
+  - 10.255.3.1 — AS2
+  - 10.255.1.1 and 198.82.0.1 — ACM
+- Round-trip and TTL observations suggest a roughly linear/tiered topology — AS1 is adjacent (~20 ms, TTL 64), Uni one hop beyond (~40 ms, TTL 63), User behind Uni (~44 ms, TTL 62), AS2 separately one hop past AS1 (~60 ms, TTL 63), and ACM further still (~90 ms, TTL 61–62) — consistent with AS1 sitting at the center and other ASes hanging off it.
+- 198.82.0.1 is announced reachable via AS1's default transit, attributed to ACM. (I am in PASSIVE mode and made no claim on it.)
 
-- I introduced myself, advertised `10.255.4.1/32`, and requested confirmation.
-- AS1 introduced itself, shared its loopback `10.255.2.1/32`, and offered full transit / default route.
-- I confirmed I only have one prefix and don't need a full table — default is sufficient.
-- AS1 confirmed it had installed/propagated my route, ping-tested my loopback successfully, and announced it would advertise `10.255.4.1/32` to its peer AS2 and customer Uni.
-- AS1 later confirmed propagation to AS2 was complete and listed the reachable domains (AS2, ACM including 198.82.0.1, Uni), which I then validated via ping.
+## 4. Coordination with Other Agents
 
-No Knowledge Plane WHY/FIX/CANNOT exchanges occurred — no faults were observed or reported during the experiment.
+All coordination was with my single direct neighbor, **AS1**:
+
+1. I sent a hello announcing my link IP and loopback 10.255.4.1/32, requesting AS1 install/propagate it.
+2. AS1 replied with its loopback (10.255.2.1/32) and offered default transit; asked which prefixes to route to me.
+3. I replied confirming the only prefix to route to me is 10.255.4.1/32, requested default transit, and confirmed I had installed AS1's loopback.
+4. AS1 acknowledged installing 10.255.4.1/32 via 10.0.5.2, confirmed default transit, and listed other notable reachable destinations.
+5. I verified end-to-end reachability to all listed destinations and remained available for any KP queries.
+
+No relay requests were received and no KP WHY/FIX/CANNOT exchanges occurred during the experiment. No other neighbors exist on my topology, so no other direct coordination was possible.

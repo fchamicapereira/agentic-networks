@@ -59,6 +59,8 @@ FAULT_DESCRIPTIONS = {
 
 # Loopbacks assigned alphabetically by network.py: ACM=1, AS1=2, AS2=3,
 # EveLink=4, Uni=5, User=6, Web=7
+# User's loopback (10.255.6.1) and campus link (10.0.6.0/30) are not routed
+# beyond Uni — Uni NATTs all campus traffic via MASQUERADE on Uni-eth1.
 LOOPBACKS = {
     "ACM": "10.255.1.1",
     "AS1": "10.255.2.1",
@@ -125,10 +127,10 @@ def setup_routing(network: Network, logger) -> None:
     add(univ, "10.255.6.1/32", "10.0.6.1", src=LOOPBACKS["Uni"])
     add(univ, "default", "10.0.1.2", src=LOOPBACKS["Uni"])
 
-    # AS1 → customer prefixes (Uni+User) via 10.0.1.1; EveLink loopback via 10.0.5.2; default via AS2
+    # AS1 → Uni loopback via 10.0.1.1; EveLink loopback via 10.0.5.2; default via AS2
+    # User's campus prefixes (10.255.6.1/32, 10.0.6.0/30) are intentionally not routed
+    # beyond Uni — they are hidden behind Uni's NAT.
     add(p1, "10.255.5.1/32", "10.0.1.1", src=LOOPBACKS["AS1"])
-    add(p1, "10.255.6.1/32", "10.0.1.1", src=LOOPBACKS["AS1"])
-    add(p1, "10.0.6.0/30", "10.0.1.1", src=LOOPBACKS["AS1"])
     add(p1, "10.255.4.1/32", "10.0.5.2", src=LOOPBACKS["AS1"])
     add(p1, "10.0.5.0/30", "10.0.5.2", src=LOOPBACKS["AS1"])  # so EveLink link subnet is reachable
     add(p1, "default", "10.0.2.2", src=LOOPBACKS["AS1"])
@@ -150,6 +152,10 @@ def setup_routing(network: Network, logger) -> None:
 
     # EveLink → default via AS1
     add(el, "default", "10.0.5.1", src=LOOPBACKS["EveLink"])
+
+    # NAT: masquerade all campus traffic leaving Uni toward the internet
+    logger.info("Setting up NAT on Uni (MASQUERADE on Uni-eth1)...")
+    univ.cmd("iptables -t nat -A POSTROUTING -o Uni-eth1 -j MASQUERADE")
 
 
 def start_services(network: Network, logger) -> None:
@@ -383,7 +389,8 @@ def main():
         prompts = load_prompts(args.fault)
         setup_node_logs(network.hosts, log_dir, run_stem)
         logger.info("Writing per-node logs to %s/", log_dir)
-        logger.info("Model: %s (%s) | fault: %s", args.model, MODELS[args.model], args.fault)
+        logger.info("Model: %s (%s)", args.model, MODELS[args.model])
+        logger.info("Fault: %s", args.fault)
 
         anet = AgenticNetwork(
             network=network,

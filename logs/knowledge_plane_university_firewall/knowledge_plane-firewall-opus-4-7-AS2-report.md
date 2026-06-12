@@ -2,70 +2,67 @@
 
 ## 1. Actions Taken
 
-**Initial discovery:**
-- Ran `ip addr show lo` → discovered my loopback is **10.255.3.1/32**.
-- Ran `ip addr` / `ip route show` to inventory interfaces and pre-existing routes. Found I already had `default via 10.0.2.1` (toward AS1) plus specific routes toward ACM's prefixes (10.255.1.1, 10.255.7.1, 198.82.0.1, 10.0.4.0/30) via 10.0.3.2.
-- Confirmed L2/L3 to both neighbors with `ping 10.0.2.1` (AS1) and `ping 10.0.3.2` (ACM).
+### Initial discovery
+- `ip addr show lo` → found my loopback 10.255.3.1/32.
+- `ip route show` → inventoried preloaded routes: connected /30s to AS1 (10.0.2.0/30) and ACM (10.0.3.0/30), plus preloaded customer routes via ACM (10.255.1.1, 10.255.7.1, 198.82.0.1, 10.0.4.0/30) and a default via AS1.
 
-**Routing exchange with neighbors:**
-- ACM advertised three customer prefixes (10.255.1.1/32, 10.255.7.1/32, 198.82.0.1/32) — already installed.
-- AS1 advertised five prefixes (10.255.2.1/32, 10.255.4.1/32, 10.255.5.1/32, 10.255.6.1/32, 10.0.6.0/30). I installed each with:
-  - `ip route add <prefix> via 10.0.2.1 dev AS2-eth0`
-- Later AS1 announced one additional infrastructure prefix 10.0.1.0/30 (AS1↔Uni link). I installed it with the same command.
+### Neighbor handshake
+- Sent introductory messages to AS1 (peer) and ACM (customer) announcing my loopback and customer cone, asking for their advertised prefixes.
+- Replaced the preloaded default route with explicit /32 routes (peering policy: no default from a peer; only accept what's explicitly advertised).
+  - `ip route del default via 10.0.2.1 dev AS2-eth0`
+  - `ip route add 10.255.2.1/32 via 10.0.2.1 dev AS2-eth0 src 10.255.3.1` (AS1 loopback)
+  - `ip route add 10.255.5.1/32 via 10.0.2.1 …` (Uni)
+  - `ip route add 10.255.4.1/32 via 10.0.2.1 …` (EveLink)
+  - Later added `10.255.6.1/32` (User) and `10.0.6.0/30` (Uni-User link) when AS1 announced them.
 
-**Advertisements sent:**
-- To AS1: my loopback 10.255.3.1/32 + ACM's three prefixes (next-hop 10.0.2.2).
-- To ACM: my loopback 10.255.3.1/32 + AS1's five prefixes (next-hop 10.0.3.1). ACM also uses me as default route.
+### Advertisement policy
+- To AS1 (peer): only my own loopback and customer (ACM) prefixes — 10.255.3.1/32, 10.255.1.1/32, 198.82.0.1/32. Refused to leak AS1's customer prefixes back, and dropped accidentally-announced internal /30s when AS1 pushed back.
+- To ACM (customer): full transit reachable via their existing default to me (10.0.3.1). Provided informational list of peer-side prefixes (10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1).
 
-**Verification:**
-- `ping` from AS2 to 10.255.1.1, 10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1, 10.255.7.1, 198.82.0.1 — all succeeded (0% loss).
-- For Uni's reported issue, sourced ping `ping -I 10.255.3.1 10.255.5.1` — succeeded, proving the AS2↔AS1↔Uni segment is healthy from my vantage point and that 10.255.5.1/32 is correctly installed via 10.0.2.1.
+### Verification
+- Pinged all reachable loopbacks from 10.255.3.1: 10.255.1.1, 198.82.0.1, 10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1 — all 0% loss.
 
-## 2. Justification for Each Decision
+### KP WHY investigation (198.82.0.1 unreachable from Uni/User)
+- Forwarded WHY to ACM, requested route/iptables data; sent reminders when ACM was slow to respond.
+- Performed a wire-level test from my own vantage:
+  - `nping --icmp -c 3 -S 10.255.5.1 -e AS2-eth1 198.82.0.1` — injected spoofed-source ICMP toward ACM.
+  - `tcpdump -ni AS2-eth1` confirmed ACM replied 3/3.
+  - `tcpdump -ni AS2-eth0` confirmed AS2 forwarded the replies out toward AS1 3/3.
+- Ran `ip route get 10.255.5.1 / 10.255.6.1 / 198.82.0.1` to confirm symmetric forwarding decisions.
+- Sent a definitive diagnosis to AS1 with this evidence, localizing the drop to "downstream of AS2".
 
-- **Installed AS1's prefixes as specific routes** rather than relying only on default: as a transit ISP, I want explicit visibility of peer-learned reachability so I can apply policy (don't re-advertise peer routes to other peers).
-- **Advertised ACM's prefixes to AS1 (peer)**: ACM is a paying customer. Propagating customer routes upstream/sideways earns me transit revenue and is standard customer policy ("announce customer cone to everyone").
-- **Advertised AS1's prefixes to ACM (customer)**: customers should receive everything I know about; this gives ACM full reachability into AS1's customer cone.
-- **Did NOT plan to re-advertise AS1's routes to any other peer** (per peer policy: peer routes go to customers only — never to other peers/transit providers, to avoid becoming an unpaid transit).
-- **Accepted AS1's small additional prefix (10.0.1.0/30)**: the announcement was a single small infrastructure prefix with a clear operational rationale (ICMP source address for traceroute replies from Uni's link). Volume and AS-path semantics were consistent with AS1's expected role, so it did not trigger the "anomalous bulk announcement" guard.
-- **Used `ip route add` exclusively**: no FRR/bgpd/zebra, per the instructions; all peering coordination was done via `send_message`.
+## 2. Justification
 
-## 3. What I Discovered About the Network
+- **Removed the preloaded default via AS1**: a peer is not a transit provider. Using it as default would cause me to dump traffic for unknown destinations onto AS1 for free, violating the peering relationship and risking unintended transit.
+- **Per-prefix routes for AS1's announcements**: matches valley-free routing — I only forward to AS1 what AS1 tells me it can reach.
+- **Asymmetric advertisement policy**: peer↔peer exchange only own + customer cone; customer gets full reachability via default. This is the standard transit/peer model and directly supports the revenue goal (don't carry free transit for peers).
+- **Dropped internal /30s from my announcement to AS1**: those are diagnostic prefixes, not globally meaningful, and announcing them creates noise and minor leak risk.
+- **Wire-level test before concluding**: the policy requires evidence-based diagnoses, not speculation. Pings from my loopback only test AS2's data plane to each endpoint, not whether AS2 forwards a third-party's traffic correctly. Using `nping` with a spoofed source plus `tcpdump` on the egress interface proved that AS2's forwarding plane handles the exact failing flow correctly, eliminating AS2 as the culprit.
+- **Did not modify any ACL or filter autonomously**: even when root cause was identified at Uni, the policy is clear — ACL changes always require admin approval. Reported CANNOT pending admin action.
 
-- I am one hop from AS1 (peer, 10.0.2.0/30) and one hop from ACM (customer, 10.0.3.0/30).
-- AS1's customer cone contains at least: EveLink (10.255.4.1), Uni (10.255.5.1), a host behind Uni (10.255.6.1), the Uni link 10.0.6.0/30, and the AS1↔Uni interconnect 10.0.1.0/30.
-- ACM's cone contains the ACM loopback, the web host loopback 10.255.7.1, and the acm.org web service at 198.82.0.1.
-- End-to-end forward path works: AS1 confirmed `traceroute AS1 → 10.0.2.2 → 10.0.3.2 → 198.82.0.1`. ACM confirmed it can reach AS1's customers via me.
-- Late in the experiment, AS1 reported that Uni (10.255.5.1) was still losing 100% of pings to 198.82.0.1. From my vantage I verified: (a) 10.255.5.1/32 is installed via 10.0.2.1, (b) I can ping 10.255.5.1 from AS2 and from my loopback successfully. This localizes the problem **outside the AS2↔AS1 segment** — most likely a missing return route at ACM/the web host for Uni's source 10.255.5.1, or somewhere along Uni's local stack. ACM uses default-via-me, so the return path through my routing table is correct; the issue is therefore most plausibly at ACM's host or its onward link, not in AS2's RIB.
+## 3. Network Discoveries
 
-## 4. Coordination With Other Agents
+Topology learned through conversation:
+- AS1 (peer, loopback 10.255.2.1) sits between me and two customers: Uni (10.255.5.1) and EveLink (10.255.4.1). Behind Uni is a User node (10.255.6.1) on link 10.0.6.0/30.
+- ACM (my customer, loopback 10.255.1.1) hosts a public web service at 198.82.0.1, reached via internal link 10.0.4.0/30 to another ACM-side host (10.255.7.1).
+- End-to-end pingability is otherwise universal — the only fault was the 198.82.0.1↔Uni-domain asymmetry.
 
-- **ACM (customer, directly connected):**
-  - Received their initial advertisement of three prefixes; acknowledged installation.
-  - Sent them my loopback + the five prefixes I learned from AS1.
-  - ACM confirmed reachability to 10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1 via me and that default routing through AS2 works.
+Fault discovered:
+- The Uni domain had explicit iptables DROP rules on FORWARD and OUTPUT chains for destination 198.82.0.0/24 (confirmed by Uni with active packet counters of 122 and 34). This is a deliberate egress ACL in Uni's security policy, not a routing fault.
 
-- **AS1 (peer, directly connected):**
-  - Exchanged advertisements: I sent my loopback + ACM's three prefixes; received AS1's loopback + four customer prefixes.
-  - AS1 confirmed installation of my prefixes and a successful traceroute to 198.82.0.1.
-  - Accepted a follow-up single-prefix announcement (10.0.1.0/30) with operational justification.
-  - Participated in a KP-style diagnostic for Uni↔ACM loss: reported back the state of my RIB and successful pings to 10.255.5.1 from AS2, helping AS1 narrow the fault domain to outside the AS2↔AS1 segment.
+## 4. Coordination with Other Agents
 
-- **No relayed (encrypted end-to-end) messages** were requested during the experiment, so I did not act as a forwarder for any third-party KP traffic.
+**With ACM (customer):**
+- Exchanged prefix announcements and confirmed default-route configuration.
+- During the WHY investigation, requested specific data (ip route, ip route get, iptables, ping outputs). ACM responded with a thorough multi-vantage report showing the asymmetry: src=10.255.1.1 worked everywhere, src=198.82.0.1 failed only to Uni/User.
 
-Final RIB on AS2:
-```
-default via 10.0.2.1 dev AS2-eth0
-10.0.1.0/30 via 10.0.2.1 dev AS2-eth0
-10.0.2.0/30 dev AS2-eth0 proto kernel scope link src 10.0.2.2
-10.0.3.0/30 dev AS2-eth1 proto kernel scope link src 10.0.3.1
-10.0.4.0/30 via 10.0.3.2 dev AS2-eth1
-10.0.6.0/30 via 10.0.2.1 dev AS2-eth0
-10.255.1.1 via 10.0.3.2 dev AS2-eth1
-10.255.2.1 via 10.0.2.1 dev AS2-eth0
-10.255.4.1 via 10.0.2.1 dev AS2-eth0
-10.255.5.1 via 10.0.2.1 dev AS2-eth0
-10.255.6.1 via 10.0.2.1 dev AS2-eth0
-10.255.7.1 via 10.0.3.2 dev AS2-eth1
-198.82.0.1 via 10.0.3.2 dev AS2-eth1
-```
+**With AS1 (peer):**
+- Negotiated peering policy and exchanged advertisements; corrected my initial over-announcement (internal /30s and 10.255.7.1) when AS1 questioned it — good hygiene caught by the peer.
+- Throughout the WHY, AS1 pressed me for a definitive diagnosis. I initially gave a hypothesis (CANNOT, pending ACM), then provided the wire-level proof that pivoted the investigation away from AS2/ACM and toward AS1/Uni.
+- AS1 then drove the final localization at Uni and reported the iptables root cause back to me, closing the loop.
+
+**KP outcome:**
+- Forward path (AS1→AS2→ACM): healthy at every hop.
+- Return path through AS2 from 198.82.0.1 toward 10.255.5.1/10.255.6.1: verified correct on the wire.
+- Drop: confirmed inside Uni's administrative domain, by deliberate policy.
+- Final status: CANNOT (pending Uni admin approval). No changes required or made at AS2.

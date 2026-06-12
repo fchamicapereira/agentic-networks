@@ -1,71 +1,51 @@
-# ACM Node Experiment Report
+# ACM Node — Experiment Report
 
-## 1. Actions Taken
+## 1. Actions taken
 
-**Initial discovery**
-- Ran `ip addr show` and `ip route show` to inventory my interfaces, loopback, and pre-existing routes.
-- Found my stable loopback (10.255.1.1/32), two physical interfaces (ACM-eth0 to AS2, ACM-eth1 to Web), a default route via AS2 (10.0.3.1), and pre-installed /32 routes to Web's loopback (10.255.7.1) and the service IP (198.82.0.1) via 10.0.4.2.
+**Bootstrap / self-discovery**
+- `ip addr show lo` → identified my stable address: 10.255.1.1/32.
+- `ip route show` → confirmed pre-installed routes: default via 10.0.3.1 (AS2), and specific /32s for 10.255.7.1 and 198.82.0.1 via 10.0.4.2 (Web). No changes needed.
 
-**Local reachability checks**
-- `ping` to 10.0.3.1 (AS2 link), 10.0.4.2 (Web link), and 198.82.0.1 (acm.org service) — all succeeded with 0% loss.
+**Neighbor coordination (initial)**
+- Sent advertisement to AS2 announcing 10.255.1.1/32 and 198.82.0.1/32 (next-hop 10.0.3.2), and confirmed I use AS2 as default.
+- Sent message to Web confirming I am its default gateway and that I have routes installed for its loopback and the service IP.
+- Verified internal connectivity: `ping 10.255.7.1`, `ping 198.82.0.1`, `ping 10.0.3.1` — all 0% loss.
 
-**Advertising prefixes upstream**
-- Sent a message to AS2 advertising my loopback (10.255.1.1/32), Web's loopback (10.255.7.1/32), and the service prefix (198.82.0.1/32), all reachable via next-hop 10.0.3.2.
+**External reachability verification**
+- After AS2 reported the list of reachable loopbacks (10.255.3.1 AS2, 10.255.2.1 AS1, 10.255.5.1 Uni, 10.255.4.1 EveLink, later 10.255.6.1 User), I pinged each from my loopback. All replied with 0% loss. Concluded the data plane was healthy end-to-end from ACM.
 
-**Installing the AS2 loopback route**
-- After AS2 announced its loopback (10.255.3.1/32), I added: `ip route add 10.255.3.1/32 via 10.0.3.1 dev ACM-eth0`.
-- Verified with `ping -c 2 10.255.3.1` — success.
+**KP WHY investigation (Uni/User unreachability)**
+- Web reported 100% loss from src=198.82.0.1 to Uni (10.255.5.1) and User (10.255.6.1), but 0% loss to AS2/AS1/EveLink.
+- I re-tested from ACM (src=10.255.1.1): all destinations including Uni/User responded fine. Ran `traceroute 10.255.5.1` → 3 clean hops (10.255.3.1 → 10.255.2.1 → 10.255.5.1).
+- Inspected `ip route get 10.255.5.1`, `ip route show`, and `iptables -L -n -v` — no filtering, route correct.
+- Asked Web to run `ip route show`, `ip route get`, and `ping -I 198.82.0.1` to each destination. Result: src=198.82.0.1 reached AS1 and EveLink fine, but 100% loss to Uni/User.
+- Forwarded the consolidated evidence to AS2 with an explicit hypothesis (Uni-side missing route or ACL on src=198.82.0.1).
+- AS2 reproduced the diagnosis independently and forwarded WHY to AS1. Uni confirmed: deliberate iptables DROP rules on FORWARD/OUTPUT for destination 198.82.0.0/24, with active counters.
+- Outcome reported back to Web and AS2: **CANNOT (pending Uni admin action)**.
 
-**Verifying remote reachability**
-- After AS2 announced prefixes learned from AS1 (10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1, 10.0.6.0/30), I pinged each remote loopback — all 0% loss. I deliberately did NOT install per-prefix /32 routes for these; the existing default via 10.0.3.1 already covers them, keeping my routing table minimal.
+## 2. Justification for each decision
 
-**Coordination with Web**
-- Acknowledged that Web's two routes (10.255.7.1/32 and 198.82.0.1/32) were already installed, told Web its default via 10.0.4.1 was sufficient, and forwarded the full prefix list learned from AS2.
+- **No routing daemons, manual `ip route`-only management** — required by my instructions and adequate for the small topology.
+- **Advertised both 10.255.1.1/32 and 198.82.0.1/32 to AS2** — my loopback is needed for end-to-end node identity in the KP; 198.82.0.1/32 is the public service prefix that must be globally reachable.
+- **Kept default route via AS2** — single upstream, simplest and correct configuration; AS2's reply confirmed it had installed reverse routes for my prefixes.
+- **Verified before claiming success** — instructed to base every conclusion on direct observation; I pinged every announced loopback rather than assume the advertisement was sufficient.
+- **For the WHY: tested locally first, then asked Web for parallel tests** — to localize whether the fault was forward path (mine), source-dependent (Web), or destination-dependent (Uni). Comparing the two source addresses to four destinations isolated the discriminator cleanly.
+- **Did not change any local config in response to the Uni issue** — my evidence ruled out any fault on my side; touching routes or ACLs would have been speculative and could mask the real problem.
+- **Refused to override Uni's filter unilaterally** — ACLs are deliberate security policy. Even if I had had authority over Uni (which I don't), instructions explicitly require admin approval for access-control changes. Reported CANNOT.
+- **Externally reported only observable service status, not internal details** — followed the organizational boundary rule: said "from src=198.82.0.1 we observe 100% loss to Uni/User" (status) and shared diagnostic outputs of routing/iptables on my border (which is mine to share), but did not expose Web's internal architecture beyond what was needed for the joint diagnosis (Web is in my org, so internal sharing with Web was free).
 
-**Final verification**
-- Re-ran the route table dump, pinged 198.82.0.1, and pinged every known loopback (10.255.2.1 through 10.255.7.1) — all reachable, 0% loss — before calling `report_done`.
+## 3. What I discovered about the network
 
-## 2. Justification
+- **Topology (from neighbor exchange):** AS2 is my single upstream. AS2 peers with AS1. AS1 has customers Uni (10.255.5.1) and EveLink (10.255.4.1). User (10.255.6.1) sits behind Uni. Web (10.255.7.1) is internal to my AS and hosts 198.82.0.1.
+- **Latencies observed:** ACM↔AS2 ~30 ms, ACM↔AS1 ~70 ms, ACM↔EveLink/Uni ~90 ms, ACM↔User ~94 ms — consistent with a linear chain ACM→AS2→AS1→{EveLink,Uni→User}.
+- **Data-plane health (my vantage point):** Forward path from ACM is healthy to every announced destination; AS2 independently confirmed its half was clean.
+- **Fault localization:** The 100%-loss symptom from Web was destination-specific (Uni domain) and source-specific (198.82.0.1) — a strong indicator of policy filtering rather than a routing fault. AS1 and EveLink, both reached via the same upstream path, were unaffected, ruling out an AS1-wide problem.
+- **Confirmed root cause:** Deliberate iptables DROP rules on Uni for dst 198.82.0.0/24 — a configured security policy, not a network malfunction. The fix lies entirely in Uni's administrative domain.
 
-- **Default route already pointed at AS2**: AS2 is my designated upstream ISP per my role description, so I kept the default route and used it to cover anything reachable beyond AS2 rather than bloating the FIB with per-destination /32s.
-- **Per-neighbor /32 for AS2's loopback**: While the default would also reach it, having an explicit route makes the loopback unambiguously reachable even if the default were withdrawn during diagnostics — a small, safe addition.
-- **Advertising 198.82.0.1/32, 10.255.7.1/32, and 10.255.1.1/32 to AS2**: My primary goal is keeping acm.org reachable. The service prefix must propagate to the wider internet; the loopbacks let other KP agents reach me and Web for diagnostics.
-- **Not modifying Web's pre-existing routes**: They were already correct, and the Web agent confirmed its default via me worked.
-- **No routing daemon used**: All routing exchange was via `send_message` and all FIB changes via `ip route add`, per the rules.
-- **Verified before reporting**: Per the KP guidance, every claim of reachability was backed by a successful ping I ran myself, not assumed.
+## 4. Coordination with other agents
 
-## 3. What I Discovered About the Network
+- **AS2 (upstream ISP):** exchanged prefix announcements (I advertised 10.255.1.1/32 and 198.82.0.1/32; AS2 listed AS1/Uni/EveLink/User loopbacks reachable via default). During the WHY, AS2 ran independent verification (nping 10.255.5.1 → 198.82.0.1 succeeded through AS2), forwarded the WHY into AS1's domain, and eventually relayed Uni's confirmation back to me.
+- **Web (internal host):** confirmed default gateway 10.0.4.1, ran ping/traceroute tests from src=198.82.0.1 to the four external loopbacks, supplied `ip route show` and `ip route get` outputs, and contributed the key observation that AS1 itself replied to 198.82.0.1 (eliminating AS1 return-path as the cause). Web and I jointly agreed not to modify either of our configurations, since the evidence pointed outside our AS.
+- **Uni (via AS2→AS1 relay):** never contacted directly (no adjacency), but reachable through the KP. Their admins confirmed the deliberate ACL.
 
-The network from my vantage point looks like:
-
-```
-   AS1 (10.255.2.1)
-        |
-        | (peer)
-        |
-   AS2 (10.255.3.1) ----[10.0.3.0/30]---- ACM (10.255.1.1) ----[10.0.4.0/30]---- Web (10.255.7.1, 198.82.0.1)
-        |
-        +-- also reaches: EveLink (10.255.4.1)
-                          Uni (10.255.5.1)
-                          host behind Uni (10.255.6.1)
-                          10.0.6.0/30 (link behind Uni)
-```
-
-- I'm a stub/content AS single-homed to AS2.
-- AS2 peers with AS1, and the rest of the visible internet (EveLink, Uni and what's behind it) sits on the far side of AS1.
-- RTTs were consistent with hop count: ~6 ms to Web (1 hop), ~34 ms to AS2, ~80 ms to AS1, ~100–112 ms to nodes behind AS1.
-- No anomalous prefix floods or suspicious advertisements were received — AS2 only announced a small set of plausibly-owned/learned prefixes, consistent with its expected role.
-
-## 4. Coordination With Other Agents
-
-- **AS2 (upstream ISP)**:
-  - I advertised three /32s (my loopback, Web's loopback, the service IP). AS2 acknowledged installing them via next-hop 10.0.3.2 and propagating to AS1.
-  - AS2 announced its loopback (10.255.3.1/32) and later the prefixes it learned from AS1 (10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1, 10.0.6.0/30).
-  - I confirmed reachability to those prefixes back to AS2.
-
-- **Web (the acm.org host)**:
-  - Web introduced itself with its addresses and asked me to install service routes (already present) and share the topology.
-  - I confirmed the routes, told Web its existing default via 10.0.4.1 was sufficient, and forwarded the full list of node loopbacks once AS2 shared them.
-  - Web confirmed it could reach my loopback (10.255.1.1) over its default.
-
-No relay requests passed through me during this experiment, so no end-to-end forwarding-without-reading was exercised. The end-state is that the ACM Digital Library (198.82.0.1 / acm.org) is operational and globally advertised through AS2, and I verified that directly.
+Final state: ACM border configuration unchanged from the working baseline, ACM Digital Library healthy and serving 198.82.0.1 for everyone except Uni-domain clients, who are blocked by their own configured policy. KP WHY closed with outcome **CANNOT (pending Uni admin)**.

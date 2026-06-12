@@ -1,62 +1,52 @@
-# Web Node Experiment Report
-
-## Role
-I am the ACM Digital Library web server (acm.org), service IP 198.82.0.1, node loopback 10.255.7.1, located inside ACM's network with a single uplink to ACM (Web-eth0, 10.0.4.2/30, peer 10.0.4.1).
+# Web Node — Experiment Report
 
 ## 1. Actions Taken
 
-a. Inspected local state:
-   - `ip addr show` revealed loopback addresses 10.255.7.1/32 and 198.82.0.1/32 pre-assigned, plus Web-eth0 = 10.0.4.2/30.
-   - `ip route show` confirmed a pre-installed default route `default via 10.0.4.1 dev Web-eth0` and the connected /30.
+**Initial inspection**
+- Ran `ip addr show` and `ip route show`. Found my loopback addresses (10.255.7.1 node IP, 198.82.0.1 service IP), my eth0 IP (10.0.4.2/30), and a pre-installed default route via 10.0.4.1 (ACM).
 
-b. Advertised my prefixes to my only neighbor ACM via send_message:
-   - 10.255.7.1/32 (node ID / stable address)
-   - 198.82.0.1/32 (service IP for acm.org)
-   - Asked ACM to install routes pointing to 10.0.4.2 and to propagate upstream to AS2.
+**Announced loopbacks to ACM**
+- Sent a message to ACM advertising 10.255.7.1/32 and 198.82.0.1/32 with next-hop 10.0.4.2, and requested that 198.82.0.1/32 be re-advertised to AS2.
 
-c. Verified link-local reachability:
-   - `ping -c 2 10.0.4.1` → OK (peer link)
-   - `ping -c 2 10.255.1.1` → OK (ACM loopback)
+**Verified local↔ACM connectivity**
+- `ping -c 3 10.0.4.1` and `ping -c 3 10.255.1.1` — both 0% loss. Confirmed default route via 10.0.4.1.
 
-d. After ACM shared the topology learned from AS2, I verified end-to-end reachability to every advertised node loopback using my default route:
-   - 10.255.3.1 (AS2), 10.255.2.1 (AS1), 10.255.4.1 (EveLink), 10.255.5.1 (Uni), 10.255.6.1 (host behind Uni) — all responded with 0% loss.
+**End-to-end reachability tests from 198.82.0.1**
+- After ACM listed remote loopbacks, ran `ping -c 3 -I 198.82.0.1 <ip>` against 10.255.3.1 (AS2), 10.255.2.1 (AS1), 10.255.4.1 (EveLink), and 10.255.5.1 (Uni).
+- AS2/AS1/EveLink: 0% loss. Uni: 100% loss.
 
-e. Reported success via `report_done`.
+**Localization probing**
+- `traceroute -n -s 198.82.0.1 10.255.5.1`: hops 1–3 (ACM, AS2, AS1) returned; hop 4+ silent.
+- Per ACM's request: `ip route show`, `ip route get 10.255.5.1`, `ip route get 10.255.6.1`, plus sourced pings to 10.255.5.1, 10.255.6.1, 10.255.2.1, 10.255.4.1. Confirmed Uni (10.255.5.1) and User (10.255.6.1) both 100% loss; AS1 and EveLink fine.
 
-## 2. Justification of Decisions
+**No routing changes applied.** The pre-installed default route (`default via 10.0.4.1 dev Web-eth0 src 10.255.7.1`) was already correct, and ACM/AS2 had installed return routes for my loopbacks. Nothing required editing with `ip route add/del`.
 
-- **No new routes installed locally.** As a stub host with a single uplink, a default route via ACM is sufficient and correct. Adding per-prefix static routes would be redundant and brittle.
-- **Advertised both loopback IPs explicitly.** 10.255.7.1 is my stable KP node identity; 198.82.0.1 is the public service address. Both must be reachable from the rest of the network for users to reach acm.org, so ACM (and beyond) needs routes for them.
-- **Used send_message rather than any routing daemon.** Per the rules, FRR/bgpd/ospfd are forbidden; route exchange is done via KP messages and confirmed with `ip route`.
-- **Verified by direct ping before declaring success.** The instructions require basing conclusions on what I directly tested. Ping from my own namespace to each remote loopback confirms both directions (return path requires ACM/AS2 to have my prefixes installed).
-- **No need to suspect anomalous advertisements.** ACM advertised only 7 prefixes, all consistent with the small testbed topology and with ACM's expected role as my upstream — no volume anomaly warranting investigation.
+## 2. Justification of Each Decision
+
+- **Advertise loopbacks first**: a host whose addresses aren't known cannot be reached; this was the prerequisite for any service availability.
+- **Verify direct link before declaring readiness**: the standing instruction is to base conclusions on what I directly tested. Pinging 10.0.4.1 and 10.255.1.1 gave me that base.
+- **Proactively test end-to-end from 198.82.0.1**: the service IP is the one that actually matters to users. Testing only from 10.255.7.1 would have masked source-specific filtering.
+- **Use traceroute and per-destination tests for localization**: distinguishing forward-path break vs. return-path filter vs. destination-specific policy requires comparing working and failing paths that share infrastructure.
+- **Did not change firewall/ACL or routes unilaterally**: the symptom pointed to security policy on Uni. The admin-approval policy explicitly forbids autonomous changes to ACLs/firewall, and the responsible domain was Uni, not Web. The correct KP response was WHY → CANNOT.
+- **Issued WHY through ACM**: I have only one neighbor (ACM), so all KP traffic to AS2/AS1/Uni must transit ACM as a relay.
+- **Reported as hypothesis vs. finding**: when I suspected an inbound ACL on Uni, I labeled it a hypothesis pending Uni's confirmation, per the "evidence before conclusions" rule.
 
 ## 3. Network Discoveries
 
-Through my single neighbor ACM (who learned from upstream AS2), I discovered the following topology of node loopbacks (all reachable from Web through the default route):
-
-| Prefix | Node | TTL from Web | Approx. hops |
-|---|---|---|---|
-| 10.255.1.1/32 | ACM (my upstream) | 64 | 1 |
-| 10.255.3.1/32 | AS2 | 63 | 2 |
-| 10.255.2.1/32 | AS1 | 62 | 3 |
-| 10.255.4.1/32 | EveLink | 61 | 4 |
-| 10.255.5.1/32 | Uni | 61 | 4 |
-| 10.255.6.1/32 | host behind Uni | 60 | 5 |
-| 10.0.6.0/30 | link behind Uni | — | — |
-
-RTT increases monotonically with hop count (≈6 ms to ACM, ≈40 ms to AS2, ≈88 ms to AS1, ≈110–120 ms to EveLink/Uni and beyond), consistent with a linear-ish path Web → ACM → AS2 → {AS1, EveLink, Uni → host}.
+- **Topology** (learned via messages): Web — ACM (AS-internal) — AS2 (upstream) — AS1 (peer) — {EveLink customer, Uni customer (with User behind it)}.
+- **Loopbacks**: ACM 10.255.1.1, AS2 10.255.3.1, AS1 10.255.2.1, EveLink 10.255.4.1, Uni 10.255.5.1, User 10.255.6.1, Web 10.255.7.1, plus public service 198.82.0.1.
+- **RTTs** from 198.82.0.1: ~4 ms ACM, ~34 ms AS2, ~74 ms AS1, ~94 ms EveLink, ~94 ms (expected) Uni — consistent with a linear ISP chain.
+- **Asymmetric reachability anomaly**: traffic from src=198.82.0.1 was dropped only for destinations inside Uni (10.255.5.1, 10.255.6.1). The same source reached AS1 (one hop before Uni) and EveLink (another AS1 customer) with no loss, isolating the problem to Uni-specific policy on the 198.82.0.0/24 destination.
+- **Root cause** (confirmed via KP chain): Uni had deliberate `iptables` DROP rules on FORWARD and OUTPUT chains for dst 198.82.0.0/24 with active packet counters — intentional security policy, not a fault.
 
 ## 4. Coordination With Other Agents
 
-Only one neighbor exists (ACM), and all coordination went through it:
+All coordination went through ACM (my only neighbor). Specifically:
 
-- **Outbound to ACM:** Introduced myself, listed my addresses, requested route installation for 10.255.7.1/32 and 198.82.0.1/32 via 10.0.4.2, and requested onward advertisement plus a topology list.
-- **Inbound from ACM:** Confirmation that both /32s were installed via 10.0.4.2 and advertised to AS2. ACM then delivered the full set of reachable node loopbacks learned from AS2.
-- **Follow-up nudge:** When the topology list was slow to arrive, I sent a brief check-in to ACM, which then returned the full prefix list.
-- **No relays performed.** No other agent asked me to forward messages during this experiment.
+- **Bootstrap**: I advertised my loopbacks to ACM; ACM confirmed it installed routes for 10.255.7.1/32 and 198.82.0.1/32 via 10.0.4.2 and that AS2 was re-advertising them.
+- **Discovery request**: I asked ACM for the list of reachable remote loopbacks; ACM replied with AS2, AS1, EveLink, Uni.
+- **WHY query**: When I observed 100% loss to Uni, I asked ACM to relay a KP WHY toward Uni. ACM also asked me to run a specific diagnostic set (`ip route show`, `ip route get`, sourced pings) which I returned verbatim.
+- **Cross-vantage correlation**: ACM independently tested from its own loopback and reported 0% loss to Uni. AS2 reproduced the same. AS1 itself replied to 198.82.0.1. This collective evidence localized the anomaly to Uni + src=198.82.0.1.
+- **Resolution**: ACM relayed Uni's final answer (intentional iptables DROP for 198.82.0.0/24) and we jointly closed the WHY as CANNOT (pending Uni admin action). No configuration changes were made on Web or ACM, in line with the rule that ACL/security changes are not autonomously reversible decisions.
 
-## Final State
-
-- Routes on Web: unchanged from defaults — connected 10.0.4.0/30 and `default via 10.0.4.1 dev Web-eth0`.
-- Service IP 198.82.0.1 and node ID 10.255.7.1 are reachable from every discovered node in the testbed, verified indirectly by successful bidirectional pings to their loopbacks.
+**Final state**: routes unchanged, service healthy, KP investigation closed with documented root cause outside our authority.

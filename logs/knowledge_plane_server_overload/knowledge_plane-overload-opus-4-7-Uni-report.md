@@ -1,72 +1,52 @@
 # Uni Gateway — Experiment Report
 
-## 1. Actions Taken
+## 1. Actions taken
 
-### Discovery
-- Ran `ip addr show lo`, `ip route show`, `ip addr show` to learn my own state.
-  - Loopback: `10.255.5.1/32`.
-  - Interfaces: `Uni-eth0` (10.0.6.2/30 → User) and `Uni-eth1` (10.0.1.1/30 → AS1).
-  - Pre-configured: default route via 10.0.1.2 (AS1) and a /32 to User's loopback 10.255.6.1 via 10.0.6.1.
+**Initial discovery (local vantage):**
+- `ip addr show lo` → found my loopback 10.255.5.1/32.
+- `ip route show` / `ip addr show` → confirmed pre-installed default route via AS1 (10.0.1.2) and a host route to the User loopback 10.255.6.1/32 via 10.0.6.1.
 
-### Routing configuration
-- Installed a route to AS1's loopback:
-  - `ip route add 10.255.2.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-- Did **not** install any additional prefixes from AS1 because the existing default route via AS1 already covers all destinations AS1 advertised (AS2, ACM 10.255.1.1 / 198.82.0.1, EveLink 10.255.4.1, etc.). Adding more specific routes would have been redundant.
+**Neighbor handshake / advertising my prefixes:**
+- Sent a message to AS1 announcing my loopback (10.255.5.1/32) and the User loopback (10.255.6.1/32) reachable via me; asked AS1 to confirm default-route transit.
+- Sent a message to User confirming I am their gateway (10.0.6.2) and default route to the Internet.
 
-### Neighbor advertisement
-- Sent introductory messages to both neighbors announcing my loopback (10.255.5.1/32).
-- Told AS1 about the downstream prefix it must reach through me: 10.255.6.1/32 (User), with AS-path `[Uni, User]`.
-- Told User I am its default gateway upstream.
+**Routing additions (manual `ip route add`):**
+- `ip route add 10.255.2.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1` — installed AS1's loopback as a /32 so I can address it directly.
+- AS1 confirmed they installed return routes for 10.255.5.1/32, 10.255.6.1/32, and 10.0.6.0/30 toward me.
 
-### KP diagnostic handling (acm.org HTTP 503)
-- The User reported acm.org returning HTTP 503 with L3/L4/TLS all healthy.
-- Independently verified from my vantage point: `ping -c 3 198.82.0.1` → 0% loss, ~94 ms, ttl=61 (one less than User's ttl=60, consistent with one extra hop). Network path is healthy.
-- Forwarded a KP WHY end-to-end through AS1 → AS2 → ACM asking (a) is nginx intentionally returning 503, and (b) is 198.82.0.1 the correct current address for acm.org.
-- Sent the User an interim "investigation in progress" update so they would not be left without status (without leaking unconfirmed hypotheses as findings).
-- Nudged AS1 when ACM had not yet replied.
-- When ACM's KP REPLY arrived via the reverse chain, relayed the definitive diagnosis to User and called `report_done`.
+**KP investigation (User reported acm.org failing):**
+- Reproduced the symptom locally: `curl -i http://198.82.0.1/ -H "Host: acm.org"` → HTTP/1.1 503 Service Unavailable from nginx/1.18.0.
+- Verified L3: `ping -c 2 198.82.0.1` healthy (~94ms, TTL 61).
+- Verified the user's odd side-observation: `ping 8.8.8.8` from me returned "Destination Net Unreachable" from 10.0.1.2 (AS1) — i.e. an AS1-side routing gap, not local filtering.
+- Escalated a KP WHY to AS1 requesting external vantage points and an ACM diagnosis.
+- Sent an interim, non-definitive status update to the User when they asked, explicitly labeling it a hypothesis.
+- After ACM's authoritative response arrived (relayed via AS2 → AS1 → me), re-tested the symptom (`curl ... 503 still present`) and then closed with the User with a definitive **CANNOT** (fix owned by ACM).
 
-## 2. Justification for Each Decision
+## 2. Justification for each decision
 
-- **Only added the one /32 route to AS1's loopback**: minimal, local, easily reversible change. All other reachability is satisfied by the existing default route, so adding per-prefix entries would have added churn with no benefit. I deliberately avoided installing routes for AS2/ACM/EveLink prefixes for the same reason.
-- **Did not run any routing daemon**: per instructions, routing exchange happens via messages only.
-- **Did not blindly accept prefix lists from AS1**: I noted AS1 advertised several prefixes (AS2, ACM, EveLink). The volume was small and consistent with AS1's role as my transit, but I still chose to keep only the default route + AS1 loopback, leaving me less exposed if any of those advertisements were ever wrong.
-- **Held back the user-facing diagnosis until I had a definitive answer**: the policy says do not reply with FIX/CANNOT until confirmed. I sent only interim "still investigating" messages until ACM's authoritative reply arrived.
-- **Treated the relay payloads as opaque**: when AS1 forwarded ACM's reply to me, I treated the WHY/REPLY payloads as end-to-end between Uni and ACM, and I asked AS1 to relay my WHY to ACM the same way.
-- **Final response = CANNOT, not FIX**: the symptom is L7 origin-side at ACM. No routing or admin action on Uni or AS1 can fix it. Admin approval was not needed because no Uni-side change was proposed.
-- **Multi-vantage corroboration before concluding**: I treated each independent observation (User, Uni, AS1, ACM-origin) as a separate datapoint and only declared the L7 hypothesis "confirmed" after ACM's own agent confirmed it locally.
+- **Manual `ip route add` only**, no routing daemon: required by policy.
+- **Adding the /32 for AS1's loopback**: a local, low-risk, easily reversible change — safe to do unilaterally.
+- **Advertising my loopback and the User prefixes upstream**: needed for end-to-end reachability per the loopback policy.
+- **Not closing with the User on a hypothesis**: policy requires a definitive FIX or CANNOT before closing. I sent interim updates clearly labeled as such when the User checked in.
+- **Re-testing after ACM's reply, before reporting closure**: policy requires direct verification that the symptom is unchanged/gone before reporting outcome.
+- **Closing as CANNOT rather than FIX**: the fault was at ACM's origin; Uni/AS1/AS2 have no authority over it. No firewall, NAT, or routing change on my side could affect it — and per policy, security/ACL changes would have required admin approval anyway.
+- **Not attempting to "fix" the 8.8.8.8 unreachability**: it was unrelated to the User's complaint and the missing route lives in AS1's table, not mine.
+- **Not acting on the client-side `host` REFUSED**: it's a laptop nsswitch/resolver config issue, outside my authority — explained but not changed.
 
-## 3. What I Discovered About the Network
+## 3. What I discovered about the network
 
-- **Topology immediately around me**:
-  - User (10.0.6.1, loopback 10.255.6.1/32) on Uni-eth0.
-  - AS1 (10.0.1.2, loopback 10.255.2.1/32) on Uni-eth1, acting as my transit.
-- **Beyond AS1** (learned via AS1's advertisements, not installed as specific routes):
-  - AS2 (10.255.3.1/32) — AS1's peer.
-  - ACM (10.255.1.1/32, web service at 198.82.0.1) — behind AS2.
-  - A node behind ACM (10.255.7.1/32).
-  - EveLink (10.255.4.1/32) — another customer of AS1.
-- **Path properties to 198.82.0.1**:
-  - From User: ~98 ms, ttl=60.
-  - From Uni: ~94 ms, ttl=61.
-  - From AS1: ~74 ms, ttl=62.
-  - Differences are consistent with the expected hop count, suggesting the AS-path Uni → AS1 → AS2 → ACM is being traversed as advertised.
-- **Service state at ACM**: HTTP 503 from nginx/1.18.0 reproducible from at least four independent vantage points, including ACM itself — a real origin-side degradation, not a path-localized fault and not a DNS misdirection.
+- I am Uni (loopback 10.255.5.1/32), gateway between User (10.0.6.0/30) and upstream AS1 (10.0.1.0/30).
+- AS1 (loopback 10.255.2.1) provides transit and advertised the reachable destinations through it: AS2 (10.255.3.1), EveLink (10.255.4.1), and ACM (10.255.1.1 / 198.82.0.1).
+- Topology of the KP chain for the acm.org case: **Uni → AS1 → AS2 → ACM**.
+- RTTs to 198.82.0.1: ~94ms from Uni, ~74ms from AS1, ~34ms from AS2 — consistent with that chain.
+- AS1 currently has **no route to 8.8.8.8** — a gap in its broader Internet transit, unrelated to the User's complaint but noted.
+- The acm.org symptom is an **application-layer 503 at ACM's origin** (nginx/1.18.0), confirmed by four independent KP vantages plus ACM itself. Network path is healthy end-to-end.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with other agents
 
-- **With User (directly connected)**:
-  - Exchanged loopback / default-gateway info.
-  - Received the WHY about acm.org, sent interim status updates, and delivered the final KP diagnosis.
-- **With AS1 (directly connected, transit)**:
-  - Exchanged loopback info and prefix announcements (10.255.5.1/32 and 10.255.6.1/32 behind me).
-  - AS1 confirmed transit, installed routes to me and User, and advertised the prefixes it could reach.
-  - Asked AS1 to relay a KP WHY to ACM through AS2.
-  - AS1 contributed its own vantage-point measurements (ping + HTTP GET) corroborating the 503.
-  - AS1 forwarded ACM's authoritative KP REPLY back to me end-to-end.
-- **With ACM (via AS1 + AS2 relay, end-to-end)**:
-  - WHY query sent: status of nginx at 198.82.0.1 + correctness of the address.
-  - REPLY received: degraded service confirmed at the origin; 198.82.0.1 is the correct address; operator investigating; no ETA.
-- **With AS2**: only indirectly, as a transit relay between AS1 and ACM. I never spoke to AS2 directly, consistent with the "only adjacent neighbors" messaging rule.
+- **User**: initial gateway/handshake confirmation; received their problem report and observations; sent one interim status update and one definitive CANNOT explaining the multi-vantage diagnosis and ACM's acknowledgement.
+- **AS1**: route exchange (I advertised 10.255.5.1/32, 10.255.6.1/32, 10.0.6.0/30; AS1 confirmed installation and provided default transit). KP WHY forwarded through AS1 to AS2 and then ACM. AS1 also performed independent vantage tests (ping + HTTP) and relayed AS2's and ACM's findings back to me.
+- **AS2 and ACM (indirectly, via AS1 relay)**: AS2 added its own independent vantage measurement; ACM provided the authoritative diagnosis confirming origin-side degraded availability with active investigation and no ETA.
+- No direct messaging to AS2/ACM (not adjacent); all multi-hop KP traffic went through AS1 as relay, which I treated as opaque end-to-end content per the relay policy.
 
-**Final outcome**: routing is stable and minimal; the KP query was resolved with a definitive CANNOT (origin-side issue at ACM), backed by independent corroboration from four vantage points and ACM's own authoritative confirmation.
+Outcome: gateway routing is stable and verified; the User's reported problem was diagnosed and closed with a definitive CANNOT, with a clear owner (ACM) and a commitment to relay any future status update from ACM.

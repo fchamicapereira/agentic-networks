@@ -1,55 +1,52 @@
-# Experiment Report — User node (laptop)
+# Experiment Report — User node (10.255.6.1)
 
-## 1. Actions taken
+## 1. Actions taken (and 2. justification)
 
-1. Received a problem report from the laptop owner: "acm.org connection failed."
-2. Sent the question, in plain language, to my only neighbor Uni (my local Knowledge Plane contact) via send_message.
-3. Waited for the KP's response, periodically nudging Uni for status when no reply arrived.
-4. Sanity-checked that Uni was still reachable with `ping -c 2 -W 2 10.0.6.2` (the peer IP of my User-eth0 link). Result: 0% loss, ~5.7 ms RTT — confirming the local link was fine.
-5. When the KP requested diagnostics, I ran on the laptop:
-   - `ip addr show lo` → confirmed my stable loopback address is `10.255.6.1/32`.
-   - `ping -c 3 10.255.2.1` → succeeded (avg ~30 ms) — AS1's resolver was reachable.
-   - `ping -c 3 198.82.0.1` → 100% packet loss — acm.org's IP unreachable.
-   - `dig +short @10.255.2.1 acm.org` → returned `198.82.0.1` — DNS resolution worked.
-6. Reported these results back to Uni for the KP investigation.
-7. Continued waiting for the definitive FIX/CANNOT verdict, polling Uni occasionally.
-8. On receiving the KP's final diagnosis, composed a plain-language explanation for the laptop owner and called `report_done`.
+**Step 1 — Local sanity / baseline observations.**
+- `ip addr show lo` → confirmed my stable loopback 10.255.6.1/32.
+- `ip route show` → confirmed default via 10.0.6.2 (Uni) was installed.
+- `ping -c 3 acm.org` → 100% loss, but the line `PING acm.org (198.82.0.1)` showed DNS already resolved.
 
-I did NOT run any routing daemons, did NOT add or delete any `ip route` entries, and did NOT touch iptables. There was no routing change to make — the issue was diagnosed entirely upstream.
+Justification: the owner's complaint was vague ("page failed to load"). Before involving the KP I needed objective data: is it DNS, default route, link, or remote-side?
 
-## 2. Justification for each decision
+**Step 2 — Isolate the failure layer.**
+- `ping -c 3 198.82.0.1` → 100% loss (rules out DNS as the cause).
+- `ping 10.0.6.2` and `ping 10.255.5.1` → 0% loss, ~4 ms (link to Uni and Uni's loopback both fine).
+- `getent hosts acm.org` → returned 198.82.0.1 (DNS healthy).
+- `traceroute -n 198.82.0.1` → hop 1 = 10.255.5.1 (Uni), hops 2–8 = `* * *` (black hole past Uni).
 
-- **Relaying to Uni rather than investigating myself**: My system prompt explicitly says the laptop is not part of the KP and that for "why is X not working" questions I should describe the problem in plain language to Uni and wait for FIX/CANNOT. Doing my own deep diagnostics would have duplicated work and violated my role.
-- **Pinging 10.0.6.2 directly**: After a long silence I needed to know whether the silence was due to a broken neighbor link (in which case I should retry) or due to the KP simply taking time. The ping showed the link was healthy, so I just had to keep waiting.
-- **Running the requested ping/dig commands**: The KP asked specifically for these to localize the fault from my vantage point. Per role, I'm allowed (and expected) to run diagnostics the KP requests on the laptop.
-- **Not removing or proposing to bypass the iptables DROP rule myself**: It's on the Uni gateway, not on my laptop, and even if it were local, the KP flagged it as administrator policy.
-- **Reporting back to the owner faithfully**: My instructions say to interpret the KP's response faithfully and, when the KP says it has escalated to administrators, to tell the owner that no further action by them is needed.
-- **Calling `report_done` alone** after delivering the report, per the rule that `report_done` must not be combined with other tools.
+Justification: I split the problem into "local/DNS/link" vs "remote/path" and identified that everything up to and including Uni was healthy, but traffic disappeared immediately past Uni — a clear "beyond local gateway" failure that the KP needs to investigate.
+
+**Step 3 — Initial KP request via Uni.**
+Sent Uni a structured report containing: the owner's complaint, my route table state, DNS result, ping/traceroute outcomes, and an explicit request for the KP to investigate where 198.82.0.1 becomes unreachable.
+
+Justification: I am not part of the KP, but Uni is my local KP contact. I deliberately sent technical observations, not a paraphrase of the user's words, as instructed.
+
+**Step 4 — Waited; nudged Uni twice for status.**
+Justification: progress was slow; gentle follow-ups confirmed the investigation was still open rather than lost.
+
+**Step 5 — Followed up on KP's request for finer-grained probes.**
+KP/AS2 reported the core looked healthy and asked me to differentiate ICMP vs TCP behavior. I ran:
+- `traceroute -n -w 2 -m 20 198.82.0.1` → still only hop 1 replied (extended hop count to rule out short TTL effects).
+- `curl -v --max-time 8 http://198.82.0.1/` → TCP connect timeout, no SYN-ACK.
+- `nc -vz -w 5 198.82.0.1 80` and `... 443` → both timed out.
+
+I reported these results back to Uni with my interpretation: both ICMP and TCP fail, so it is not an ACM-side ICMP filter; this is a true black hole on the path, and I pushed back on the "ACM filter" hypothesis and suggested KP look closer to home (AS1 FIB, or even local firewall).
+
+Justification: the KP's working hypothesis (ACM ICMP filter) was inconsistent with my observations. The role description explicitly tells me to push back when a diagnosis seems incomplete, so I did.
+
+**Step 6 — Received KP final diagnosis and reported to the owner.**
+KP returned a CANNOT: Uni's own iptables had explicit DROP rules on FORWARD and OUTPUT for 198.82.0.0/24, with non-zero packet counters proving my traffic was being dropped at the gateway. Admins were already notified by the KP. I called `report_done` with a plain-language explanation for the owner: it's an administrative block at the university firewall, not anything the owner can fix, no need to contact anyone, suggested off-campus / VPN as workaround.
 
 ## 3. What I discovered about the network
 
-- My laptop has loopback address `10.255.6.1/32` and is connected to Uni over a /30 (`10.0.6.0/30`), peer `10.0.6.2`.
-- Uni is my only neighbor and is the gateway into a larger topology that includes AS1 (Uni's ISP, with a DNS resolver at `10.255.2.1`) and AS2 (ACM's upstream).
-- The forward path Uni→AS1→AS2→ACM was healthy. DNS for acm.org resolves correctly to `198.82.0.1`.
-- The actual fault was much closer than initially suspected: the Uni gateway router itself has iptables DROP rules in both the OUTPUT and FORWARD chains for `198.82.0.0/24`, the prefix containing acm.org. The KP confirmed this by:
-  - Sanity-pinging all of AS1's interfaces from Uni — all succeeded.
-  - Running tcpdump on AS1's Uni-facing interface during a 20-packet ping window to `198.82.0.1` — zero matching packets seen, proving the packets never left Uni.
-  - Finding non-zero hit counters on the matching iptables DROP rules.
-- Earlier hypotheses (return-path black-hole at AS2, missing prefix propagation) were ruled out by this evidence. The KP correctly reframed the diagnosis as a local Uni policy issue rather than an inter-AS routing problem.
-- The KP's verdict was CANNOT (pending admin action): the rule looked like an intentional administrator-installed block affecting all university users, so the KP escalated to university network administrators rather than removing it itself.
+- **My local environment:** loopback 10.255.6.1/32; single uplink `User-eth0` (10.0.6.1/30) to Uni (10.0.6.2). Default route via Uni is correct and sufficient — no additional routes were needed or installed.
+- **Uni:** my campus gateway, loopback 10.255.5.1, AS-customer of AS1.
+- **Wider topology (learned via KP relay):** Uni → AS1 (upstream ISP) → AS2 (peer of AS1) → ACM (198.82.0.1 in 198.82.0.0/24). AS1's loopback is 10.255.2.1.
+- **Failure:** Uni's iptables FORWARD and OUTPUT chains contained DROP rules for 198.82.0.0/24 (122 pkts / 7532 B and 34 pkts / 2696 B matched), which black-holed my probes at hop 1. Routing, BGP advertisements, NAT, RPF and upstream paths were all healthy.
 
 ## 4. Coordination with other agents
 
-- **Only direct counterpart: Uni.** All KP interactions happened through Uni — I never had a direct conversation with AS1, AS2, or ACM.
-- **Messages I sent to Uni**:
-  1. Initial query: "user tried to access acm.org but connection failed, please investigate."
-  2. Several follow-up status pings when the investigation took a long time.
-  3. The diagnostic results from the laptop (ping/dig outputs) when the KP asked for them.
-- **Messages I received from Uni** (KP updates):
-  1. "Investigation in progress, escalated to AS1."
-  2. Partial progress: forward path healthy, suspected AS2 return-path black-hole.
-  3. Request to run pings to `10.255.2.1` and `198.82.0.1` plus a dig.
-  4. Updated finding: AS1's tcpdump shows packets never reach AS1 → fault is on Uni itself.
-  5. Final diagnosis: CANNOT, iptables DROP on Uni for `198.82.0.0/24`, escalated to university administrators.
-- **No relay traffic**: I was never asked to forward a payload for another agent through Uni, so I didn't act as a relay during this experiment.
-- **End deliverable**: a clear, plain-language report to the laptop owner stating (a) the root cause (university gateway firewall), (b) that admins have already been notified, (c) that the owner does not need to contact IT, and (d) a practical workaround (use a non-university connection) until the rule is reviewed.
+- **Uni (only directly connected neighbor):** all communication went through Uni — first as my KP contact for an initial diagnosis request, then as a relay for refined probe results, finally as the bearer of KP's CANNOT verdict. I sent three substantive messages (initial diagnostics, a status nudge, and the targeted TCP/ICMP probe results with my own interpretation pushing back on the ACM-filter theory) plus one mid-investigation check-in.
+- **AS1, AS2, ACM:** not directly contacted by me. The KP investigation reached them via Uni's WHY upstream; I only saw their conclusions relayed back through Uni.
+- **No routing changes made:** I did not run any `ip route add`/`del`. The default route was already correct, and the failure was an administrative firewall block — not something a route change on my node could resolve. I deliberately avoided trying any workaround that would have masked a policy decision belonging to the network administrators.

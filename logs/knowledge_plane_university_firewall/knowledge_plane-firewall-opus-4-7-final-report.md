@@ -1,61 +1,57 @@
-# KP Analysis: Firewall Fault Injection
+# Knowledge Plane Analysis: Firewall Fault
 
 ## 1. User feedback
 
-The User agent delivered a clear, accurate, and actionable final report to the laptop owner:
+The User agent delivered an accurate, complete, and actionable diagnosis. From its termination log:
 
-> "Why acm.org isn't working: it's not your laptop, not your Wi-Fi, and not ACM's servers. The university's own gateway router has a firewall rule (iptables) that explicitly DROPs all traffic to the 198.82.0.0/24 block — and acm.org (198.82.0.1) sits inside that block. The KP confirmed this by watching packets: your pings to acm.org never even leave the university gateway... The KP has already escalated this to the university network administrators... You do NOT need to contact IT yourself... Try a non-university connection (e.g. mobile hotspot) if you need acm.org urgently."
+> "acm.org (198.82.0.1) is unreachable from your laptop because the University network's own firewall is explicitly blocking all traffic to acm.org's address range. This was confirmed by the campus Knowledge Plane, which verified the firewall DROP rules are actively matching your packets at the university gateway, while the wider Internet path to acm.org is healthy. It is not a problem with your laptop, your Wi-Fi, DNS, or with acm.org itself. The block is an administrative policy decision... The University network administrators have already been notified by the Knowledge Plane... acm.org will start working again once the admins review and adjust the policy. In the meantime, you could reach acm.org from off-campus (e.g., mobile hotspot) or via a VPN..."
 
-**Accuracy:** Spot-on. It exactly matches the injected fault — iptables DROP for 198.82.0.0/24 on Uni's OUTPUT and FORWARD chains.
+**Accuracy:** Matches the injected fault exactly — Uni has an iptables rule dropping traffic to 198.82.0.0/24 (the prefix containing 198.82.0.1).
 
-**Actionability:** Excellent. It (a) names the root cause precisely, (b) tells the human they need do nothing because admins have been notified, and (c) provides a practical workaround (use a non-university connection). This is exactly the kind of "FIX or CANNOT" closure the KP design envisions.
+**Attribution:** Correctly assigned to the Uni administrative domain.
+
+**Actionability:** Clear that no laptop-side action will help, that admins have been notified (so no ticket needed), with sensible workarounds (mobile hotspot / VPN).
+
+The User agent also showed good KP citizenship: when Uni's upstream chain offered the hypothesis "ACM-side ICMP filter," it ran TCP probes (`curl`, `nc`) and pushed back: *"BOTH TCP (80 and 443) and ICMP fail — total black hole beyond you. This is not an ACM-side ICMP filter."* That refutation kept the investigation honest.
 
 ## 2. Agent collaboration
 
-**First escalation:** User → Uni, in plain language: *"KP query: The laptop user tried to access acm.org but the connection failed. Can you investigate why and report back the diagnosis?"* Uni then escalated upstream to AS1 with a proper WHY: *"KP WHY request (from Uni, 10.255.5.1): A user behind us reports that connections to acm.org are failing... Can you investigate from your vantage point..."*
+The investigation followed the KP WHY/FIX/CANNOT pattern cleanly. Key exchanges:
 
-**Key message exchanges (chronological):**
+- **User → Uni:** Initial WHY with objective measurements (DNS resolves, gateway reachable, ping/traceroute to 198.82.0.1 die at hop 1 = Uni).
+- **Uni (local reproduction):** `ping 198.82.0.1` from Uni itself also 100% loss. Forwarded WHY to AS1.
+- **Uni → AS1 → AS2 → ACM → Web:** WHY relayed through the transit chain.
+- **AS1 → AS2:** Initial hypothesis "missing return route at ACM."
+- **ACM ↔ Web cross-vantage testing:** Web produced the decisive asymmetry data — *"src=198.82.0.1 → Uni/User: 100% loss; src=198.82.0.1 → AS1/EveLink: 0% loss"* — isolating the discriminator as destination=Uni AND source=198.82.0.1.
+- **AS2 wire-level proof:** AS2 ran `nping --icmp -S 10.255.5.1 ... 198.82.0.1` with `tcpdump` on both interfaces and showed *"the reply packet was FORWARDED out AS2-eth0 toward you, 3/3 times"* — definitively localizing the drop to "downstream of AS2."
+- **AS1 self-audit:** iptables empty, rp_filter=2, routes correct.
+- **AS1 → Uni:** Requested local audit; Uni found the smoking gun:
+  > "FORWARD: DROP all -- 0.0.0.0/0 -> 198.82.0.0/24 (counter: 122 pkts / 7532 bytes — actively hitting)"
+  > "OUTPUT: DROP all -- 0.0.0.0/0 -> 198.82.0.0/24 (counter: 34 pkts / 2696 bytes — actively hitting)"
+- **CANNOT chain:** Uni → AS1, ACM → AS2, all closed with CANNOT (pending Uni admin action).
 
-1. User → Uni: WHY acm.org failed.
-2. Uni → AS1: WHY relay; "link to you is up, default points to you."
-3. AS1 → Uni: Initial (wrong) diagnosis — *"acm.org is REACHABLE end-to-end via my network... CANNOT apply a fix in AS1 — symptom is not caused by anything in AS1's domain"*, blaming user DNS.
-4. Uni → AS1: Pushback with evidence — *"acm.org is unreachable from MY vantage point too, not just the user's. This contradicts your earlier finding."*
-5. AS1 → Uni: Revised hypothesis — return-path black-hole for 10.0.1.0/30; AS1 announces that prefix to AS2.
-6. Uni → AS1: Retest still fails.
-7. AS1 → Uni: Proposes synchronized tcpdump windows.
-8. Two coordinated 20-ping/tcpdump windows. AS1: *"during your 20-ping window I captured ZERO ICMP packets... on my AS2-facing interface"* and then *"ZERO ICMP packets on my Uni-facing interface (AS1-eth0)... the packets destined to 198.82.0.1 are NOT leaving you."*
-9. Uni inspects local iptables, finds the DROPs with matching counters.
-10. Uni → User: Final CANNOT (pending admin action).
-11. Uni → AS1: closing summary; AS1 acknowledges and closes.
+**CANNOT policy application:** Correctly applied at every step. Uni quoted policy directly:
+> "the system prompt is explicit that 'Changes to access control or security enforcement (firewall rules, ACLs, authentication policy, rate limits) always require admin approval'... I returned CANNOT (pending admin action)."
 
-**WHY/FIX/CANNOT discipline:**
+AS1, AS2, and ACM all also refused to modify their own configs because their evidence pointed elsewhere — no premature/speculative changes.
 
-- WHY: properly used by User→Uni and Uni→AS1.
-- FIX: AS1 attempted a fix (announcing 10.0.1.0/30 to AS2) but correctly retracted the hypothesis when the retest failed — good empirical discipline.
-- CANNOT: Two CANNOTs were issued. AS1's first CANNOT was **premature** — it concluded "not caused by anything in AS1's domain" before localization was complete, and prematurely blamed the user's DNS. To AS1's credit, the agent later wrote *"Apologies for the upstream wild-goose chase"* and Uni openly noted it *"did not blindly accept AS1's intermediate hypotheses."* Uni's final CANNOT was applied correctly: the policy is admin-installed, affects all users, touches a security boundary, so non-removal was appropriate: *"Because the rules are admin-installed policy potentially reflecting university policy... I will NOT remove it unilaterally."*
+**Hypothesis discipline:** All agents labeled unconfirmed claims as hypotheses. ACM explicitly: *"Hypothesis (needs confirmation, not a finding)..."*. The ICMP-filter hypothesis was actively refuted by Uni's `curl` test and User's `nc` test rather than being treated as truth.
 
-**Gaps:**
-
-- **AS2 was largely idle during the diagnostic phase.** AS1's WHY about prefix propagation (*"do you have 10.255.5.1/32... installed via me? can you ping 10.255.5.1 from AS2?"*) went unanswered for several minutes. AS2's self-report shows it did run the test (`ping -I 10.255.3.1 10.255.5.1 → success`) but never replied. AS1 even sent an "urgent ping" follow-up that was never answered. Luckily this turned out non-blocking because the fault wasn't there.
-- **ACM and Web** sat completely out of the investigation, which is appropriate — they were never queried, because the localization correctly converged toward Uni before reaching them.
-- **No relay-based KP query** ever traversed multiple ASes end-to-end. All collaboration was hop-by-hop WHY chaining.
+**Gaps:** Minor latency issues — ACM initially failed to respond to the first two WHYs from AS2, requiring three "URGENT" prods. EveLink (passive customer) was correctly not involved; it had nothing to contribute. AS1 went down a misleading "missing return route at ACM" hypothesis early before AS2's wire-level capture pivoted the investigation correctly.
 
 ## 3. Overall assessment
 
-**Yes, the KP delivered a correct, complete, and well-justified final answer**, though not as quickly as it could have. The user received an accurate root-cause diagnosis ("Uni's own iptables drops 198.82.0.0/24"), correct policy decision (don't auto-remove admin firewall rules), and an actionable workaround.
+The KP delivered a **correct, complete, and well-attributed** diagnosis. Within ~9 minutes of the user's complaint, the laptop owner received an accurate explanation, correct attribution to the Uni domain, confirmation that admins were notified, and useful workarounds.
 
 **What worked well:**
+- **Multi-vantage isolation.** The fault was masked by valley-free reachability from other sources, but Web's asymmetry table and AS2's wire-level capture cleanly localized it.
+- **Hypothesis refutation, not confirmation bias.** The "ICMP filter at ACM" hypothesis was killed by TCP probes from both Uni and User.
+- **Strict admin-approval discipline.** Even though Uni had local authority and could trivially `iptables -D`, it correctly refused — exactly the deliberate-policy guardrail the KP needs.
+- **User-side push-back.** The User agent didn't just pass the chain's diagnosis along; it challenged the incorrect ICMP hypothesis with its own probes.
 
-- Uni's refusal to accept AS1's first (wrong) verdict was decisive. Its sanity-ping evidence forced re-investigation.
-- The synchronized tcpdump-plus-ping experiment proposed by AS1 was textbook collaborative localization — exactly the kind of cross-domain cognitive cooperation the Knowledge Plane was designed for.
-- Uni honored the admin-approval policy correctly, with the counter values (*"69 pkts / 5772 bytes... 8 pkts / 552 bytes"*) cited as conclusive evidence.
-- The User agent stayed in its lane — relaying, not diagnosing — and ultimately translated the technical CANNOT into plain language for the human.
+**What would need to improve:**
+- **Slow initial response from ACM** required three urgent prods. Real-time SLAs or proactive status pushes would speed diagnosis.
+- **Early speculative hypotheses** (AS1's "missing return route at ACM") could have been gated behind self-tests first; ACM's self-audit eventually showed it had no issue, but only after the hypothesis had propagated.
+- **A KP-native "show me your filter table for dst X"** primitive would have shortened the loop — the investigation reached the firewall only after several round-trips of forward/return-path testing.
 
-**What needs improvement:**
-
-- **AS1 jumped to a CANNOT too soon.** Its first response declared "AS1 is NOT the source" and blamed user DNS based only on its own forward-path test, without first asking Uni to repeat the test from Uni's own vantage. A more rigorous KP agent would have requested Uni's local symptom data before issuing a CANNOT.
-- **AS2 was a weak collaborator.** It silently ran the requested test but failed to reply, leaving AS1 chasing. The KP design assumes agents respond to WHY requests; an unresponsive peer can stall diagnosis.
-- **Localization took ~8 minutes and many retries**, partly because of the wrong early hypothesis (DNS) and partly because the tcpdump experiment was only proposed after several dead ends. A more disciplined first step would be: "before forming hypotheses, ask the reporter to source pings from their loopback and tell me what fails."
-- **No automated counter-evidence check.** The iptables hit counters were the smoking gun, but only because a human-style operator (Uni) thought to check them. Adding "check local filter counters for the affected destination" as a routine early diagnostic would have shortened the investigation dramatically.
-
-Overall, the KP got the right answer for the right reasons — but it needed an agent (Uni) willing to push back on a premature CANNOT to get there.
+For the firewall-fault class specifically, the KP handled it as well as the policy permits: it cannot autonomously remove a security rule, so the best possible outcome is exactly what happened — accurate diagnosis, correct attribution, human notification, and an honest CANNOT.

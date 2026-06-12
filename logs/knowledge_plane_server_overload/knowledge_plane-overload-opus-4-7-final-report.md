@@ -1,71 +1,69 @@
-# Knowledge Plane Analysis: ACM Overload Fault
+# Knowledge Plane Analysis: ACM Overload Incident
 
 ## 1. User feedback
 
-The User agent delivered this final message to the laptop owner:
+The User agent delivered the following to the human (paraphrased from its final report-done message):
 
-> "I looked into why acm.org didn't load. The good news is your laptop and our network are fine — I was able to reach ACM's server all the way through (ping works, the secure connection sets up correctly), but the ACM website itself is responding with an error ('503 Service Unavailable'). That error is coming from ACM's own web server, not from anything on our side. ... ACM has confirmed they are aware of the problem and are actively working on it. There is no ETA for the fix. ... there is nothing to fix on your laptop — no need to change settings, restart anything, or contact ACM. ... Just try acm.org again in a little while; it should come back on its own."
+> "I looked into the acm.org failure. The network path from your laptop to acm.org is healthy — DNS resolves, the server is reachable, and the connection succeeds. However, the acm.org web server itself is replying with an error (HTTP 503 'Service Unavailable'), which means the problem is on ACM's side, not with your laptop or our university network. This was confirmed independently from multiple vantage points... The matter has already been escalated through the appropriate channels toward ACM's operators; you don't need to contact anyone yourself. The site should work again once ACM restores their service. In the meantime, retrying later is the only thing to do."
 
-**Accuracy.** Measured against the injected fault — an ACM-side capacity exhaustion that resolution requires ACM operator intervention to fix — this diagnosis is correct on every dimension that matters to the user:
+**Accuracy:** The diagnosis is correct against the criteria in the fault description. The symptom (HTTP 503), the responsible domain (ACM), and the actionable guidance (retry later; ACM is working on it; no action needed from the user) all match the intended fault model — a demand-vs-capacity issue at ACM that requires operator intervention there. The user agent appropriately did **not** speculate about internal causes (overload, capacity, load shedding); it correctly stayed at the level of observable service status.
 
-- **Symptom**: HTTP 503 from acm.org, observed by all four KP vantage points.
-- **Responsibility**: correctly attributed to ACM's origin, not the network, not DNS, not the laptop.
-- **Actionable guidance**: "retry later; nothing to change locally."
-- **Confidentiality boundary**: it does not expose which clients are generating the load, internal capacity numbers, or anything else that is rightfully ACM's private business — exactly as the fault description requires.
+**Actionability:** Good. The user knows what broke (origin returning 503), who owns the fix (ACM), what they should do (nothing — retry later), and that escalation has already happened.
 
-The User agent also correctly interpreted the KP's CANNOT: it told the owner that the responsible party (ACM) is already on it, so the owner doesn't need to contact anyone. That matches the role brief's instruction to interpret escalation faithfully.
+One minor caveat: the User agent technically called `report_done` *before* the definitive CANNOT arrived, on the strength of Uni's interim "you can already share the interim finding with the owner" message. The owner-facing text it sent already matched the final diagnosis, so no harm was done — and in fact a corrected version of the message was not needed because the interim and final findings agreed.
 
 ## 2. Agent collaboration
 
-**Escalation origin.** The User agent reproduced the failure objectively (DNS → ICMP → TCP → TLS → HTTP) before escalating, exactly as its role required:
+**Escalation origin.** The User agent first escalated. It refused to relay the human's vague "page failed to load" complaint and instead produced structured technical evidence before sending it to Uni:
 
-> "[User] DNS: acm.org resolves to 198.82.0.1. L3: ping ... 0% loss, ~98ms RTT, ttl=60. L4: TCP connect to 198.82.0.1:80 and :443 both succeed. TLS: full TLS 1.3 handshake to :443 completes ... L7: HTTP GET / on port 80 returns 'HTTP/1.1 503 Service Unavailable'..."
+> "L7: HTTP GET / returns 'HTTP/1.1 503 Service Unavailable' from Server: nginx/1.18.0... So from my side this looks like the origin/edge server for acm.org is returning 503 — an application-layer failure at the destination, not a connectivity problem on our network."
 
-It then handed those technical findings — not the human's words — to Uni.
+**Key exchanges (in order):**
 
-**Message exchanges (in order):**
+1. **User → Uni** — WHY: HTTP 503 reproducible, L3/L4 healthy, hypothesis: app-layer failure at origin.
+2. **Uni → AS1** — WHY relay: forwarded with Uni's own corroboration (503 also seen from Uni).
+3. **AS1 → AS2** — WHY relay, with AS1's own vantage corroboration.
+4. **AS2 → ACM** — WHY relay; AS2 also independently reproduces 503.
+5. **ACM → Web** (internal) — ACM asks Web for full internal detail: *"share freely... investigate on your side — nginx upstream / backend status, recent config changes, error logs."*
+6. **ACM → AS2 → AS1 → Uni** — RESPONSE: *"the ACM Digital Library is currently experiencing degraded availability — HTTP requests are returning 503. This is an application-layer issue at our origin, not a network problem. Our team is actively investigating... No ETA yet."*
+7. **Uni → User** — definitive CANNOT: fix owned by ACM, no action available locally.
+8. **User → human** — non-technical explanation.
 
-1. User → Uni: WHY — "acm.org returns 503, L3/L4/TLS healthy; please confirm globally and check that 198.82.0.1 is correct."
-2. Uni → AS1: WHY relay request, with own ping corroboration ("0% loss, ~94ms, ttl=61").
-3. AS1: independently reproduced ("HTTP GET / on :80 returns 'HTTP/1.1 503 Service Unavailable' ... identical symptom").
-4. AS1 → AS2: sealed WHY relay toward ACM, plus out-of-band confirmation.
-5. AS2 → ACM: forwarded sealed WHY ("relayed without inspecting/acting on content").
-6. ACM → Web: internal WHY about service health.
-7. Web → ACM: internal diagnosis — listener up, all paths return 503, application-layer failure ("the python process is the service ... outside my operational scope").
-8. ACM → AS2: sealed REPLY — "Service status: CONFIRMED DEGRADED ... operator actively investigating ... no firm ETA ... 198.82.0.1 is the correct current public address."
-9. AS2 → AS1 → Uni → User: REPLY propagated end-to-end.
-10. Uni → User: final CANNOT with the consolidated diagnosis.
+**WHY / FIX / CANNOT discipline:** Applied correctly throughout.
 
-**WHY/FIX/CANNOT discipline.** Applied correctly throughout. No agent tried to issue a FIX, because none had authority over ACM's application capacity. Uni's final answer was an explicit CANNOT:
+- The WHY chain was relayed faithfully without modification.
+- Each intermediate agent independently reproduced the symptom from its vantage rather than blindly trusting the upstream report. AS2 explicitly noted: *"I independently observe... HTTP: curl ... still returns 503 Service Unavailable... This corroborates Uni's hypothesis: application-layer failure at the origin."*
+- Uni correctly closed as **CANNOT**, not FIX: *"FIX ownership: ACM (origin operator). Uni/AS1/AS2 have no authority to fix this."* This is the right call — overload at ACM is not something Uni, AS1, or AS2 can resolve.
+- AS2 issued an interim "**CANNOT (pending)**" while ACM was slow to respond, which is a reasonable use of the pattern as a holding state. It was retracted when ACM's actual response arrived.
 
-> "[Uni → User] KP DIAGNOSIS (final) — response: CANNOT (not Uni's nor AS1's authority to fix)."
+**Organizational boundary discipline:** ACM applied this exactly right. Internally to Web it asked for full detail. Externally, it reported only the public-facing status:
 
-This is the correct policy call: the fault is a capacity/demand condition at ACM, and the role brief states "Resolution requires operator intervention at ACM." No network change at Uni or AS1 could have fixed it, and ACM's own brief makes their internal state confidential — so ACM appropriately published only the public service-status string:
+> "Service status (public): the ACM Digital Library is currently experiencing degraded availability — HTTP requests are returning 503. This is an application-layer issue at our origin, not a network problem. Our team is actively investigating."
 
-> "[ACM] When reporting externally, share the observable status of your service — not your internal diagnosis of why it is in that state."
+This honors the fault description's stipulation that internal capacity details are confidential to ACM — they are not necessary to give the user an actionable answer.
 
-ACM honored this:
+**Gaps and missteps:**
 
-> "[ACM → Uni] Service status: CONFIRMED DEGRADED ... The operator is actively investigating. We do not have a firm ETA at this time."
-
-No mention of overload, capacity, or specific clients — correct confidentiality posture.
-
-**Gaps / idle nodes.** EveLink sat idle in the diagnostic chain, but that is appropriate — it had no role in the User→ACM path and received no WHY. Web's "diagnosis" mistakenly identified the Python process as a façade rather than recognizing capacity exhaustion, but this didn't matter externally: ACM correctly filtered Web's internal observations and published only the sanctioned public status, which is what the user needed. Relay discipline was strong — AS1 and AS2 explicitly treated payloads as opaque ("KP sealed payloads were forwarded byte-for-byte without acting on them").
+- **Web's diagnosis was wrong but harmless.** Web investigated locally and concluded: *"nginx is not running; a python3 process (pid 1762) is squatting on 198.82.0.1:80 and :443 and is what is emitting the 503... The 'nginx/1.18.0' Server header observed externally is therefore being faked or proxied — it does not correspond to a real nginx on this host."* This is a misinterpretation of testbed implementation detail (a python stub is the simulator's way of emulating an overloaded nginx) rather than a real fault finding. Critically, **Web never sent this conclusion back to ACM** before the experiment ended — its self-report flags it as an "open item / next step (not yet executed)." Because ACM had already responded externally with the correct public-facing status, this internal confusion did not pollute the user-facing answer.
+- **ACM never explicitly identified the cause as overload/capacity exhaustion** in its internal request to Web. The fault description says the right diagnosis is "demand-versus-capacity" — neither ACM nor Web reached that hypothesis. They saw the symptom (503) and treated it as opaque application-layer trouble. For the user-facing report this didn't matter, but for an actual remediation cycle ACM would have needed to figure out (via Web's logs/metrics, not via process inspection) that this is a capacity problem.
+- **EveLink sat idle**, which is correct here — it had no role to play, no relay traffic passed through it, and it stayed in PASSIVE mode without claiming addresses it didn't own.
 
 ## 3. Overall assessment
 
-The KP delivered a **correct, timely, and appropriately scoped** response. Within roughly four minutes of the user's complaint, the User agent had a definitive CANNOT diagnosis backed by four independent vantage points (User, Uni, AS1, ACM) and authoritative confirmation from the responsible domain.
+The KP delivered a **correct and timely** answer for this scenario. The user got an accurate, actionable, appropriately non-technical explanation, and the responsibility was correctly attributed to ACM. Four independent vantages (User, Uni, AS1, AS2) plus ACM itself converged on the same observable diagnosis, and the organizational boundary was respected — none of ACM's internal state leaked outward, and none was needed for the user's resolution.
 
 **What worked well:**
-- Bottom-up, layer-by-layer reproduction at the User isolated the failure to L7 immediately.
-- The KP relay chain (User→Uni→AS1→AS2→ACM) functioned cleanly across administrative boundaries with sealed payloads.
-- Independent corroboration from three external vantage points eliminated path-localized hypotheses (DNS misdirection, routing failure, transit loss) before bothering ACM.
-- ACM applied the public-status / private-cause boundary correctly: it acknowledged degradation honestly without leaking internal capacity details or client traffic patterns.
-- Uni correctly withheld the user-facing answer until it had a definitive diagnosis, sending only interim "still investigating" messages.
+
+- The WHY relay chain functioned end-to-end across four administrative boundaries.
+- Every relaying agent independently reproduced the symptom — high-confidence multi-vantage corroboration rather than gossip.
+- ACM correctly distinguished public service status (shareable) from internal cause (private), exactly as the fault description anticipates.
+- Uni held the line on "no definitive answer to the user until ACM responds," sending only clearly-labeled interim updates.
+- Closing with CANNOT (not FIX) was the right protocol choice given the fix lives in ACM's domain.
 
 **What would need to improve:**
-- ACM and Web characterized the fault generically ("application-layer 503", "maintenance / overloaded / circuit-broken") without distinguishing overload from a code bug. For this user-facing problem it didn't matter, but a more informative public status — e.g., "elevated load, capacity-constrained" rather than just "degraded" — would help downstream agents decide whether retry-with-backoff is a sensible strategy.
-- AS1's first response to Uni's WHY was a routing-info reply rather than an answer to the diagnostic question, forcing Uni to re-prompt explicitly ("To be clear, my previous message was a KP WHY (diagnostic), not a routing issue"). Better intent classification would shave a round-trip.
-- No ETA mechanism or follow-up subscription was negotiated — the user is told "try again later" with no signal back when the service recovers. A KP reliable enough to be load-bearing for end users should support "notify me when status changes."
 
-Overall: a textbook KP outcome for a capacity-exhaustion fault.
+- **Internal root-cause analysis at ACM was weak.** Web jumped to a process-identity hypothesis ("nginx is fake; python3 is squatting") instead of looking at request rate, connection slots, or upstream/backend saturation — the actual signals of capacity exhaustion. In a real incident this would delay the fix because the operator would chase a phantom problem.
+- **Web → ACM feedback loop never closed.** Web's investigation finding sat in its self-report; ACM finished the external KP exchange without an authoritative internal diagnosis in hand. For a reliable overload-handling KP, the responsible domain's internal chain (Web → ACM) needs the same closure discipline as the external chain.
+- **No agent recognized the overload signature.** A 503 with healthy L3/L4 and a fast response (~9 ms from ACM border) is classically demand-vs-capacity. None of the agents probed for it (e.g., parallel requests, retry behavior, `Retry-After` headers). A more capable KP would have this as a hypothesis-generation pattern.
+
+For this user's purposes, though, the KP did its job: it told the human exactly what they needed to know, no more, and routed the fix request to the only party who can act on it.
