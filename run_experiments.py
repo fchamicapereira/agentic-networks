@@ -78,6 +78,7 @@ def parse_args():
     parser.add_argument("--filter", "-f", nargs="+", metavar="NAME", help="Run only experiments with these exact names")
     parser.add_argument("--list", "-l", action="store_true", help="List available experiment names and exit")
     parser.add_argument("--docker", "-d", action="store_true", help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
+    parser.add_argument("--debug", action="store_true", help="Pass --log-level DEBUG to each experiment")
     parser.add_argument("--print-commands", "-p", action="store_true", help="Print the command for each experiment and exit without running")
     parser.add_argument("--vllm-host", metavar="HOST", help="vLLM server host to pass to each experiment (overrides TOML value)")
     parser.add_argument("--vllm-port", metavar="PORT", type=int, help="vLLM server port to pass to each experiment (overrides TOML value)")
@@ -101,6 +102,8 @@ def main():
             exit(f"No experiments found with names: {args.filter}")
 
     overrides = {"model": args.model}
+    if args.debug:
+        overrides["log_level"] = "DEBUG"
     if args.vllm_host is not None:
         overrides["vllm_host"] = args.vllm_host
     if args.vllm_port is not None:

@@ -11,7 +11,6 @@ from .mininet_host import MininetHost
 from mininet.node import Host
 from .network import Interface
 
-
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous network agent running on node {node_name} in a network testbed.
 Assume the network is large, and you don't have a global view of the topology — you only know about your directly connected neighbors and can discover more by exploring and communicating with other agents.
@@ -31,10 +30,13 @@ Using tools:
 - You may issue multiple tools at once. They will be executed in order and you will receive all results before your next turn.
 - Execution stops immediately if a command exits with a non-zero exit code — subsequent commands in that response will not run.
 - 'report_done' must be called alone — never alongside other tools. If combined with other tools it will be ignored and you will be warned.
+- Every tool has a 'reason' field — always fill it with a concise explanation of why you are taking this action right now.
 {initial_prompt}
 """
 
 WAIT_DEFAULT_TIMEOUT_S = 5
+
+_REASON_FIELD = {"type": "string", "description": "Concise explanation of why you are taking this action right now"}
 
 AGENT_TOOLS_DEFINITIONS = [
     {
@@ -49,8 +51,9 @@ AGENT_TOOLS_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The shell command to run, e.g. 'ip route show'"},
+                "reason": _REASON_FIELD,
             },
-            "required": ["command"],
+            "required": ["command", "reason"],
         },
     },
     {
@@ -61,8 +64,9 @@ AGENT_TOOLS_DEFINITIONS = [
             "properties": {
                 "message": {"type": "string", "description": "Summary of what was configured and connectivity verified"},
                 "success": {"type": "boolean", "description": "True if full connectivity was achieved"},
+                "reason": _REASON_FIELD,
             },
-            "required": ["message", "success"],
+            "required": ["message", "success", "reason"],
         },
     },
     {
@@ -73,8 +77,9 @@ AGENT_TOOLS_DEFINITIONS = [
             "properties": {
                 "to": {"type": "string", "description": "Name of the destination node, e.g. 'h2'"},
                 "message": {"type": "string", "description": "The message to send"},
+                "reason": _REASON_FIELD,
             },
-            "required": ["to", "message"],
+            "required": ["to", "message", "reason"],
         },
     },
     {
@@ -84,8 +89,9 @@ AGENT_TOOLS_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "timeout": {"type": "number", "description": f"Maximum seconds to wait for a message (default: {WAIT_DEFAULT_TIMEOUT_S})"},
+                "reason": _REASON_FIELD,
             },
-            "required": [],
+            "required": ["reason"],
         },
     },
 ]
@@ -130,16 +136,12 @@ class NetworkAgent:
             "wait": self.wait,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
-        for tool in (extra_tools or []):
+        for tool in extra_tools or []:
             self.tools[tool["name"]] = tool["handler"]
 
     def send_message(self, to: str, message: str) -> str:
         if to not in self._neighbors:
-            return (
-                f"Error: {to} is not a directly connected neighbor. "
-                f"Direct neighbors: {', '.join(sorted(self._neighbors))}. "
-                f"To reach {to}, ask a neighbor to relay your message."
-            )
+            return f"Error: {to} is not a directly connected neighbor. " f"Direct neighbors: {', '.join(sorted(self._neighbors))}. " f"To reach {to}, ask a neighbor to relay your message."
         self.log.info("[msg → %s] %s", to, message)
         self.bus.send(to=to, sender=self.node_name, message=message)
         return f"Message sent to {to}."
@@ -159,6 +161,10 @@ class NetworkAgent:
         return msgs
 
     def _execute_tool(self, name: str, inputs: dict) -> tuple[str, bool]:
+        inputs = dict(inputs)
+        reason = inputs.pop("reason", None)
+        if reason:
+            self.log.info("[reason] %s", reason)
         try:
             if name == "exec":
                 output, exit_code = self.mininet_host.exec(**inputs)
@@ -190,8 +196,7 @@ class NetworkAgent:
             tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
         elif report_done_blocks and len(tool_blocks) > 1:
             warning = (
-                "'report_done' was called alongside other tools and has been ignored. "
-                "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
+                "'report_done' was called alongside other tools and has been ignored. " "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
             )
             self.log.warning(warning)
             for b in report_done_blocks:
@@ -209,12 +214,9 @@ class NetworkAgent:
                 )
 
             if should_stop:
-                stop_warning = (
-                    "Execution halted: the previous command exited with a non-zero exit code. "
-                    "The remaining tools in this response were not executed. Please investigate the error above."
-                )
+                stop_warning = "Execution halted: the previous command exited with a non-zero exit code. " "The remaining tools in this response were not executed. Please investigate the error above."
                 self.log.warning(stop_warning)
-                for skipped in tool_blocks[tool_blocks.index(block) + 1:]:
+                for skipped in tool_blocks[tool_blocks.index(block) + 1 :]:
                     self.agent.store_tool_result(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
                 break
 

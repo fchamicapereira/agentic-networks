@@ -1,37 +1,40 @@
 import json
-import logging
 import os
 import time
+from enum import Enum
+from typing import Any
 
 from openai import OpenAI, RateLimitError
-from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam, ChatCompletionToolParam
-from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
-from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
 
 from .agent import Agent, LLMResponse, REPORT_PROMPT, StopReason, ToolUseBlock
 from .agent import DEFAULT_SYSTEM_PROMPT, DEFAULT_MAX_TOKENS, DEFAULT_TOOL_DEFS, DEFAULT_WINDOW_SIZE
 
+
+class ReasoningEffort(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
 
 MODELS = {
+    "gpt-5.5": "gpt-5.5",
     "gpt-5.4": "gpt-5.4",
-    "gpt-4.1": "gpt-4.1",
-    "gpt-4.1-mini": "gpt-4.1-mini",
-    "gpt-4o": "gpt-4o",
-    "gpt-4o-mini": "gpt-4o-mini",
-    "o3": "o3",
-    "o4-mini": "o4-mini",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.4-nano": "gpt-5.4-nano",
 }
 
-_FINISH_REASON_MAP: dict[str, StopReason] = {
-    "stop": "end_turn",
-    "tool_calls": "tool_use",
-    "length": "max_tokens",
-}
+REASONING_EFFORT = ReasoningEffort.MEDIUM
 
 
 class AgentOpenAI(Agent):
-    """Agent backed by the OpenAI GPT cloud API."""
+    """Agent backed by the OpenAI Responses API (/v1/responses).
+
+    Conversation state is kept server-side. We only track the last response ID
+    and a small queue of pending inputs (tool outputs, injected messages) that
+    must be flushed at the start of the next request_action call.
+    """
 
     def __init__(
         self,
@@ -40,34 +43,56 @@ class AgentOpenAI(Agent):
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
-        window_size: int = DEFAULT_WINDOW_SIZE,
+        window_size: int = DEFAULT_WINDOW_SIZE,  # accepted but unused; state is server-side
     ):
-        super().__init__(model, name, system_prompt, max_tokens, tool_defs, window_size)
+        # max_output_tokens in the Responses API covers both reasoning tokens and
+        # output tokens (unlike Anthropic's max_tokens which is output-only), so
+        # we double whatever budget the caller provides.
+        openai_max_tokens = max_tokens * 1
+
+        super().__init__(model, name, system_prompt, openai_max_tokens, tool_defs, window_size)
 
         if OPENAI_API_KEY_ENV_VAR not in os.environ:
             self.log.error("%s environment variable is not set.", OPENAI_API_KEY_ENV_VAR)
             exit(1)
         self.client = OpenAI(api_key=os.getenv(OPENAI_API_KEY_ENV_VAR))
-        self.messages: list[ChatCompletionMessageParam] = []
-        self._tools: list[ChatCompletionToolParam] = [
+
+        self._last_response_id: str | None = None
+        # Accumulates tool outputs and injected user messages between request_action calls
+        self._pending_inputs: list[dict] = []
+        self._system_submitted: bool = False
+
+        # Responses API tool format: name/description/parameters at top level, no "function" wrapper
+        self._tools: list[dict] = [
             {
                 "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["schema"],
-                },
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["schema"],
             }
             for t in self.tool_defs
         ]
 
-    def _call_api(self, messages: list[ChatCompletionMessageParam], tools: list[ChatCompletionToolParam] | None = None):
+    def _call_api(
+        self,
+        input_items: list[dict],
+        tools: list[dict] | None = None,
+        previous_response_id: str | None = None,
+    ):
         for attempt in range(20):
             try:
-                kwargs = {"model": self.model, "max_tokens": self.max_tokens, "messages": messages}
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "input": input_items,
+                    "max_output_tokens": self.max_tokens,
+                    "reasoning": {"effort": REASONING_EFFORT.value},
+                }
+                if previous_response_id:
+                    kwargs["previous_response_id"] = previous_response_id
                 if tools:
                     kwargs["tools"] = tools
-                return self.client.chat.completions.create(**kwargs)
+                self.log.debug("API request:\n%s", json.dumps(kwargs, indent=2, default=str))
+                return self.client.responses.create(**kwargs)
             except RateLimitError as e:
                 if "insufficient_quota" in str(e):
                     self.log.error("OpenAI quota exceeded. Check your plan and billing details.")
@@ -79,77 +104,103 @@ class AgentOpenAI(Agent):
                 time.sleep(wait)
         raise RuntimeError("unreachable")
 
-    def _windowed_messages(self) -> list[ChatCompletionMessageParam]:
-        msgs = self.messages
-        if len(msgs) <= self.window_size:
-            return msgs
-        trimmed = list(msgs[-self.window_size :])
-        while trimmed and trimmed[0]["role"] != "user":
-            trimmed.pop(0)
-        return trimmed
+    def _parse_output(self, response) -> tuple[list[ToolUseBlock | str], StopReason]:
+        """Parse Responses API output items into content blocks and a stop reason."""
+        content: list[ToolUseBlock | str] = []
+        has_tool_calls = False
+
+        for item in response.output:
+            if item.type == "message":
+                for block in item.content:
+                    if block.type == "output_text" and block.text:
+                        content.append(block.text)
+            elif item.type == "function_call":
+                has_tool_calls = True
+                content.append(
+                    ToolUseBlock(
+                        id=item.call_id,
+                        tool_name=item.name,
+                        input=json.loads(item.arguments),
+                    )
+                )
+
+        if has_tool_calls:
+            stop_reason: StopReason = "tool_use"
+        elif response.status == "completed":
+            stop_reason = "end_turn"
+        elif getattr(response, "incomplete_details", None) and response.incomplete_details.reason == "max_output_tokens":
+            stop_reason = "max_tokens"
+        else:
+            stop_reason = "unknown"
+
+        return content, stop_reason
 
     def request_action(self, user_message: str) -> LLMResponse:
-        if not self.messages or self.messages[-1]["role"] != "tool":
-            self.messages.append({"role": "user", "content": user_message})
+        has_tool_outputs = any(item.get("type") == "function_call_output" for item in self._pending_inputs)
 
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
-        full_messages = [system_message] + self._windowed_messages()
+        input_items: list[dict] = []
 
-        response = self._call_api(full_messages, self._tools or None)
-        assert len(response.choices) == 1
-        msg = response.choices[0].message
-        finish_reason = response.choices[0].finish_reason
+        if has_tool_outputs:
+            # Submit pending tool results (+ any injected messages); skip the new user_message.
+            # Mirrors the chat-completions behaviour: don't add a user turn when tool results
+            # are still outstanding.
+            input_items.extend(self._pending_inputs)
+        else:
+            # Normal turn: system prompt (first call only), then any injected messages, then
+            # the new user message.
+            if not self._system_submitted:
+                input_items.append({"role": "system", "content": self.system_prompt})
+            input_items.extend(self._pending_inputs)
+            input_items.append({"role": "user", "content": user_message})
 
-        tool_calls: list[tuple[str, str, dict]] = []
-        if msg.tool_calls:
-            tool_calls = [(tc.id, tc.function.name, json.loads(tc.function.arguments)) for tc in msg.tool_calls if isinstance(tc, ChatCompletionMessageToolCall)]
+        response = self._call_api(input_items, self._tools or None, self._last_response_id)
 
-        tool_calls_param: list[ChatCompletionMessageToolCallParam] = [
-            {
-                "id": tid,
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args)},
-            }
-            for tid, name, args in tool_calls
-        ]
+        self._last_response_id = response.id
+        self._pending_inputs = []
+        self._system_submitted = True
 
-        assistant_message: ChatCompletionAssistantMessageParam = {
-            "role": "assistant",
-            "content": msg.content,
-            "tool_calls": tool_calls_param,
-        }
-        self.messages.append(assistant_message)
+        usage = response.usage
+        reasoning_tokens = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0
+        self.log.info(
+            "Tokens: input=%d output=%d (reasoning=%d, other=%d) / budget=%d",
+            usage.input_tokens,
+            usage.output_tokens,
+            reasoning_tokens,
+            usage.output_tokens - reasoning_tokens,
+            self.max_tokens,
+        )
 
-        content: list[ToolUseBlock | str] = []
-        if msg.content:
-            content.append(msg.content)
-        for tid, name, args in tool_calls:
-            content.append(ToolUseBlock(id=tid, tool_name=name, input=args))
-
-        stop_reason: StopReason = _FINISH_REASON_MAP.get(finish_reason, "unknown")
-        return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
-
-    def query(self, user_message: str) -> str:
-        response = self._call_api([
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message},
-        ])
-        return response.choices[0].message.content or ""
+        content, stop_reason = self._parse_output(response)
+        return LLMResponse(raw=json.dumps(response.model_dump(), indent=2, default=str), content=content, stop_reason=stop_reason)
 
     def store_tool_result(self, block: ToolUseBlock, result: str) -> None:
-        self.messages.append(
+        self._pending_inputs.append(
             {
-                "role": "tool",
-                "tool_call_id": block.id,
-                "content": result,
+                "type": "function_call_output",
+                "call_id": block.id,
+                "output": result,
             }
         )
 
     def add_user_message(self, content: str) -> None:
-        self.messages.append({"role": "user", "content": content})
+        self._pending_inputs.append({"role": "user", "content": content})
+
+    def query(self, user_message: str) -> str:
+        """Stateless one-shot call — no conversation history, no tools."""
+        response = self._call_api(
+            [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_message},
+            ]
+        )
+        content, _ = self._parse_output(response)
+        return "\n".join(item for item in content if isinstance(item, str))
 
     def request_report(self) -> str:
-        system_message: ChatCompletionMessageParam = {"role": "system", "content": self.system_prompt}
-        messages = [system_message] + self._windowed_messages() + [{"role": "user", "content": REPORT_PROMPT}]
-        response = self._call_api(messages)
-        return response.choices[0].message.content or ""
+        """Ask the model to summarise the session, continuing from the existing conversation."""
+        # Flush any pending tool results so the conversation is in a clean state
+        input_items = list(self._pending_inputs) + [{"role": "user", "content": REPORT_PROMPT}]
+        self._pending_inputs = []
+        response = self._call_api(input_items, previous_response_id=self._last_response_id)
+        content, _ = self._parse_output(response)
+        return "\n".join(item for item in content if isinstance(item, str))

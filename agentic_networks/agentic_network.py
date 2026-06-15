@@ -20,6 +20,21 @@ MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS}
 Reactor = Callable[["AgenticNetwork", int], None]
 
 
+def _inject_reason(schema: dict) -> dict:
+    schema = {**schema}
+    props = {
+        **schema.get("properties", {}),
+        "reason": {
+            "type": "string",
+            "description": "Concise explanation of why you are taking this action right now",
+        },
+    }
+    req = list(schema.get("required", []))
+    if "reason" not in req:
+        req.append("reason")
+    return {**schema, "properties": props, "required": req}
+
+
 def _create_network_agent(
     node_name: str,
     host: Host,
@@ -44,7 +59,15 @@ def _create_network_agent(
         initial_prompt=initial_prompt,
     )
 
-    extra_defs = [{"name": t["name"], "description": t["description"], "schema": t["schema"]} for t in (extra_tools or [])]
+    extra_defs = [
+        {
+            "name": t["name"],
+            "description": t["description"],
+            "schema": _inject_reason(t["schema"]),
+        }
+        for t in (extra_tools or [])
+    ]
+
     tool_defs = AGENT_TOOLS_DEFINITIONS + extra_defs
 
     if model_key in CLAUDE_MODELS:

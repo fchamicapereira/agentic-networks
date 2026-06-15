@@ -45,13 +45,16 @@ if ls /dev/nvidia[0-9]* 2>/dev/null | grep -q .; then
     done
 fi
 
+# --ulimit nofile: Mininet raises RLIMIT_NOFILE on startup; without this the container
+# inherits a low hard limit and setrlimit fails with a harmless but noisy warning.
 docker run --rm \
     --privileged \
-    --network host \
+    --ulimit nofile=65536:65536 \
     "${GPU_ARGS[@]}" \
     -v "$PROJECT_ROOT:/workspace" \
     -w /workspace \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
     -e TQDM_DISABLE="${TQDM_DISABLE:-}" \
     "$IMAGE_NAME" \
     sudo -E /app/env/bin/python3 "$PYTHON_SCRIPT_REL" $SCRIPT_ARGS

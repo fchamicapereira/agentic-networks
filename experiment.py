@@ -52,7 +52,7 @@ def setup_logging(log_level: str) -> logging.Logger:
     logging.root.setLevel(getattr(logging, log_level))
     logging.root.addHandler(handler)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    setLogLevel("warning")  # Suppress Mininet's verbose output
+    setLogLevel("error")  # Suppress Mininet's verbose output (incl. resource-limit warnings on Linux 5.x)
     return logging.getLogger("main")
 
 

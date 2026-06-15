@@ -61,7 +61,7 @@ class Agent(ABC):
         window_size: int = DEFAULT_WINDOW_SIZE,
     ):
         self.name = name
-        self.log = logging.getLogger(f"Agent {name}")
+        self.log = logging.getLogger(f"agent.{name}")
         self.system_prompt = system_prompt
         self.model = model
         self.max_tokens = max_tokens
