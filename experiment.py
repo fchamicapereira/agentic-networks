@@ -42,6 +42,7 @@ def chown_to_user(path: Path) -> None:
 
 def setup_logging(log_level: str) -> logging.Logger:
     handler = TqdmHandler()
+    handler.setLevel(logging.INFO)
     handler.setFormatter(
         logging.Formatter(
             "%(asctime)s  [%(name)-20s]  %(levelname)s  %(message)s",
