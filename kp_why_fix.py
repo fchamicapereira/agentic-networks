@@ -189,8 +189,17 @@ def start_services(network: Network, logger) -> None:
 
     logger.info("Starting dnsmasq in main namespace (127.0.0.1 → %s)...", orig_nameserver)
     subprocess.run("kill $(cat /tmp/dnsmasq-main.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-main.pid", shell=True)
+    # Forward to Docker's internal resolver first, then fall back to public DNS.
+    # Without --network host, Mininet's privileged ops can disrupt Docker's bridge
+    # networking and make the internal resolver (orig_nameserver) unreachable;
+    # public DNS remains reachable via Docker's default route.
+    # Note: acm.org is only resolved inside Mininet node namespaces via their own
+    # dnsmasq instances — nothing in the main namespace looks up testbed names.
     subprocess.Popen(
-        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground" f" --server={orig_nameserver} --listen-address=127.0.0.1 --bind-interfaces" f" --pid-file=/tmp/dnsmasq-main.pid",
+        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
+        f" --server={orig_nameserver} --server=8.8.8.8 --server=1.1.1.1"
+        f" --listen-address=127.0.0.1 --bind-interfaces"
+        f" --pid-file=/tmp/dnsmasq-main.pid",
         shell=True,
     )
 
