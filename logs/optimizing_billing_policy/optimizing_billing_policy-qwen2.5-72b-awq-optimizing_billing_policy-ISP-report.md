@@ -1,0 +1,1 @@
+I observed traffic spikes to the prefix 203.0.113.0/24 and adjusted the routing to optimize costs and performance. During spikes, I switched to the Expensive link to ensure low latency and reliability, and switched back to the Cheap link when traffic returned to baseline to minimize costs. This approach effectively managed costs while maintaining service quality for TinyInc.

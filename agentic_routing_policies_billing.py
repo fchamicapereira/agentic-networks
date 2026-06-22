@@ -31,6 +31,7 @@ from experiment import (
     setup_node_logs,
     write_agent_reports,
     write_final_report,
+    write_timeline_html,
 )
 from agentic_routing_policies_billing_plot_tput import generate_throughput_plot
 
@@ -175,6 +176,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Billing-policy routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
+    parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
     parser.add_argument("--window-size", "-w", type=int, default=40, metavar="N")
@@ -377,13 +379,14 @@ def main():
         agent_reports = anet.gather_reports()
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
+        write_timeline_html(log_dir, run_stem, network.hosts, logger)
 
         # Final analysis report
         final_report_file = prompts_dir / "final-report.txt"
         if final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
-                model_key=args.model,
+                model_key=args.report_model or args.model,
                 vllm_host=args.vllm_host,
                 vllm_port=args.vllm_port,
                 max_tokens=args.max_tokens,

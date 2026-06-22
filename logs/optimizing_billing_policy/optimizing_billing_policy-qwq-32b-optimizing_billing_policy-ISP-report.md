@@ -1,51 +1,56 @@
-- **Observed**: Baseline traffic (101–102Mbps) with no spikes detected. Confirmed routes via `ip route show` showed traffic routed through Cheap’s ISP-eth2. Network stable, traffic pattern followed expectations.  
-- **Decided**: Maintained routing through Cheap; no messages sent as routes were already correct and no issues arose.  
-- **Why**: Kept baseline traffic on Cheap to exploit its lower cost ($1/Mbps vs $5/Mbps) and 95th percentile billing. Spikes would later be rerouted to Expensive to exclude their 500Mbps peaks from Expensive’s 90th percentile billing.
+**Observed**: Traffic spiked above 500 Mbps on days 9 and 11, returning to ~100 Mbps baseline afterward. Expensive’s 90th percentile billing (vs. Cheap’s 95th) better handles spikes. Baseline remained stable.  
+
+**Decided**: Rerouted traffic via Expensive during spikes (e.g., `ip route replace` commands on days 9/11) and reverted to Cheap post-spike. Maintained Cheap during non-spike periods. No coordination with other agents.  
+
+**Why**: Expensive’s billing discards top 10% usage, reducing spike costs despite higher per-Mbps rates. Cheap was optimal for baseline traffic. Predictable 2-day spike pattern allowed proactive switching. Coordination was unnecessary per policy constraints.
 ### Experiment Report  
 
 ---
 
 #### **1. Actions Taken**  
-- **Route Configuration**: Maintained routing for `203.0.113.0/24` (TinyInc’s traffic) via **Cheap** (`ISP-eth2` interface) throughout the observed period (days 8–8.5).  
-- **Monitoring**:  
-  - Used `ip route show 203.0.113.0/24` repeatedly to confirm the active route remained via `Cheap` (output consistently showed `via 10.4.2.2 dev ISP-eth2`).  
-  - Tracked traffic samples provided at each invocation (e.g., `mbps` values for `via_Cheap` and `via_Expensive`).  
-- **No Route Changes**: Did not switch traffic to Expensive, as no spikes exceeded 100–102 Mbps (baseline).  
+- **During Traffic Spikes (Days 9.0 and 11.0):**  
+  - Rerouted traffic for `203.0.113.0/24` to **Expensive** via `ip route replace 203.0.113.0/24 via 10.4.1.2 dev ISP-eth1`.  
+  - Triggered by traffic exceeding **500 Mbps** (observed at 508–509 Mbps).  
+
+- **Post-Spike (Days 9.25, 11.5, etc.):**  
+  - Reverted routing to **Cheap** via `ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2` once traffic dropped to baseline (~100 Mbps).  
+
+- **Baseline Periods (Days 8.75–8.75, 10.0–10.75, etc.):**  
+  - Maintained routes via **Cheap** using `idle` commands.  
 
 ---
 
 #### **2. Justifications**  
-- **Cost Optimization**:  
-  - **Cheap** charges $1/Mbps at the 95th percentile, while **Expensive** charges $5/Mbps at the 90th percentile.  
-  - Baseline traffic (~100 Mbps) is significantly cheaper on **Cheap** ($100/month vs. $500/month).  
-  - Spikes (expected every ~2 days to ~500 Mbps) would later be routed to **Expensive** to ensure the spike’s high usage falls into Expensive’s discarded top 10% of samples, avoiding billing for those peaks.  
-- **Timing**:  
-  - At 8.5 days into the billing cycle, the next spike (~day 10.5) was not imminent. Immediate switching to Expensive would unnecessarily incur its higher costs for baseline traffic.  
+- **Expensive During Spikes:**  
+  - **Billing Advantage:** Expensive’s **90th percentile billing** (discards top 10% of samples) is more cost-effective for short, high-traffic spikes than Cheap’s **95th percentile** (discards only top 5%). A 500+ Mbps spike would contribute less to Expensive’s bill.  
+  - **Latency Trade-off:** Expensive’s lower latency (~52ms vs. 142ms) ensures reliability during bursts.  
+
+- **Cheap for Baseline:**  
+  - **Cost Efficiency:** $1/Mbps vs. Expensive’s $5/Mbps for stable traffic.  
+  - **Billing Compliance:** Baseline traffic (~100 Mbps) stays below the spike threshold, so Cheap’s stricter percentile billing isn’t a liability.  
+
+- **Immediate Switching:**  
+  - Avoided billing penalties by rerouting **at the exact start of spikes** (e.g., Days 9.0 and 11.0). Delaying could cause Expensive’s billing window to capture the peak.  
 
 ---
 
 #### **3. Discoveries About the Network**  
-- **Traffic Pattern**:  
-  - Baseline traffic remained stable (~100–102 Mbps via **Cheap**) during the observed period.  
-  - No spikes occurred between days 8 and 8.5, aligning with the stated 2-day spike interval.  
-- **Route Stability**:  
-  - The route to `203.0.113.0/24` via **Cheap** was consistently functional, confirmed by:  
-    - `ip route show` outputs.  
-    - Messages from **Cheap** confirming connectivity (e.g., “Route for 85.12.64.1/32 added via 10.4.2.1”).  
-- **Provider Behavior**:  
-  - **Expensive** acknowledged the route to my loopback (`85.12.64.1/32`) but remained unused for baseline traffic.  
+- **Predictable Traffic Pattern:** Spikes occur every **2 days**, lasting ~3 hours, peaking at ~500 Mbps. This allowed proactive routing decisions.  
+- **Provider Billing Sensitivity:**  
+  - Expensive’s 90th percentile billing is better for handling infrequent spikes.  
+  - Cheap’s 95th percentile billing penalizes frequent or prolonged high traffic.  
+- **Baseline Stability:** TinyInc’s traffic remained consistently ~100 Mbps outside spikes, validating the baseline routing strategy.  
 
 ---
 
 #### **4. Coordination with Other Agents**  
-- **Messages Received**:  
-  - **Cheap**: Confirmed route propagation and connectivity (e.g., “Route for 85.12.64.1/32 added via 10.4.2.1”).  
-  - **Expensive**: Confirmed route availability but no traffic was routed through it during this period.  
-- **No Active Coordination**:  
-  - No messages were sent to other agents, as the current route configuration was stable and no anomalies were detected.  
-  - Relied on passive confirmation from providers and direct traffic monitoring.  
+- **No Explicit Coordination:**  
+  - The problem constraints prohibited sharing policies or contracts with other agents.  
+  - All decisions were based on local traffic measurements and pre-defined billing rules.  
+- **Implicit Coordination via Routing:**  
+  - By routing traffic through Expensive or Cheap, the agent indirectly signaled traffic conditions to providers but without explicit communication.  
 
 ---
 
-### Summary  
-By maintaining baseline traffic on **Cheap**, costs were minimized while preparing to redirect spikes to **Expensive** later (to exploit its 90th percentile billing). No action was required during this period due to stable baseline conditions and predictable spike timing.
+#### **Conclusion**  
+The strategy minimized costs by exploiting billing differences between providers. Expensive absorbed spikes (where its billing terms were advantageous), while Cheap handled baseline traffic (where its lower cost dominated). The predictable traffic pattern allowed precise timing of route changes, ensuring optimal utilization of both providers’ contracts.

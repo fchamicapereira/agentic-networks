@@ -32,8 +32,9 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 _VERBOSE_THRESHOLD_WORDS = 100  # untagged content longer than this gets summarized
-_VLLM_CONTEXT_LIMIT = 40_960  # token context window for vLLM models
-_HISTORY_COMPRESS_AT = 0.70  # compress when history exceeds this fraction of the limit
+_VLLM_CONTEXT_LIMIT_DEFAULT = 32_768  # fallback context window if the server doesn't report max_model_len
+_HISTORY_COMPRESS_AT = 0.70  # compress when history exceeds this fraction of the input budget
+_CONTEXT_SAFETY_MARGIN = 1_024  # leave headroom below the hard context limit for token-estimate error
 _SUMMARIZER_INPUT_CAP_TOKENS = 20_000  # beyond this, summarizer input is trimmed to first+last halves
 
 # Conservative word↔token conversion: actual average is ~1.33 tokens/word for English prose,
@@ -67,6 +68,10 @@ _LOG_SUMMARIZER_SYSTEM_PROMPT = (
 
 _MAX_TOOL_CALL_RETRIES = 3
 
+# Mild penalty to suppress degenerate token repetition (e.g. runaway newlines from
+# quantized models) without materially affecting legitimate repeated values like IPs.
+_FREQUENCY_PENALTY = 0.3
+
 
 def _count_tokens(text: str) -> int:
     return int(len(text.split()) * _TOKENS_PER_WORD)
@@ -74,6 +79,44 @@ def _count_tokens(text: str) -> int:
 
 def _tokens_to_words(token_count: int) -> int:
     return int(token_count / _TOKENS_PER_WORD)
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Trim text to roughly `max_tokens` by omitting the middle, preserving head and tail."""
+    if max_tokens <= 0 or _count_tokens(text) <= max_tokens:
+        return text
+    half = _tokens_to_words(max_tokens) // 2
+    words = text.split()
+    return " ".join(words[:half]) + "\n...[middle omitted to fit context]...\n" + " ".join(words[-half:])
+
+
+def fetch_context_limit(client: OpenAI, model: str, default: int = _VLLM_CONTEXT_LIMIT_DEFAULT) -> int:
+    """Query the served model's context window (max_model_len) from vLLM's /v1/models endpoint.
+
+    Falls back to `default` if unavailable, so we never overestimate the available context (which
+    differs per model — hardcoding it breaks when swapping models).
+    """
+    def _mml(m) -> "int | None":
+        v = getattr(m, "max_model_len", None)
+        if v is None:
+            extra = getattr(m, "model_extra", None) or {}
+            v = extra.get("max_model_len")
+        try:
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        models = client.models.list().data
+    except Exception:
+        return default
+    for m in models:
+        if getattr(m, "id", None) == model and _mml(m):
+            return _mml(m)  # type: ignore[return-value]
+    for m in models:
+        if _mml(m):
+            return _mml(m)  # type: ignore[return-value]
+    return default
 
 
 def _build_tool_guide(tool_defs: list[dict]) -> str:
@@ -179,7 +222,7 @@ class LogSummarizer(_Summarizer):
     _max_tokens = 4096
     _system_prompt = _LOG_SUMMARIZER_SYSTEM_PROMPT
 
-    def __init__(self, client: OpenAI, model: str, min_tokens: int = 5_000) -> None:
+    def __init__(self, client: OpenAI, model: str, min_tokens: int = 1_500) -> None:
         super().__init__(client, model)
         self._min_tokens = min_tokens
 
@@ -265,6 +308,8 @@ class AgentVLLM(Agent):
             exit(1)
 
         self.client = OpenAI(base_url=base_url, api_key="none")
+        self.context_limit = fetch_context_limit(self.client, self.model)
+        self.log.info("vLLM context window for %s: %d tokens", self.model, self.context_limit)
         self.thinking_summarizer = ThinkingSummarizer(self.client, self.model)
         self.history_summarizer = HistorySummarizer(self.client, self.model)
         self.log_summarizer = LogSummarizer(self.client, self.model)
@@ -298,11 +343,14 @@ class AgentVLLM(Agent):
             self.log.info("[content summarized: %d → %d chars]", len(content), len(summary))
             return summary
 
-        return content
+        return content.strip()
 
     def _maybe_compress_history(self) -> None:
+        # Budget against the input space (context window minus the reserved output budget), not the
+        # full window — otherwise history can grow past what actually fits alongside max_tokens.
+        input_budget = self.context_limit - self.max_tokens - _CONTEXT_SAFETY_MARGIN
         estimated_tokens = _count_tokens(self.system_prompt) + sum(_count_tokens(str(m.get("content", ""))) for m in self.messages)
-        if estimated_tokens < int(_VLLM_CONTEXT_LIMIT * _HISTORY_COMPRESS_AT):
+        if estimated_tokens < int(input_budget * _HISTORY_COMPRESS_AT):
             return
 
         n = len(self.messages)
@@ -329,6 +377,11 @@ class AgentVLLM(Agent):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             messages=messages,
+            # Quantized models (e.g. AWQ) can degenerate into emitting runaway newline
+            # runs after finishing their answer, padding toward max_tokens. A mild
+            # frequency penalty discourages that without truncating real output the way
+            # a stop sequence would (text-parsed <tool_call> tags can follow blank lines).
+            frequency_penalty=_FREQUENCY_PENALTY,
             # vLLM rejects tools=[] — omit drops the field entirely when there are no tools.
             tools=self._tools if self._tools else omit,
         )
@@ -356,10 +409,12 @@ class AgentVLLM(Agent):
     def request_action(self, user_message: str) -> LLMResponse:
         self._maybe_compress_history()
 
-        # Don't inject a user turn if the last message is already a tool result —
-        # Mistral (and some other models) reject user → tool → user sequences.
-        if not self.messages or self.messages[-1]["role"] != "tool":
-            self.messages.append({"role": "user", "content": user_message})
+        # Deliver the fresh observation as its own user turn after any tool results — mirrors the
+        # Claude path, where the observation is a distinct text block appended after the tool_result
+        # blocks. Never dropped, never folded into a tool result (which buries it). This relies on
+        # tool → user being a valid sequence (true for vLLM/OpenAI; Mistral's stricter alternation
+        # is intentionally not accommodated here).
+        self.messages.append({"role": "user", "content": user_message})
 
         tool_calls: list[tuple[str, str, dict]] = []
         finish_reason = "stop"
@@ -425,6 +480,10 @@ class AgentVLLM(Agent):
         return LLMResponse(raw=str(response), content=content, stop_reason=stop_reason)
 
     def query(self, user_message: str) -> str:
+        # Single-shot call (no history): the prompt must fit alongside the reserved output budget,
+        # or the server rejects it with a 400. Trim the input to fit the model's actual context.
+        input_budget = self.context_limit - self.max_tokens - _CONTEXT_SAFETY_MARGIN - _count_tokens(self.system_prompt)
+        user_message = _truncate_to_tokens(user_message, input_budget)
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,

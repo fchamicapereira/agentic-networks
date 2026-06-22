@@ -16,6 +16,7 @@ from experiment import (
     setup_node_logs,
     write_agent_reports,
     write_final_report,
+    write_timeline_html,
 )
 
 
@@ -23,6 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
+    parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     parser.add_argument("--max-iterations", "-i", type=int, default=50, metavar="N")
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
@@ -71,15 +73,6 @@ def write_report(network: Network, route_tables: dict[str, str], report_path: Pa
     return connectivity_str
 
 
-def print_agent_results(results, node_names) -> None:
-    print("\n=== Agent Results ===")
-    for name in node_names:
-        if results[name].success:
-            print(f"  {name} [SUCCESS]")
-        else:
-            print(f"  {name} [INCOMPLETE] {results[name].message}")
-
-
 def main():
     args = parse_args()
 
@@ -114,8 +107,6 @@ def main():
         )
         results = anet.run(concurrent=not args.sequential)
 
-        print_agent_results(results, network.hosts)
-
         route_tables = collect_route_tables(network)
         connectivity_str = write_report(network, route_tables, log_dir / f"{run_stem}.txt")
         logger.info("Report written to %s/%s.txt", log_dir, run_stem)
@@ -124,12 +115,13 @@ def main():
         agent_reports = anet.gather_reports()
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
+        write_timeline_html(log_dir, run_stem, network.hosts, logger)
 
         final_report_file = Path(args.prompts_dir) / "final-report.txt" if args.prompts_dir else None
         if final_report_file and final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
-                model_key=args.model,
+                model_key=args.report_model or args.model,
                 vllm_host=args.vllm_host,
                 vllm_port=args.vllm_port,
                 max_tokens=args.max_tokens,

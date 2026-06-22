@@ -1,73 +1,58 @@
-**Observed:** Traffic spikes at predefined intervals (24, 42, 72 hours, etc.), Expensive’s 90th percentile billing discards 10% of peak samples vs. Cheap’s 5%, and TinyInc prefers Expensive during spikes.  
+**Observed:** Traffic spiked to 500 Mbps during scheduled intervals, including a 120-hour spike starting at 168 hours. Expensive provider’s 90th percentile billing and guaranteed capacity suited spikes, while Cheap’s lower baseline rates were optimal otherwise. Routing changes via `ip route replace` were effective without connectivity issues.  
 
-**Decided:** Manually switch routes to Expensive 1 hour before each spike using `ip route replace` (e.g., `via 10.4.1.2`), reverting afterward. Prioritize Cheap during normal periods.  
+**Decided:** Switched to Expensive during all spikes (e.g., the 120-hour event) and reverted to Cheap post-spike (after 288 hours). Used `idle` during stable periods. No coordination with other agents was necessary.  
 
-**Why:** Expensive’s higher percentile discard rate (10% vs. 5%) better handles spikes, reducing overage charges. Precise timing ensures spikes fall within Expensive’s discarded 10%, minimizing ISP costs.
-**Report**  
+**Why:** Expensive minimized billing impact during prolonged spikes by capping high-volume samples, while Cheap reduced costs for baseline traffic (100 Mbps). Independent operation sufficed due to predictable traffic patterns and self-monitored data.
+**Experiment Report**  
 
----
-
-### 1. Actions Taken During the Experiment  
-- **Initial Configuration**:  
-  - Set default routes for all non-local traffic to prefer **Cheap** (lower cost) by default.  
+### 1. Actions Taken  
+- **Initial Configuration**: Established routes to Expensive (10.4.1.2) and Cheap (10.4.2.2) providers. Advertised loopback address (85.12.64.1) to maintain end-to-end connectivity.  
+- **During Traffic Spikes (Hour 168–288)**:  
+  - At **hour 168 (7 days)**, observed traffic spike to ~500 Mbps. Switched routing to **Expensive provider** using:  
     ```  
-    ip route replace default via 10.4.2.2 dev ISP-eth2  
+    ip route replace 203.0.113.0/24 via 10.4.1.2 dev ISP-eth1  
     ```  
-  - Advertised my loopback address `85.12.64.1/32` to neighbors via `send_message` to ensure end-to-end reachability.  
-
-- **Spike Handling**:  
-  - **Before each scheduled spike**, switched traffic destined to TinyInc (or all traffic, as TinyInc is the only customer) to route via **Expensive** to align with their preference and mitigate billing impact:  
+  - Maintained Expensive routing for the **entire 120-hour spike duration**, even as traffic peaked at 510 Mbps.  
+- **Post-Spike (Hour 288+)**:  
+  - At **hour 288 (12 days)**, traffic dropped to ~100 Mbps. Switched back to **Cheap provider** using:  
     ```  
-    ip route replace default via 10.4.1.2 dev ISP-eth1  
+    ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2  
     ```  
-  - **After each spike ended**, reverted to **Cheap** to minimize ongoing costs:  
-    ```  
-    ip route replace default via 10.4.2.2 dev ISP-eth2  
-    ```  
-  - Example timing:  
-    - At **Hour 24**, switched to Expensive for 6 hours (until Hour 30).  
-    - At **Hour 96**, switched to Expensive for 12 hours (until Hour 108).  
-
-- **Monitoring**:  
-  - Used `get_traffic_sample` at each 6-hour interval to validate traffic spikes and ensure routes were correctly set.  
-  - Cross-checked `ip route show` to confirm no unintended routes persisted.  
+  - Continued using Cheap for baseline traffic (100–102 Mbps) until the end of the billing period.  
+- **Monitoring**: Used `ip route show` and traffic samples to validate route changes. Issued `idle` commands during stable periods (no action required).  
 
 ---
 
 ### 2. Justification for Decisions  
-- **Default to Cheap**:  
-  - **Cheap** offers a lower cost ($1/Mbps vs. $5/Mbps) for baseline traffic (100 Mbps). Its 95th percentile billing discards more extreme samples, making it cost-effective for steady-state traffic.  
+- **Expensive Provider During Spikes**:  
+  - **Reliability**: TinyInc’s SLA requires premium service during spikes. Expensive’s low-latency, guaranteed capacity ensured quality.  
+  - **Billing Strategy**: Expensive’s **90th percentile billing** discards the top 10% of samples. Prolonged spikes mean many high samples would be excluded, minimizing cost impact. Switching mid-spike risks losing more peak samples to discards.  
+  - **Dominant Billing**: Expensive’s 500 Mbps traffic during spikes would be billed at the 90th percentile (e.g., ~450 Mbps), while Cheap’s 95th percentile would retain higher values.  
 
-- **Route to Expensive During Spikes**:  
-  - **TinyInc’s preference**: They expect high-quality service via Expensive.  
-  - **Billing strategy**: Expensive’s 90th percentile billing drops the top 10% of samples (12 samples/month). Spikes (500 Mbps) are more likely to fall within Expensive’s discarded 10% than Cheap’s 5% (only 6 samples discarded). Directing spikes to Expensive reduces the "billable peak" for Expensive, despite its higher per-Mbps rate.  
+- **Cheap Provider Post-Spike**:  
+  - **Cost Efficiency**: Baseline traffic (~100 Mbps) incurs **$1/mbps** on Cheap vs. $5/mbps on Expensive.  
+  - **Billing Percentile Advantage**: Cheap’s 95th percentile billing discards more extreme samples for lower baseline traffic.  
 
-- **Immediate Route Switching**:  
-  - Reacting within 6-hour intervals ensures spikes are fully captured in the correct provider’s samples. Delaying action risks misattributing high traffic to the wrong provider’s billing window.  
+- **No Route Flapping**: Avoided unnecessary switches to prevent billing spikes from transient traffic fluctuations.  
 
 ---
 
-### 3. Discoveries About the Network  
-- **Manual Route Control**:  
-  - The network’s routing could be managed effectively without BGP or other daemons, using `ip route` commands and timing-based decisions.  
-
-- **Billing Sensitivity**:  
-  - The choice of provider for traffic spikes significantly impacts costs. Expensive’s higher discard rate (90th percentile) made it optimal for spikes, even with its higher per-Mbps cost.  
-
-- **Traffic Predictability**:  
-  - The scheduled spikes allowed pre-emptive route changes, avoiding reactive delays. This reduced the risk of overage charges.  
-
-- **Loopback Advertisement**:  
-  - Announcing `85.12.64.1/32` to neighbors ensured end-to-end reachability without relying on dynamic routing protocols.  
+### 3. Network Discoveries  
+- **Predictable Traffic Patterns**: Spikes were strictly timed (e.g., 120-hour spike at hour 168). No unexpected traffic shifts occurred.  
+- **Provider Reliability**: Expensive maintained consistent performance during high load, while Cheap handled baseline traffic reliably.  
+- **Billing Impact**: Expensive’s 90th percentile billing was critical during prolonged spikes, whereas Cheap’s 95th percentile was optimal for baseline.  
 
 ---
 
 ### 4. Coordination with Other Agents  
-- **Minimal Coordination Required**:  
-  - The network’s simplicity (point-to-point links, no multipath routing) allowed autonomous decisions without requiring coordination.  
-  - `send_message` was used only to advertise the loopback address to neighbors, not for policy or route-sharing.  
-  - No communication with Expensive/Cheap was necessary, as their roles were predefined (transit providers), and route changes were unilaterally managed.  
+- **None Required**: The network’s topology and traffic patterns allowed independent decision-making based on local traffic samples and the predefined spike schedule.  
+- **No Messages Sent**: No anomalies or topology changes required coordination with TinyInc, Expensive, or Cheap agents.  
 
----
+--- 
 
-**Conclusion**: The strategy minimized costs by exploiting billing percentile differences and adhering to TinyInc’s service expectations. Manual route adjustments at precise intervals ensured optimal provider utilization without overcomplicating the network.
+### Final Routing State  
+- **Post-Spike (hour 288+)**:  
+  - **203.0.113.0/24** routed via **Cheap (10.4.2.2)**.  
+  - Expensive routes expired, minimizing unnecessary cost.  
+
+This approach minimized total transit costs while meeting TinyInc’s reliability expectations.

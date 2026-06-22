@@ -14,14 +14,20 @@ class MessageBus:
         self._queues[to].put((sender, message))
 
     def drain(self, node: str, block: bool = False, timeout: Optional[float] = None) -> list[tuple[str, str]]:
-        """Return pending messages for node as [(sender, message), ...].
+        """Return all pending messages for node as [(sender, message), ...], in FIFO order.
 
-        If block=True, wait up to timeout seconds for a message to arrive.
+        If block=True, wait up to timeout seconds for the first message to arrive; any further
+        messages already queued are then collected without blocking.
         """
         msgs = []
         q = self._queues[node]
         try:
             msgs.append(q.get(block=block, timeout=timeout))
         except queue.Empty:
-            pass
+            return msgs
+        while True:
+            try:
+                msgs.append(q.get_nowait())
+            except queue.Empty:
+                break
         return msgs

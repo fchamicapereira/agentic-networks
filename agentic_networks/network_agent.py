@@ -34,8 +34,6 @@ Using tools:
 {initial_prompt}
 """
 
-WAIT_DEFAULT_TIMEOUT_S = 5
-
 _REASON_FIELD = {"type": "string", "description": "Concise explanation of why you are taking this action right now"}
 
 AGENT_TOOLS_DEFINITIONS = [
@@ -83,14 +81,17 @@ AGENT_TOOLS_DEFINITIONS = [
         },
     },
     {
-        "name": "wait",
-        "description": "Block until a message arrives from another node (or until timeout). Use this when you have completed your local actions and need to wait for other nodes to respond or coordinate before proceeding.",
+        "name": "idle",
+        "description": (
+            "Take no action this iteration — use this when you are satisfied with the current "
+            "state and have nothing to change right now. This does NOT advance simulated time, "
+            "pause execution, or fetch new data: a fresh observation is provided automatically at "
+            "the start of every iteration regardless, and any messages from neighbors are delivered "
+            "to you automatically. Call this simply to pass the turn."
+        ),
         "schema": {
             "type": "object",
-            "properties": {
-                "timeout": {"type": "number", "description": f"Maximum seconds to wait for a message (default: {WAIT_DEFAULT_TIMEOUT_S})"},
-                "reason": _REASON_FIELD,
-            },
+            "properties": {"reason": _REASON_FIELD},
             "required": ["reason"],
         },
     },
@@ -133,7 +134,7 @@ class NetworkAgent:
         self.tools: dict[str, Callable] = {
             "exec": self.mininet_host.exec,
             "send_message": self.send_message,
-            "wait": self.wait,
+            "idle": self.idle,
             "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
         for tool in extra_tools or []:
@@ -146,12 +147,9 @@ class NetworkAgent:
         self.bus.send(to=to, sender=self.node_name, message=message)
         return f"Message sent to {to}."
 
-    def wait(self, timeout: float = WAIT_DEFAULT_TIMEOUT_S) -> str:
-        self.log.info("Waiting for messages with timeout %.1f seconds...", timeout)
-        msgs = self._drain_inbox(block=False)
-        if not msgs:
-            return "No messages in queue yet — will check again next iteration."
-        return f"Received {len(msgs)} message(s)."
+    def idle(self) -> str:
+        self.log.info("Idle — passing turn, no action taken.")
+        return "Idle: no action taken this iteration. A fresh observation will arrive next iteration."
 
     def _drain_inbox(self, block: bool = False, timeout: Optional[float] = None) -> list[tuple[str, str]]:
         msgs = self.bus.drain(self.node_name, block=block, timeout=timeout)

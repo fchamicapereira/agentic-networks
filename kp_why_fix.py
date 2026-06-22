@@ -16,6 +16,7 @@ from experiment import (
     setup_logging,
     setup_node_logs,
     write_final_report,
+    write_timeline_html,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -86,6 +87,7 @@ def parse_args():
     parser.add_argument("--fault", choices=FAULTS, required=True, help="Fault scenario to inject")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
+    parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR / "knowledge_plane"), metavar="DIR")
     parser.add_argument("--max-iterations", "-i", type=int, default=60, metavar="N")
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
@@ -428,6 +430,8 @@ def main():
             path.write_text(text)
             logger.info("Agent report: %s", path)
 
+        write_timeline_html(log_dir, run_stem, network.hosts, logger)
+
         route_tables = collect_route_tables(network)
         connectivity = network.test_all_connectivity()
 
@@ -439,7 +443,7 @@ def main():
                 fault_description=FAULT_DESCRIPTIONS[args.fault],
             )
             write_final_report(
-                model_key=args.model,
+                model_key=args.report_model or args.model,
                 vllm_host=args.vllm_host,
                 vllm_port=args.vllm_port,
                 max_tokens=args.max_tokens,

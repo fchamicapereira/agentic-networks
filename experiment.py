@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 
 from pathlib import Path
 from typing import Iterable
@@ -15,9 +16,18 @@ from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
 from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
+from visualize_logs import render_logs
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_LOG_DIR = SCRIPT_DIR / "logs"
+
+# The final report is a summary — it never needs the large output budget the action loop uses.
+# Capping it leaves room for the input context on small-context (e.g. 32k) local models.
+REPORT_MAX_TOKENS = 4096
+
+# Matches a log record header: "HH:MM:SS  LEVEL  ...". Continuation lines (no header) belong to
+# the preceding record.
+_LOG_RECORD_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\s+(\w+)\s+")
 
 
 class TqdmHandler(logging.StreamHandler):
@@ -69,13 +79,43 @@ def collect_route_tables(network: Network) -> dict[str, str]:
     return {name: host.cmd("ip route show").strip() for name, host in network.hosts.items()}
 
 
+def strip_debug_records(text: str) -> str:
+    """Drop DEBUG records (and their continuation lines), keeping INFO/WARNING/ERROR.
+
+    Per-node log files contain large raw API dumps when running with --log-level DEBUG. The final
+    report is built from these files, so without this filter the report would depend on console
+    verbosity (and balloon past the model's context window). Filtering here keeps the debug files
+    intact on disk while feeding the report only INFO-level semantic events.
+    """
+    kept: list[str] = []
+    keeping = True
+    for line in text.splitlines():
+        m = _LOG_RECORD_RE.match(line)
+        if m:
+            keeping = m.group(1) != "DEBUG"
+        if keeping:
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def collect_node_logs(log_dir: Path, run_stem: str, node_names: Iterable[str]) -> dict[str, str]:
     logs = {}
     for name in node_names:
         path = log_dir / f"{run_stem}-{name}.log"
         if path.exists():
-            logs[name] = path.read_text()
+            logs[name] = strip_debug_records(path.read_text())
     return logs
+
+
+def write_timeline_html(log_dir: Path, run_stem: str, node_names: Iterable[str], logger: logging.Logger) -> None:
+    """Render the per-node logs into a self-contained interactive HTML timeline."""
+    log_files = [log_dir / f"{run_stem}-{name}.log" for name in node_names]
+    log_files = [f for f in log_files if f.exists()]
+    if not log_files:
+        return
+    out_path = log_dir / f"{run_stem}.html"
+    render_logs(log_files, output_path=out_path)
+    logger.info("Timeline HTML written to %s", out_path)
 
 
 def write_agent_reports(reports: dict[str, str], log_dir: Path, run_stem: str, logger: logging.Logger) -> None:
@@ -119,14 +159,16 @@ def write_final_report(
 
     logger.info("Generating final report with model %s...", model_key)
 
+    report_max_tokens = min(max_tokens, REPORT_MAX_TOKENS)
+
     if model_key in CLAUDE_MODELS:
-        agent = AgentClaude(CLAUDE_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=max_tokens)
+        agent = AgentClaude(CLAUDE_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=report_max_tokens)
         report_context = context
     elif model_key in GPT_MODELS:
-        agent = AgentOpenAI(GPT_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=max_tokens)
+        agent = AgentOpenAI(GPT_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=report_max_tokens)
         report_context = context
     else:
-        agent = AgentVLLM(VLLM_MODELS[model_key], "final-report", vllm_host, vllm_port, system_prompt=final_prompt, max_tokens=max_tokens)
+        agent = AgentVLLM(VLLM_MODELS[model_key], "final-report", vllm_host, vllm_port, system_prompt=final_prompt, max_tokens=report_max_tokens)
         compressed_logs = {name: agent.log_summarizer.summarize(log_text, name) for name, log_text in node_logs.items()}
         compressed_logs_section = "\n\n".join(f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items()))
         report_context = (

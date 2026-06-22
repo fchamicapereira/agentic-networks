@@ -21,7 +21,10 @@ RESET = "\033[0m"
 _META_FIELDS = {"name", "script"}
 
 
-def experiment_to_args(exp: dict, exp_args_overrides: dict) -> list[str]:
+def experiment_to_args(
+    exp: dict,
+    exp_args_overrides: dict,
+) -> list[str]:
     """Convert experiment fields to CLI arguments."""
     merged = {**exp, **exp_args_overrides}
     args = []
@@ -37,7 +40,11 @@ def experiment_to_args(exp: dict, exp_args_overrides: dict) -> list[str]:
     return args
 
 
-def build_command(exp: dict, docker: bool, exp_args_overrides: dict) -> list[str]:
+def build_command(
+    exp: dict,
+    docker: bool,
+    exp_args_overrides: dict,
+) -> list[str]:
     script = exp["script"]
     exp_args = experiment_to_args(exp, exp_args_overrides)
     if docker:
@@ -46,7 +53,33 @@ def build_command(exp: dict, docker: bool, exp_args_overrides: dict) -> list[str
         return [sys.executable, script] + exp_args
 
 
-def run_experiment(exp: dict, docker: bool, index: int, total: int, exp_args_overrides: dict) -> None:
+def find_final_report(
+    exp: dict,
+    model: str,
+) -> Path | None:
+    log_dir = Path(exp.get("log_dir", ""))
+    if not log_dir.is_absolute():
+        log_dir = SCRIPT_DIR / log_dir
+    matches = list(log_dir.glob(f"*{model}*-final-report.md"))
+    return matches[0] if matches else None
+
+
+def run_experiment(
+    exp: dict,
+    docker: bool,
+    index: int,
+    total: int,
+    exp_args_overrides: dict,
+    force: bool = False,
+) -> None:
+    model = exp_args_overrides.get("model", "")
+    existing = find_final_report(exp, model)
+    if existing and not force:
+        print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
+        print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']} — skipping (final report exists){RESET}")
+        print(f"{BOLD}{CYAN}{'='*60}{RESET}")
+        print(f"  {existing}")
+        return
     cmd = build_command(exp, docker, exp_args_overrides)
     print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
     print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']}{RESET}")
@@ -82,6 +115,7 @@ def parse_args():
     parser.add_argument("--print-commands", "-p", action="store_true", help="Print the command for each experiment and exit without running")
     parser.add_argument("--vllm-host", metavar="HOST", help="vLLM server host to pass to each experiment (overrides TOML value)")
     parser.add_argument("--vllm-port", metavar="PORT", type=int, help="vLLM server port to pass to each experiment (overrides TOML value)")
+    parser.add_argument("--force", "-F", action="store_true", help="Rerun experiments even if a final report already exists")
     return parser.parse_args()
 
 
@@ -119,7 +153,14 @@ def main():
     print(f"Running {len(selected)} experiment(s)" + (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
 
     for i, exp in enumerate(selected, 1):
-        run_experiment(exp, docker=args.docker, index=i, total=len(selected), exp_args_overrides=overrides)
+        run_experiment(
+            exp,
+            docker=args.docker,
+            index=i,
+            total=len(selected),
+            exp_args_overrides=overrides,
+            force=args.force,
+        )
 
     print(f"\n{BOLD}{CYAN}All {len(selected)} experiment(s) completed successfully.{RESET}")
 

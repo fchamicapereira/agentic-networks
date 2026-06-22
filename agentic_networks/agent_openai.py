@@ -136,22 +136,15 @@ class AgentOpenAI(Agent):
         return content, stop_reason
 
     def request_action(self, user_message: str) -> LLMResponse:
-        has_tool_outputs = any(item.get("type") == "function_call_output" for item in self._pending_inputs)
-
+        # Deliver the fresh observation as its own user turn after any tool results (function_call_output
+        # items) — mirrors the Claude path, where the observation is a distinct text block appended after
+        # the tool_result blocks. Never dropped, never folded into a tool result (which buries it).
+        # function_call_output → user is a valid Responses-API sequence; all call_ids are already answered.
         input_items: list[dict] = []
-
-        if has_tool_outputs:
-            # Submit pending tool results (+ any injected messages); skip the new user_message.
-            # Mirrors the chat-completions behaviour: don't add a user turn when tool results
-            # are still outstanding.
-            input_items.extend(self._pending_inputs)
-        else:
-            # Normal turn: system prompt (first call only), then any injected messages, then
-            # the new user message.
-            if not self._system_submitted:
-                input_items.append({"role": "system", "content": self.system_prompt})
-            input_items.extend(self._pending_inputs)
-            input_items.append({"role": "user", "content": user_message})
+        if not self._system_submitted:
+            input_items.append({"role": "system", "content": self.system_prompt})
+        input_items.extend(self._pending_inputs)
+        input_items.append({"role": "user", "content": user_message})
 
         response = self._call_api(input_items, self._tools or None, self._last_response_id)
 

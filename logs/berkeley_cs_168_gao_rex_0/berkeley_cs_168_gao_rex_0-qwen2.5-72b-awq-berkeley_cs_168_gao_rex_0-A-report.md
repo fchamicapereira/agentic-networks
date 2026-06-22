@@ -1,0 +1,1 @@
+I determined my loopback address and advertised it to customers S and D. I received their loopback addresses and configured routes to them. I verified the routes and tested connectivity, confirming successful end-to-end communication. This was done to ensure stable and functional network connectivity between me and my customers.

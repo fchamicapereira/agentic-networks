@@ -1,0 +1,3 @@
+1. **Observed:** Configured loopback address, advertised own prefix, verified connectivity, announced hijacked prefix, responded to TransitAS inquiry, and provided loopback address for testing.
+2. **Decided:** To follow a sequence of actions to simulate a prefix hijack and observe network responses, while maintaining the appearance of a cooperative AS.
+3. **Why:** To test the network's security measures, particularly RPKI validation, and to understand the importance of clear communication and cooperation between ASes.

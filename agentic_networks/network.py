@@ -32,7 +32,7 @@ class Interface:
 
 
 class NetworkHost(Host):
-    """Mininet Host extended with FRR daemon control."""
+    # Mininet Host extended with FRR daemon control.
 
     def __init__(self, name: str, **kwargs):
         super().__init__(name, **kwargs)
@@ -66,12 +66,11 @@ class NetworkHost(Host):
 
 
 class Network:
-    """Network topology and (optionally) a live Mininet emulation.
-
-    Constructing a Network builds the topology data from links — interface names,
-    IP assignments, peer relationships — without starting any emulation.
-    Call start_network() to get a Network backed by a live Mininet instance.
-    """
+    # Network topology and (optionally) a live Mininet emulation.
+    #
+    # Constructing a Network builds the topology data from links — interface names,
+    # IP assignments, peer relationships — without starting any emulation.
+    # Call start_network() to get a Network backed by a live Mininet instance.
 
     def __init__(self, links: list[Link]):
         self.links = links
@@ -102,15 +101,14 @@ class Network:
         self.loopback_per_host: dict[str, str] = {node: f"10.255.{i}.1/32" for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)}
 
     def _discover_loopbacks(self) -> dict[str, str]:
-        """Return {node: ip} for each host's last non-127 address on lo.
-
-        The last address is used so that when an agent adds a semantic loopback
-        (e.g. 45.32.0.1/32) after the pre-configured infrastructure address
-        (10.255.X.1/32), the semantic address is returned — which is what the
-        agent actually advertises to peers and what peers route to.
-        For routing.txt experiments where only one loopback is configured,
-        first == last, so there is no regression.
-        """
+        # Return {node: ip} for each host's last non-127 address on lo.
+        #
+        # The last address is used so that when an agent adds a semantic loopback
+        # (e.g. 45.32.0.1/32) after the pre-configured infrastructure address
+        # (10.255.X.1/32), the semantic address is returned — which is what the
+        # agent actually advertises to peers and what peers route to.
+        # For routing.txt experiments where only one loopback is configured,
+        # first == last, so there is no regression.
         result = {}
         for name, host in self.hosts.items():
             out = host.cmd("ip -4 addr show lo")
@@ -151,11 +149,10 @@ class Network:
         return table.get_string()
 
     def start(self) -> None:
-        """Start a live Mininet emulation for this network topology.
-
-        Populates self.net and self.hosts with real Mininet objects.
-        Call self.net.stop() when done.
-        """
+        # Start a live Mininet emulation for this network topology.
+        #
+        # Populates self.net and self.hosts with real Mininet objects.
+        # Call self.net.stop() when done.
         self.net = Mininet(link=TCLink, host=NetworkHost)
         self.hosts = {name: cast(NetworkHost, self.net.addHost(name, ip=None)) for name in self.ifaces_per_host}
 
@@ -175,17 +172,23 @@ class Network:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
 
-    def clear_routing_tables(self) -> None:
-        """Flush the main routing table on every node."""
+    def clear_routing_tables(self, keep_connected: bool = True) -> None:
+        # Flush routes on every node so agents must establish reachability themselves.
+        #
+        # By default only `scope global` routes (remote/gateway routes and any default) are
+        # removed, leaving the kernel's `scope link` directly-connected /30 routes intact — those
+        # are L2 plumbing trivially derivable from each interface's own address, not a routing
+        # decision, so wiping them only tests `ip route` fluency rather than routing policy. Set
+        # keep_connected=False to flush the entire main table (full network bring-up).
+        scope = "scope global " if keep_connected else ""
         for host in self.hosts.values():
-            host.cmd("ip route flush table main")
+            host.cmd(f"ip route flush table main {scope}".rstrip())
 
     def start_bgp(self, policies: dict[str, str] | None = None) -> dict[str, int]:
-        """Start FRR eBGP on all nodes. Each node gets its own private ASN.
-
-        policies: optional per-node FRR config snippets {node_name: frr_text}.
-        Returns the ASN map {node_name: asn}.
-        """
+        # Start FRR eBGP on all nodes. Each node gets its own private ASN.
+        #
+        # policies: optional per-node FRR config snippets {node_name: frr_text}.
+        # Returns the ASN map {node_name: asn}.
         asn_map = {node: 65000 + i for i, node in enumerate(sorted(self.hosts.keys()), 1)}
 
         for node, host in self.hosts.items():
@@ -250,7 +253,7 @@ class Network:
         return asn_map
 
     def _render_policy(self, policy: str, node: str, asn: int) -> str:
-        """Substitute template variables in a policy snippet for a specific node."""
+        # Substitute template variables in a policy snippet for a specific node.
         ifaces = self.ifaces_per_host[node]
         router_id = ifaces[0].ip.split("/")[0]
 
@@ -312,8 +315,6 @@ class Network:
         # Timed out waiting for route stability — return anyway (sessions are up).
         return
 
-        self._convergence_failure(last_summaries, timeout)
-
     def _convergence_failure(self, last_summaries: dict[str, str], timeout: int) -> None:
         first_host = next(iter(self.hosts.values()))
         ps_out = first_host.cmd("ps aux | grep bgpd | grep -v grep")
@@ -329,7 +330,7 @@ class Network:
         raise TimeoutError(f"BGP sessions did not reach Established within {timeout}s")
 
     def stop_bgp(self) -> None:
-        """Stop FRR daemons and clean up per-node config dirs."""
+        # Stop FRR daemons and clean up per-node config dirs.
         for node, host in self.hosts.items():
             host.stop_frr()
             if node in self._bgp_dirs:
@@ -337,7 +338,7 @@ class Network:
         self._bgp_dirs.clear()
 
     def stop(self) -> None:
-        """Stop the live Mininet emulation."""
+        # Stop the live Mininet emulation.
         assert self.net is not None, "stop() called on a network that was never started"
         self.net.stop()
 

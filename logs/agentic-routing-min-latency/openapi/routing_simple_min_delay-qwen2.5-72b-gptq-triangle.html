@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Experiment timeline</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1e222d; --line: #2a2f3c;
+    --fg: #e6e9ef; --muted: #8a93a6; --accent: #6ea8fe;
+    --assistant: #b794f6; --command: #6ea8fe; --msg: #6ea8fe; --pin: #f6ad55;
+    --idle: #5b6273; --system: #f6ad55; --status: #fc8181; --warning: #ecc94b;
+    --code: #c6ccd8; --prev: #aeb6c6; --epoch-grad: linear-gradient(90deg,#202637,#171a23);
+    --col-w: 300px;
+  }
+  body.light {
+    --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef1f5; --line: #d6dbe3;
+    --fg: #1c2330; --muted: #667085; --accent: #2563eb;
+    --assistant: #7c3aed; --command: #2563eb; --msg: #2563eb; --pin: #c2410c;
+    --idle: #98a2b3; --system: #b45309; --status: #dc2626; --warning: #b7791f;
+    --code: #344054; --prev: #475467; --epoch-grad: linear-gradient(90deg,#e3ebf7,#ffffff);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 12px;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--code); }
+  a { color: var(--accent); }
+
+  #toolbar { position: sticky; top: 0; z-index: 30; background: var(--panel);
+             border-bottom: 1px solid var(--line); padding: 8px 14px; display: flex;
+             flex-wrap: wrap; gap: 14px; align-items: center; }
+  #toolbar .title { font-weight: 600; margin-right: 6px; }
+  #toolbar .group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #toolbar label { color: var(--muted); cursor: pointer; user-select: none; }
+  #toolbar input[type=checkbox] { vertical-align: -2px; }
+  #toolbar button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+                    border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #toolbar button:hover { border-color: var(--accent); }
+  #search { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+            border-radius: 6px; padding: 4px 8px; min-width: 200px; }
+
+  #headerbar { position: sticky; top: 41px; z-index: 20; background: var(--panel2);
+               border-bottom: 1px solid var(--line); display: grid; }
+  #headerbar .gutter { padding: 6px; }
+  #headerbar .host { padding: 8px 10px; font-weight: 600; border-left: 1px solid var(--line);
+                     text-align: center; }
+
+  .epoch { border-bottom: 2px solid var(--line); }
+  .epoch-head { position: sticky; top: 78px; z-index: 10; background: var(--epoch-grad);
+                padding: 5px 14px; color: var(--accent); font-weight: 600; letter-spacing: .3px;
+                border-top: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; }
+  .epoch-head .range { color: var(--muted); font-weight: 400; font-size: 11px; }
+  .grid { display: grid; padding: 8px 0; column-gap: 12px; align-items: start; }
+  .gutter-ts { grid-column: 1; color: var(--muted); font-size: 11px; text-align: right;
+               padding-right: 8px; font-family: ui-monospace, monospace; padding-top: 9px; }
+  .cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line);
+          border-radius: 7px; padding: 7px 9px; margin: 2px 0; min-width: 0; }
+  .card .head { display: flex; gap: 6px; align-items: baseline; }
+  .card .ttl { font-weight: 600; word-break: break-word; }
+  .card .reason { color: var(--muted); font-style: italic; margin-top: 3px; }
+  .card details { margin-top: 4px; }
+  .card summary { cursor: pointer; color: var(--muted); outline: none; }
+  .card summary .prev { color: var(--prev); font-style: normal; }
+  /* Collapsed shows the preview; expanding reveals the full text instead of repeating it. */
+  .card details[open] summary .prev { display: none; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; background: var(--panel2);
+           color: var(--muted); border: 1px solid var(--line); }
+  .badge.ok { color: #68d391; } .badge.err { color: #fc8181; border-color: #5a2a2a; }
+
+  .kind-assistant { border-left-color: var(--assistant);
+                    background: color-mix(in srgb, var(--assistant) 14%, var(--panel)); }
+  .kind-command   { border-left-color: var(--command); }
+  .kind-msg_sent,
+  .kind-msg_recv  { border-left-color: var(--msg);
+                    background: color-mix(in srgb, var(--msg) 14%, var(--panel)); }
+  .kind-msg_sent .ttl, .kind-msg_recv .ttl { color: var(--msg); }
+  .kind-idle      { border-left-color: var(--idle); opacity: .8; }
+  .kind-system    { border-left-color: var(--system); }
+  .kind-status    { border-left-color: var(--status); }
+  .kind-warning   { border-left-color: var(--warning);
+                    background: color-mix(in srgb, var(--warning) 16%, var(--panel)); }
+
+  /* Reasoning blocks use normal foreground text — the muted/grey shade is reserved for the
+     internal [reason] notes shown inside tool-call cards, so reasoning must not reuse it. */
+  .kind-assistant pre, .kind-assistant summary .prev { color: var(--fg); }
+
+  body.hide-assistant .kind-assistant,
+  body.hide-command   .kind-command,
+  body.hide-messages  .kind-msg_sent,
+  body.hide-messages  .kind-msg_recv,
+  body.hide-idle      .kind-idle,
+  body.hide-system    .kind-system { display: none; }
+  .card.nomatch { display: none; }
+
+  #arrows { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 5; overflow: visible; }
+  #arrows path { fill: none; stroke: var(--msg); stroke-width: 1.6; opacity: .55; }
+  #arrows .arrowhead { fill: var(--msg); stroke: none; opacity: .7; }
+  /* Transparent, wide overlay along each curve so the thin arrow is easy to hover. */
+  #arrows .hit { stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+
+  /* Hover-linking: hovering a message card or its arrow emphasises that send/recv pair
+     and dims every other block (and arrow). Transient hover uses the blue message colour. */
+  .card.msg-link { cursor: pointer; }
+  body.linking .card { opacity: .22; }
+  body.linking .card.hl { opacity: 1; box-shadow: 0 0 0 1px var(--msg); }
+  body.linking #arrows path { opacity: .12; }
+  body.linking #arrows path.hl { opacity: 1; }
+
+  /* Pinned (locked by a click): amber and heavier — clearly distinct from the blue hover. */
+  body.pinned .card.hl { box-shadow: 0 0 0 2px var(--pin); }
+  body.pinned .card.hl .ttl::after { content: " 📌"; }
+  body.pinned #arrows path.hl { stroke: var(--pin); }
+  body.pinned #arrows .arrowhead.hl { fill: var(--pin); }
+  /* The Clear button only appears while a pin is active, in the pin colour. */
+  #clear-hl { border-color: var(--pin); color: var(--pin); }
+  body:not(.pinned) #clear-hl { display: none; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span class="title" id="exp-title"></span>
+  <span class="group" id="filters"></span>
+  <span class="group">
+    <button id="expand-all">Expand all</button>
+    <button id="collapse-all">Collapse all</button>
+    <button id="clear-hl">Clear highlight</button>
+  </span>
+  <span class="group">
+    <label><input type="checkbox" id="light-toggle"> Light mode</label>
+  </span>
+  <input id="search" type="search" placeholder="filter text…">
+</div>
+<div id="headerbar"></div>
+<div id="content"></div>
+<svg id="arrows"></svg>
+
+<script>
+const DATA = {"label": "routing_simple_min_delay-qwen2.5-72b-gptq-triangle", "hosts": ["h1", "h2", "h3"], "epochs": [{"epoch": 0, "label": "Setup", "ts_start": "18:11:29", "ts_end": "18:11:29", "events": [{"id": "h1__0", "host": "h1", "col": 0, "row": 0, "ts": "18:11:29", "kind": "system", "title": "System prompt", "body": "You are an autonomous network agent running on node h1 in a network testbed.\nOther nodes in the network: h3, h2.\nPhysical connections:\n  - h1-eth0: connected to h2 (your IP: 10.0.12.1/30, peer IP: 10.0.12.2/30)\n  - h1-eth1: connected to h3 (your IP: 10.0.13.1/30, peer IP: 10.0.13.2/30)\nGoals: \n- Achieve full IP connectivity with every other node in the network.\n- Make routing decisions that minimize latency.\n\nRules:\n- Be succint. You will be not communicating with humans, so readability and clarity are not priorities, just effiency and efficacy.\n- Only use the provided tools.\n- Cooperate and share information with the other hosts.\n\nTo call a tool, output a single <tool_call> block anywhere in your response:\n<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {\"param\": \"value\", ...}}</tool_call>\nCall exactly one tool per response. Available tools:\n  exec(command) \u2014 Execute a shell command on this node and return its output. Use this for any network inspection or configuration: 'ip addr show', 'ip route show', 'ip route add ...', 'ip route del ...', 'ping -c 3 <ip>', 'ip link show', 'ip neigh show', etc. Note: unlike a standard Linux host, there are NO automatic kernel routes here \u2014 not even for directly connected subnets. You must add every route explicitly.\n    - command: The shell command to run, e.g. 'ip route show'\n  report_done(message, success) \u2014 Signal that you want to terminate and are satisfied with the current state of the entire network.\n    - message: Summary of what was configured and connectivity verified\n    - success: True if full connectivity was achieved\n  send_message(to, message) \u2014 Send a natural language message to another node's agent. The message will be injected into the recipient's context on its next iteration.\n    - to: Name of the destination node, e.g. 'h2'\n    - message: The message to send\n  wait([timeout]) \u2014 Block until a message arrives from another node (or until timeout). Use this when you have completed your local actions and need to wait for other nodes to respond or coordinate before proceeding.\n    - timeout (optional): Maximum seconds to wait for a message (default: 5)\nCall exactly one tool per response. Wait for the result before taking the next action.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__0", "host": "h2", "col": 1, "row": 0, "ts": "18:11:29", "kind": "system", "title": "System prompt", "body": "You are an autonomous network agent running on node h2 in a network testbed.\nOther nodes in the network: h3, h1.\nPhysical connections:\n  - h2-eth0: connected to h1 (your IP: 10.0.12.2/30, peer IP: 10.0.12.1/30)\n  - h2-eth1: connected to h3 (your IP: 10.0.23.1/30, peer IP: 10.0.23.2/30)\nGoals: \n- Achieve full IP connectivity with every other node in the network.\n- Make routing decisions that minimize latency.\n\nRules:\n- Be succint. You will be not communicating with humans, so readability and clarity are not priorities, just effiency and efficacy.\n- Only use the provided tools.\n- Cooperate and share information with the other hosts.\n\nTo call a tool, output a single <tool_call> block anywhere in your response:\n<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {\"param\": \"value\", ...}}</tool_call>\nCall exactly one tool per response. Available tools:\n  exec(command) \u2014 Execute a shell command on this node and return its output. Use this for any network inspection or configuration: 'ip addr show', 'ip route show', 'ip route add ...', 'ip route del ...', 'ping -c 3 <ip>', 'ip link show', 'ip neigh show', etc. Note: unlike a standard Linux host, there are NO automatic kernel routes here \u2014 not even for directly connected subnets. You must add every route explicitly.\n    - command: The shell command to run, e.g. 'ip route show'\n  report_done(message, success) \u2014 Signal that you want to terminate and are satisfied with the current state of the entire network.\n    - message: Summary of what was configured and connectivity verified\n    - success: True if full connectivity was achieved\n  send_message(to, message) \u2014 Send a natural language message to another node's agent. The message will be injected into the recipient's context on its next iteration.\n    - to: Name of the destination node, e.g. 'h2'\n    - message: The message to send\n  wait([timeout]) \u2014 Block until a message arrives from another node (or until timeout). Use this when you have completed your local actions and need to wait for other nodes to respond or coordinate before proceeding.\n    - timeout (optional): Maximum seconds to wait for a message (default: 5)\nCall exactly one tool per response. Wait for the result before taking the next action.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__0", "host": "h3", "col": 2, "row": 0, "ts": "18:11:29", "kind": "system", "title": "System prompt", "body": "You are an autonomous network agent running on node h3 in a network testbed.\nOther nodes in the network: h2, h1.\nPhysical connections:\n  - h3-eth0: connected to h1 (your IP: 10.0.13.2/30, peer IP: 10.0.13.1/30)\n  - h3-eth1: connected to h2 (your IP: 10.0.23.2/30, peer IP: 10.0.23.1/30)\nGoals: \n- Achieve full IP connectivity with every other node in the network.\n- Make routing decisions that minimize latency.\n\nRules:\n- Be succint. You will be not communicating with humans, so readability and clarity are not priorities, just effiency and efficacy.\n- Only use the provided tools.\n- Cooperate and share information with the other hosts.\n\nTo call a tool, output a single <tool_call> block anywhere in your response:\n<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {\"param\": \"value\", ...}}</tool_call>\nCall exactly one tool per response. Available tools:\n  exec(command) \u2014 Execute a shell command on this node and return its output. Use this for any network inspection or configuration: 'ip addr show', 'ip route show', 'ip route add ...', 'ip route del ...', 'ping -c 3 <ip>', 'ip link show', 'ip neigh show', etc. Note: unlike a standard Linux host, there are NO automatic kernel routes here \u2014 not even for directly connected subnets. You must add every route explicitly.\n    - command: The shell command to run, e.g. 'ip route show'\n  report_done(message, success) \u2014 Signal that you want to terminate and are satisfied with the current state of the entire network.\n    - message: Summary of what was configured and connectivity verified\n    - success: True if full connectivity was achieved\n  send_message(to, message) \u2014 Send a natural language message to another node's agent. The message will be injected into the recipient's context on its next iteration.\n    - to: Name of the destination node, e.g. 'h2'\n    - message: The message to send\n  wait([timeout]) \u2014 Block until a message arrives from another node (or until timeout). Use this when you have completed your local actions and need to wait for other nodes to respond or coordinate before proceeding.\n    - timeout (optional): Maximum seconds to wait for a message (default: 5)\nCall exactly one tool per response. Wait for the result before taking the next action.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 1, "label": "Iteration 1", "ts_start": "18:11:33", "ts_end": "18:11:33", "events": [{"id": "h1__2", "host": "h1", "col": 0, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.12.2 dev h1-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__3", "host": "h1", "col": 0, "row": 0, "ts": "18:11:33", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.12.2 dev h1-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__4", "host": "h1", "col": 0, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "Command output:\nError: Nexthop has invalid gateway.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__2", "host": "h2", "col": 1, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__3", "host": "h2", "col": 1, "row": 0, "ts": "18:11:33", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.12.1 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__4", "host": "h2", "col": 1, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "Command output:\nError: Nexthop has invalid gateway.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__2", "host": "h3", "col": 2, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 via 10.0.13.1 dev h3-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__3", "host": "h3", "col": 2, "row": 0, "ts": "18:11:33", "kind": "command", "title": "ip route add 10.0.13.0/30 via 10.0.13.1 dev h3-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__4", "host": "h3", "col": 2, "row": 0, "ts": "18:11:33", "kind": "log", "title": "", "body": "Command output:\nError: Nexthop has invalid gateway.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 2, "label": "Iteration 2", "ts_start": "18:11:34", "ts_end": "18:11:36", "events": [{"id": "h1__6", "host": "h1", "col": 0, "row": 0, "ts": "18:11:34", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.2/30 via 10.0.12.2 dev h1-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__7", "host": "h1", "col": 0, "row": 0, "ts": "18:11:34", "kind": "command", "title": "ip route add 10.0.12.2/30 via 10.0.12.2 dev h1-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__8", "host": "h1", "col": 0, "row": 0, "ts": "18:11:34", "kind": "log", "title": "", "body": "Command output:\nError: Invalid prefix for given prefix length.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__6", "host": "h3", "col": 2, "row": 0, "ts": "18:11:34", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 dev h3-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__7", "host": "h3", "col": 2, "row": 0, "ts": "18:11:34", "kind": "command", "title": "ip route add 10.0.13.0/30 dev h3-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__8", "host": "h3", "col": 2, "row": 0, "ts": "18:11:34", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__6", "host": "h2", "col": 1, "row": 1, "ts": "18:11:36", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__7", "host": "h2", "col": 1, "row": 1, "ts": "18:11:36", "kind": "command", "title": "ip route add 10.0.12.0/30 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__8", "host": "h2", "col": 1, "row": 1, "ts": "18:11:36", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 3, "label": "Iteration 3", "ts_start": "18:11:35", "ts_end": "18:11:37", "events": [{"id": "h3__10", "host": "h3", "col": 2, "row": 0, "ts": "18:11:35", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.23.0/30 dev h3-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__11", "host": "h3", "col": 2, "row": 0, "ts": "18:11:35", "kind": "command", "title": "ip route add 10.0.23.0/30 dev h3-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__12", "host": "h3", "col": 2, "row": 0, "ts": "18:11:35", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__10", "host": "h1", "col": 0, "row": 1, "ts": "18:11:36", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.2/32 via 10.0.12.2 dev h1-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__11", "host": "h1", "col": 0, "row": 1, "ts": "18:11:36", "kind": "command", "title": "ip route add 10.0.12.2/32 via 10.0.12.2 dev h1-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__12", "host": "h1", "col": 0, "row": 1, "ts": "18:11:36", "kind": "log", "title": "", "body": "Command output:\nError: Nexthop has invalid gateway.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__10", "host": "h2", "col": 1, "row": 2, "ts": "18:11:37", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.23.0/30 dev h2-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__11", "host": "h2", "col": 1, "row": 2, "ts": "18:11:37", "kind": "command", "title": "ip route add 10.0.23.0/30 dev h2-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__12", "host": "h2", "col": 1, "row": 2, "ts": "18:11:37", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 4, "label": "Iteration 4", "ts_start": "18:11:37", "ts_end": "18:11:38", "events": [{"id": "h1__14", "host": "h1", "col": 0, "row": 0, "ts": "18:11:37", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 dev h1-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__15", "host": "h1", "col": 0, "row": 0, "ts": "18:11:37", "kind": "command", "title": "ip route add 10.0.12.0/30 dev h1-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__16", "host": "h1", "col": 0, "row": 0, "ts": "18:11:37", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__14", "host": "h3", "col": 2, "row": 0, "ts": "18:11:37", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.23.1 dev h3-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__15", "host": "h3", "col": 2, "row": 0, "ts": "18:11:37", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.23.1 dev h3-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__16", "host": "h3", "col": 2, "row": 0, "ts": "18:11:37", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__14", "host": "h2", "col": 1, "row": 1, "ts": "18:11:38", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__15", "host": "h2", "col": 1, "row": 1, "ts": "18:11:38", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.12.1 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__16", "host": "h2", "col": 1, "row": 1, "ts": "18:11:38", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 5, "label": "Iteration 5", "ts_start": "18:11:38", "ts_end": "18:11:42", "events": [{"id": "h1__18", "host": "h1", "col": 0, "row": 0, "ts": "18:11:38", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 dev h1-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__19", "host": "h1", "col": 0, "row": 0, "ts": "18:11:38", "kind": "command", "title": "ip route add 10.0.13.0/30 dev h1-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__20", "host": "h1", "col": 0, "row": 0, "ts": "18:11:38", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__18", "host": "h3", "col": 2, "row": 1, "ts": "18:11:39", "kind": "log", "title": "", "body": "send_message({'to': 'h1', 'message': 'Please add route 10.0.23.0/30 via 10.0.13.2 dev h1-eth0 and 10.0.12.0/30 via 10.0.13.2 dev h1-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__19", "host": "h3", "col": 2, "row": 1, "ts": "18:11:39", "kind": "msg_sent", "title": "\u2192 h1", "body": "Please add route 10.0.23.0/30 via 10.0.13.2 dev h1-eth0 and 10.0.12.0/30 via 10.0.13.2 dev h1-eth0", "reason": "", "exit": null, "peer": "h1", "dir": "out", "link": 0}, {"id": "h2__18", "host": "h2", "col": 1, "row": 2, "ts": "18:11:42", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.23.0/30 via 10.0.23.2 dev h2-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__19", "host": "h2", "col": 1, "row": 2, "ts": "18:11:42", "kind": "command", "title": "ip route add 10.0.23.0/30 via 10.0.23.2 dev h2-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__20", "host": "h2", "col": 1, "row": 2, "ts": "18:11:42", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__21", "host": "h2", "col": 1, "row": 2, "ts": "18:11:42", "kind": "msg_recv", "title": "\u2190 h1", "body": "Route to 10.0.13.0/30 via 10.0.12.1 added.", "reason": "", "exit": null, "peer": "h1", "dir": "in", "link": 1}]}, {"epoch": 6, "label": "Iteration 6", "ts_start": "18:11:40", "ts_end": "18:11:43", "events": [{"id": "h1__22", "host": "h1", "col": 0, "row": 0, "ts": "18:11:40", "kind": "log", "title": "", "body": "send_message({'to': 'h2', 'message': 'Route to 10.0.13.0/30 via 10.0.12.1 added.'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__23", "host": "h1", "col": 0, "row": 0, "ts": "18:11:40", "kind": "msg_sent", "title": "\u2192 h2", "body": "Route to 10.0.13.0/30 via 10.0.12.1 added.", "reason": "", "exit": null, "peer": "h2", "dir": "out", "link": 1}, {"id": "h1__24", "host": "h1", "col": 0, "row": 0, "ts": "18:11:40", "kind": "msg_recv", "title": "\u2190 h3", "body": "Please add route 10.0.23.0/30 via 10.0.13.2 dev h1-eth0 and 10.0.12.0/30 via 10.0.13.2 dev h1-eth0", "reason": "", "exit": null, "peer": "h3", "dir": "in", "link": 0}, {"id": "h3__21", "host": "h3", "col": 2, "row": 1, "ts": "18:11:42", "kind": "log", "title": "", "body": "send_message({'to': 'h2', 'message': 'Please add route 10.0.13.0/30 via 10.0.23.2 dev h2-eth0 and 10.0.12.0/30 via 10.0.23.2 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__22", "host": "h3", "col": 2, "row": 1, "ts": "18:11:42", "kind": "msg_sent", "title": "\u2192 h2", "body": "Please add route 10.0.13.0/30 via 10.0.23.2 dev h2-eth0 and 10.0.12.0/30 via 10.0.23.2 dev h2-eth0", "reason": "", "exit": null, "peer": "h2", "dir": "out", "link": 2}, {"id": "h2__23", "host": "h2", "col": 1, "row": 2, "ts": "18:11:43", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__24", "host": "h2", "col": 1, "row": 2, "ts": "18:11:43", "kind": "command", "title": "ip route add 10.0.13.0/30 via 10.0.12.1 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__25", "host": "h2", "col": 1, "row": 2, "ts": "18:11:43", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__26", "host": "h2", "col": 1, "row": 2, "ts": "18:11:43", "kind": "msg_recv", "title": "\u2190 h3", "body": "Please add route 10.0.13.0/30 via 10.0.23.2 dev h2-eth0 and 10.0.12.0/30 via 10.0.23.2 dev h2-eth0", "reason": "", "exit": null, "peer": "h3", "dir": "in", "link": 2}]}, {"epoch": 7, "label": "Iteration 7", "ts_start": "18:11:41", "ts_end": "18:11:45", "events": [{"id": "h1__26", "host": "h1", "col": 0, "row": 0, "ts": "18:11:41", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.23.0/30 via 10.0.13.2 dev h1-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__27", "host": "h1", "col": 0, "row": 0, "ts": "18:11:41", "kind": "command", "title": "ip route add 10.0.23.0/30 via 10.0.13.2 dev h1-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__28", "host": "h1", "col": 0, "row": 0, "ts": "18:11:41", "kind": "log", "title": "", "body": "Command output: (empty)", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__24", "host": "h3", "col": 2, "row": 1, "ts": "18:11:42", "kind": "log", "title": "", "body": "wait({})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__28", "host": "h2", "col": 1, "row": 2, "ts": "18:11:45", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.23.2 dev h2-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__29", "host": "h2", "col": 1, "row": 2, "ts": "18:11:45", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.23.2 dev h2-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__30", "host": "h2", "col": 1, "row": 2, "ts": "18:11:45", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 8, "label": "Iteration 8", "ts_start": "18:11:43", "ts_end": "18:11:47", "events": [{"id": "h1__30", "host": "h1", "col": 0, "row": 0, "ts": "18:11:43", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.12.0/30 via 10.0.13.2 dev h1-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__31", "host": "h1", "col": 0, "row": 0, "ts": "18:11:43", "kind": "command", "title": "ip route add 10.0.12.0/30 via 10.0.13.2 dev h1-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__32", "host": "h1", "col": 0, "row": 0, "ts": "18:11:43", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__26", "host": "h3", "col": 2, "row": 0, "ts": "18:11:43", "kind": "log", "title": "", "body": "wait({})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__32", "host": "h2", "col": 1, "row": 1, "ts": "18:11:47", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 via 10.0.23.2 dev h2-eth1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__33", "host": "h2", "col": 1, "row": 1, "ts": "18:11:47", "kind": "command", "title": "ip route add 10.0.13.0/30 via 10.0.23.2 dev h2-eth1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__34", "host": "h2", "col": 1, "row": 1, "ts": "18:11:47", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 9, "label": "Iteration 9", "ts_start": "18:11:44", "ts_end": "18:11:48", "events": [{"id": "h3__28", "host": "h3", "col": 2, "row": 0, "ts": "18:11:44", "kind": "log", "title": "", "body": "wait({'timeout': 5})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__34", "host": "h1", "col": 0, "row": 1, "ts": "18:11:45", "kind": "log", "title": "", "body": "send_message({'to': 'h3', 'message': 'Route to 10.0.23.0/30 via 10.0.13.2 added. Route to 10.0.12.0/30 already exists.'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__35", "host": "h1", "col": 0, "row": 1, "ts": "18:11:45", "kind": "msg_sent", "title": "\u2192 h3", "body": "Route to 10.0.23.0/30 via 10.0.13.2 added. Route to 10.0.12.0/30 already exists.", "reason": "", "exit": null, "peer": "h3", "dir": "out", "link": 3}, {"id": "h2__36", "host": "h2", "col": 1, "row": 2, "ts": "18:11:48", "kind": "log", "title": "", "body": "send_message({'to': 'h1', 'message': 'Please ping 10.0.23.2 to verify connectivity.'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__37", "host": "h2", "col": 1, "row": 2, "ts": "18:11:48", "kind": "msg_sent", "title": "\u2192 h1", "body": "Please ping 10.0.23.2 to verify connectivity.", "reason": "", "exit": null, "peer": "h1", "dir": "out", "link": 4}, {"id": "h2__38", "host": "h2", "col": 1, "row": 2, "ts": "18:11:48", "kind": "msg_recv", "title": "\u2190 h1", "body": "Please add route 10.0.13.0/30 via 10.0.12.1 dev h2-eth0 and 10.0.23.0/30 via 10.0.12.1 dev h2-eth0", "reason": "", "exit": null, "peer": "h1", "dir": "in", "link": 5}]}, {"epoch": 10, "label": "Iteration 10", "ts_start": "18:11:44", "ts_end": "18:11:49", "events": [{"id": "h3__30", "host": "h3", "col": 2, "row": 0, "ts": "18:11:44", "kind": "log", "title": "", "body": "exec({'command': 'ip route show'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__31", "host": "h3", "col": 2, "row": 0, "ts": "18:11:44", "kind": "command", "title": "ip route show", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__32", "host": "h3", "col": 2, "row": 0, "ts": "18:11:44", "kind": "log", "title": "", "body": "Command output:\n10.0.12.0/30 via 10.0.23.1 dev h3-eth1 \n10.0.13.0/30 dev h3-eth0 scope link \n10.0.23.0/30 dev h3-eth1 scope link", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__37", "host": "h1", "col": 0, "row": 1, "ts": "18:11:48", "kind": "log", "title": "", "body": "send_message({'to': 'h2', 'message': 'Please add route 10.0.13.0/30 via 10.0.12.1 dev h2-eth0 and 10.0.23.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__38", "host": "h1", "col": 0, "row": 1, "ts": "18:11:48", "kind": "msg_sent", "title": "\u2192 h2", "body": "Please add route 10.0.13.0/30 via 10.0.12.1 dev h2-eth0 and 10.0.23.0/30 via 10.0.12.1 dev h2-eth0", "reason": "", "exit": null, "peer": "h2", "dir": "out", "link": 5}, {"id": "h2__40", "host": "h2", "col": 1, "row": 2, "ts": "18:11:49", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.13.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__41", "host": "h2", "col": 1, "row": 2, "ts": "18:11:49", "kind": "command", "title": "ip route add 10.0.13.0/30 via 10.0.12.1 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__42", "host": "h2", "col": 1, "row": 2, "ts": "18:11:49", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 11, "label": "Iteration 11", "ts_start": "18:11:46", "ts_end": "18:11:51", "events": [{"id": "h3__34", "host": "h3", "col": 2, "row": 0, "ts": "18:11:46", "kind": "log", "title": "", "body": "ping({'command': 'ping -c 3 10.0.13.1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__35", "host": "h3", "col": 2, "row": 0, "ts": "18:11:46", "kind": "msg_recv", "title": "\u2190 h1", "body": "Route to 10.0.23.0/30 via 10.0.13.2 added. Route to 10.0.12.0/30 already exists.", "reason": "", "exit": null, "peer": "h1", "dir": "in", "link": 3}, {"id": "h1__40", "host": "h1", "col": 0, "row": 1, "ts": "18:11:48", "kind": "log", "title": "", "body": "wait({})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__41", "host": "h1", "col": 0, "row": 1, "ts": "18:11:48", "kind": "msg_recv", "title": "\u2190 h2", "body": "Please ping 10.0.23.2 to verify connectivity.", "reason": "", "exit": null, "peer": "h2", "dir": "in", "link": 4}, {"id": "h2__44", "host": "h2", "col": 1, "row": 2, "ts": "18:11:51", "kind": "log", "title": "", "body": "exec({'command': 'ip route add 10.0.23.0/30 via 10.0.12.1 dev h2-eth0'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__45", "host": "h2", "col": 1, "row": 2, "ts": "18:11:51", "kind": "command", "title": "ip route add 10.0.23.0/30 via 10.0.12.1 dev h2-eth0", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__46", "host": "h2", "col": 1, "row": 2, "ts": "18:11:51", "kind": "log", "title": "", "body": "Command output:\nRTNETLINK answers: File exists", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 12, "label": "Iteration 12", "ts_start": "18:11:48", "ts_end": "18:11:52", "events": [{"id": "h3__37", "host": "h3", "col": 2, "row": 0, "ts": "18:11:48", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.13.1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__38", "host": "h3", "col": 2, "row": 0, "ts": "18:11:48", "kind": "command", "title": "ping -c 3 10.0.13.1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__43", "host": "h1", "col": 0, "row": 1, "ts": "18:11:49", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.23.2'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__44", "host": "h1", "col": 0, "row": 1, "ts": "18:11:49", "kind": "command", "title": "ping -c 3 10.0.23.2", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__39", "host": "h3", "col": 2, "row": 2, "ts": "18:11:50", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.13.1 (10.0.13.1) 56(84) bytes of data.\n64 bytes from 10.0.13.1: icmp_seq=1 ttl=64 time=160 ms\n64 bytes from 10.0.13.1: icmp_seq=2 ttl=64 time=80.1 ms\n64 bytes from 10.0.13.1: icmp_seq=3 ttl=64 time=80.1 ms\n\n--- 10.0.13.1 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 80.058/106.737/160.081/37.719 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__45", "host": "h1", "col": 0, "row": 3, "ts": "18:11:51", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.23.2 (10.0.23.2) 56(84) bytes of data.\n64 bytes from 10.0.23.2: icmp_seq=1 ttl=64 time=80.1 ms\n64 bytes from 10.0.23.2: icmp_seq=2 ttl=64 time=80.1 ms\n64 bytes from 10.0.23.2: icmp_seq=3 ttl=64 time=80.1 ms\n\n--- 10.0.23.2 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 80.062/80.072/80.086/0.010 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__48", "host": "h2", "col": 1, "row": 4, "ts": "18:11:52", "kind": "log", "title": "", "body": "send_message({'to': 'h3', 'message': 'Please ping 10.0.12.1 to verify connectivity.'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__49", "host": "h2", "col": 1, "row": 4, "ts": "18:11:52", "kind": "msg_sent", "title": "\u2192 h3", "body": "Please ping 10.0.12.1 to verify connectivity.", "reason": "", "exit": null, "peer": "h3", "dir": "out", "link": 6}]}, {"epoch": 13, "label": "Iteration 13", "ts_start": "18:11:51", "ts_end": "18:11:53", "events": [{"id": "h3__41", "host": "h3", "col": 2, "row": 0, "ts": "18:11:51", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.23.1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__42", "host": "h3", "col": 2, "row": 0, "ts": "18:11:51", "kind": "command", "title": "ping -c 3 10.0.23.1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__47", "host": "h1", "col": 0, "row": 1, "ts": "18:11:53", "kind": "log", "title": "", "body": "send_message({'to': 'h2', 'message': 'Ping to 10.0.23.2 successful.'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__48", "host": "h1", "col": 0, "row": 1, "ts": "18:11:53", "kind": "msg_sent", "title": "\u2192 h2", "body": "Ping to 10.0.23.2 successful.", "reason": "", "exit": null, "peer": "h2", "dir": "out", "link": 7}, {"id": "h2__51", "host": "h2", "col": 1, "row": 1, "ts": "18:11:53", "kind": "log", "title": "", "body": "wait({})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__52", "host": "h2", "col": 1, "row": 1, "ts": "18:11:53", "kind": "msg_recv", "title": "\u2190 h1", "body": "Ping to 10.0.23.2 successful.", "reason": "", "exit": null, "peer": "h1", "dir": "in", "link": 7}, {"id": "h3__43", "host": "h3", "col": 2, "row": 1, "ts": "18:11:53", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.23.1 (10.0.23.1) 56(84) bytes of data.\n64 bytes from 10.0.23.1: icmp_seq=1 ttl=64 time=60.1 ms\n64 bytes from 10.0.23.1: icmp_seq=2 ttl=64 time=30.1 ms\n64 bytes from 10.0.23.1: icmp_seq=3 ttl=64 time=30.1 ms\n\n--- 10.0.23.1 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 30.071/40.080/60.095/14.152 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__44", "host": "h3", "col": 2, "row": 1, "ts": "18:11:53", "kind": "msg_recv", "title": "\u2190 h2", "body": "Please ping 10.0.12.1 to verify connectivity.", "reason": "", "exit": null, "peer": "h2", "dir": "in", "link": 6}]}, {"epoch": 14, "label": "Iteration 14", "ts_start": "18:11:54", "ts_end": "18:11:57", "events": [{"id": "h1__50", "host": "h1", "col": 0, "row": 0, "ts": "18:11:54", "kind": "log", "title": "", "body": "report_done({'message': 'All routes configured and connectivity verified.', 'success': True})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__51", "host": "h1", "col": 0, "row": 0, "ts": "18:11:54", "kind": "log", "title": "", "body": "Done \u2014 All routes configured and connectivity verified.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h1__52", "host": "h1", "col": 0, "row": 0, "ts": "18:11:54", "kind": "log", "title": "", "body": "Agent run complete. Final report: AgentResult(success=True, message='All routes configured and connectivity verified.')", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__54", "host": "h2", "col": 1, "row": 0, "ts": "18:11:54", "kind": "log", "title": "", "body": "wait({})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__46", "host": "h3", "col": 2, "row": 1, "ts": "18:11:55", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.12.1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__47", "host": "h3", "col": 2, "row": 1, "ts": "18:11:55", "kind": "command", "title": "ping -c 3 10.0.12.1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__48", "host": "h3", "col": 2, "row": 2, "ts": "18:11:57", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.12.1 (10.0.12.1) 56(84) bytes of data.\n64 bytes from 10.0.12.1: icmp_seq=1 ttl=64 time=85.1 ms\n64 bytes from 10.0.12.1: icmp_seq=2 ttl=64 time=65.1 ms\n64 bytes from 10.0.12.1: icmp_seq=3 ttl=64 time=65.1 ms\n\n--- 10.0.12.1 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 65.066/71.757/85.064/9.409 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 15, "label": "Iteration 15", "ts_start": "18:11:55", "ts_end": "18:11:58", "events": [{"id": "h2__56", "host": "h2", "col": 1, "row": 0, "ts": "18:11:55", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.12.1'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__57", "host": "h2", "col": 1, "row": 0, "ts": "18:11:55", "kind": "command", "title": "ping -c 3 10.0.12.1", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__58", "host": "h2", "col": 1, "row": 1, "ts": "18:11:57", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.12.1 (10.0.12.1) 56(84) bytes of data.\n64 bytes from 10.0.12.1: icmp_seq=1 ttl=64 time=20.0 ms\n64 bytes from 10.0.12.1: icmp_seq=2 ttl=64 time=20.0 ms\n64 bytes from 10.0.12.1: icmp_seq=3 ttl=64 time=20.1 ms\n\n--- 10.0.12.1 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 20.029/20.048/20.074/0.019 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__50", "host": "h3", "col": 2, "row": 2, "ts": "18:11:58", "kind": "log", "title": "", "body": "report_done({'message': 'Full IP connectivity achieved with all nodes. Routes configured and verified.', 'success': True})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__51", "host": "h3", "col": 2, "row": 2, "ts": "18:11:58", "kind": "log", "title": "", "body": "Done \u2014 Full IP connectivity achieved with all nodes. Routes configured and verified.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h3__52", "host": "h3", "col": 2, "row": 2, "ts": "18:11:58", "kind": "log", "title": "", "body": "Agent run complete. Final report: AgentResult(success=True, message='Full IP connectivity achieved with all nodes. Routes configured and verified.')", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 16, "label": "Iteration 16", "ts_start": "18:11:58", "ts_end": "18:12:00", "events": [{"id": "h2__60", "host": "h2", "col": 1, "row": 0, "ts": "18:11:58", "kind": "log", "title": "", "body": "exec({'command': 'ping -c 3 10.0.23.2'})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__61", "host": "h2", "col": 1, "row": 0, "ts": "18:11:58", "kind": "command", "title": "ping -c 3 10.0.23.2", "body": "", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__62", "host": "h2", "col": 1, "row": 1, "ts": "18:12:00", "kind": "log", "title": "", "body": "Command output:\nPING 10.0.23.2 (10.0.23.2) 56(84) bytes of data.\n64 bytes from 10.0.23.2: icmp_seq=1 ttl=64 time=30.0 ms\n64 bytes from 10.0.23.2: icmp_seq=2 ttl=64 time=30.1 ms\n64 bytes from 10.0.23.2: icmp_seq=3 ttl=64 time=30.1 ms\n\n--- 10.0.23.2 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2002ms\nrtt min/avg/max/mdev = 30.031/30.053/30.074/0.017 ms", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}, {"epoch": 17, "label": "Iteration 17", "ts_start": "18:12:01", "ts_end": "18:12:01", "events": [{"id": "h2__64", "host": "h2", "col": 1, "row": 0, "ts": "18:12:01", "kind": "log", "title": "", "body": "report_done({'message': 'Full IP connectivity achieved with all nodes. Connectivity verified via pings.', 'success': True})", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__65", "host": "h2", "col": 1, "row": 0, "ts": "18:12:01", "kind": "log", "title": "", "body": "Done \u2014 Full IP connectivity achieved with all nodes. Connectivity verified via pings.", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}, {"id": "h2__66", "host": "h2", "col": 1, "row": 0, "ts": "18:12:01", "kind": "log", "title": "", "body": "Agent run complete. Final report: AgentResult(success=True, message='Full IP connectivity achieved with all nodes. Connectivity verified via pings.')", "reason": "", "exit": null, "peer": "", "dir": "", "link": null}]}], "links": [{"id": 0, "send_id": "h3__19", "recv_id": "h1__24", "from": "h3", "to": "h1"}, {"id": 1, "send_id": "h1__23", "recv_id": "h2__21", "from": "h1", "to": "h2"}, {"id": 2, "send_id": "h3__22", "recv_id": "h2__26", "from": "h3", "to": "h2"}, {"id": 3, "send_id": "h1__35", "recv_id": "h3__35", "from": "h1", "to": "h3"}, {"id": 4, "send_id": "h2__37", "recv_id": "h1__41", "from": "h2", "to": "h1"}, {"id": 5, "send_id": "h1__38", "recv_id": "h2__38", "from": "h1", "to": "h2"}, {"id": 6, "send_id": "h2__49", "recv_id": "h3__44", "from": "h2", "to": "h3"}, {"id": 7, "send_id": "h1__48", "recv_id": "h2__52", "from": "h1", "to": "h2"}]};
+const NH = DATA.hosts.length;
+const COLW = 300;
+const GUTTER = 64;
+const cols = `${GUTTER}px repeat(${NH}, minmax(${COLW}px, 1fr))`;
+
+function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+function preview(s) { s = (s || "").replace(/\s+/g, " ").trim(); return s.length > 120 ? s.slice(0, 120) + "…" : s; }
+
+document.getElementById("exp-title").textContent = DATA.label;
+
+// ---- filters ----
+const KINDS = [["assistant","Reasoning"],["command","Tools"],["messages","Messages"],["idle","Idle"],["system","System"]];
+const filterBox = document.getElementById("filters");
+for (const [key, lbl] of KINDS) {
+  const l = el("label"); const c = el("input"); c.type = "checkbox"; c.checked = true;
+  c.onchange = () => { document.body.classList.toggle("hide-" + key, !c.checked); drawArrows(); };
+  l.appendChild(c); l.appendChild(document.createTextNode(" " + lbl)); filterBox.appendChild(l);
+}
+
+// ---- sticky header ----
+const hb = document.getElementById("headerbar");
+hb.style.gridTemplateColumns = cols;
+hb.appendChild(el("div", "gutter", ""));
+for (const h of DATA.hosts) hb.appendChild(el("div", "host", h));
+
+// ---- card builder ----
+function buildCard(ev) {
+  const card = el("div", "card kind-" + ev.kind);
+  card.id = ev.id;
+  card.dataset.text = ((ev.title || "") + " " + (ev.reason || "") + " " + (ev.body || "")).toLowerCase();
+
+  if (ev.link != null) {
+    card.classList.add("msg-link");
+    card.dataset.link = ev.link;
+    card.addEventListener("mouseenter", () => hoverHighlight(ev.link, true));
+    card.addEventListener("mouseleave", () => hoverHighlight(ev.link, false));
+    card.addEventListener("click", (e) => {
+      e.stopPropagation();                          // a click inside a message block never clears
+      if (e.target.closest("summary, a")) return;   // let expand/collapse and links work
+      setPin(ev.link);
+    });
+  }
+
+  const head = el("div", "head");
+  const icon = { assistant:"💭", command:"⌘", msg_sent:"✉", msg_recv:"📨", idle:"⏸",
+                 system:"⚙", status:"⚑", warning:"⚠", log:"·" }[ev.kind] || "·";
+  head.appendChild(el("span", "ttl", icon + " " + (ev.title || ev.kind)));
+  if (ev.exit != null) {
+    const b = el("span", "badge " + (ev.exit === 0 ? "ok" : "err"), "exit " + ev.exit);
+    head.appendChild(b);
+  }
+  card.appendChild(head);
+
+  if (ev.reason) card.appendChild(el("div", "reason", ev.reason));
+
+  if (ev.body) {
+    const long = ev.body.length > 120 || ev.body.includes("\n");
+    const collapsedByDefault = (ev.kind === "system" || ev.kind === "command" || ev.body.length > 400);
+    if (long) {
+      const d = el("details"); if (!collapsedByDefault) d.open = true;
+      const s = el("summary");
+      s.appendChild(el("span", "prev", preview(ev.body)));
+      d.appendChild(s);
+      d.appendChild(el("pre", null, ev.body));
+      d.addEventListener("toggle", drawArrows);
+      card.appendChild(d);
+    } else {
+      card.appendChild(el("pre", null, ev.body));
+    }
+  }
+  return card;
+}
+
+// ---- render epochs ----
+const content = document.getElementById("content");
+for (const ep of DATA.epochs) {
+  const sec = el("div", "epoch");
+  const head = el("div", "epoch-head");
+  head.appendChild(el("span", null, ep.label));
+  head.appendChild(el("span", "range", ep.ts_start === ep.ts_end ? ep.ts_start : (ep.ts_start + " → " + ep.ts_end)));
+  sec.appendChild(head);
+
+  const grid = el("div", "grid");
+  grid.style.gridTemplateColumns = cols;
+
+  // Group events into cells keyed by (row, col); same-second events share a row, and same
+  // host+second events stack inside one cell.
+  const byRow = new Map();  // row -> Map(col -> [events])
+  for (const ev of ep.events) {
+    if (!byRow.has(ev.row)) byRow.set(ev.row, new Map());
+    const m = byRow.get(ev.row);
+    if (!m.has(ev.col)) m.set(ev.col, []);
+    m.get(ev.col).push(ev);
+  }
+  for (const [row, m] of byRow) {
+    const anyEv = m.values().next().value[0];
+    const ts = el("div", "gutter-ts", anyEv.ts);
+    ts.style.gridRow = (row + 1);
+    grid.appendChild(ts);
+    for (const [col, evs] of m) {
+      const cell = el("div", "cell");
+      cell.style.gridRow = (row + 1);
+      cell.style.gridColumn = (col + 2);
+      for (const ev of evs) cell.appendChild(buildCard(ev));
+      grid.appendChild(cell);
+    }
+  }
+  sec.appendChild(grid);
+  content.appendChild(sec);
+}
+
+// ---- message arrows ----
+const svg = document.getElementById("arrows");
+const SVGNS = "http://www.w3.org/2000/svg";
+
+// A clicked link stays highlighted until you click elsewhere (or the Clear button);
+// hovering only previews while nothing is pinned.
+let pinnedLink = null;
+
+// Emphasise the send/recv pair (and arrow) for a link id; dim everything else. null clears.
+function applyHighlight(link) {
+  document.querySelectorAll(".card.hl").forEach(c => c.classList.remove("hl"));
+  svg.querySelectorAll("path.hl").forEach(p => p.classList.remove("hl"));
+  const lk = link == null ? null : DATA.links.find(l => l.id == link);
+  document.body.classList.toggle("linking", !!lk);
+  if (lk) {
+    for (const id of [lk.send_id, lk.recv_id]) {
+      const c = document.getElementById(id);
+      if (c) c.classList.add("hl");
+    }
+    svg.querySelectorAll('path[data-link="' + link + '"]').forEach(p => p.classList.add("hl"));
+  }
+}
+
+// Hover preview — ignored while a link is pinned.
+function hoverHighlight(link, on) {
+  if (pinnedLink != null) return;
+  applyHighlight(on ? link : null);
+}
+
+// Click pins a link (or switches to another); clicking elsewhere clears it.
+function setPin(link) {
+  pinnedLink = link;
+  applyHighlight(link);
+  document.body.classList.add("pinned");
+}
+function clearPin() {
+  if (pinnedLink == null) return;
+  pinnedLink = null;
+  applyHighlight(null);
+  document.body.classList.remove("pinned");
+}
+// Clicking anywhere that isn't a pinnable message card/arrow clears the pin.
+document.addEventListener("click", clearPin);
+
+function drawArrows() {
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  svg.setAttribute("width", document.documentElement.scrollWidth);
+  svg.setAttribute("height", document.documentElement.scrollHeight);
+  for (const link of DATA.links) {
+    const a = document.getElementById(link.send_id), b = document.getElementById(link.recv_id);
+    if (!a || !b || a.offsetParent === null || b.offsetParent === null) continue;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const sx = window.scrollX, sy = window.scrollY;
+    const rightward = rb.left >= ra.left;
+    const x1 = (rightward ? ra.right : ra.left) + sx, y1 = ra.top + sy + ra.height / 2;
+    const x2 = (rightward ? rb.left : rb.right) + sx, y2 = rb.top + sy + rb.height / 2;
+    const dx = Math.max(40, Math.abs(x2 - x1) * 0.4) * (rightward ? 1 : -1);
+    const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+    const p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("class", "wire");
+    p.setAttribute("data-link", link.id);
+    p.setAttribute("d", d);
+    svg.appendChild(p);
+    const head = document.createElementNS(SVGNS, "path");
+    const dir = rightward ? 1 : -1;
+    head.setAttribute("class", "arrowhead");
+    head.setAttribute("data-link", link.id);
+    head.setAttribute("d", `M ${x2} ${y2} l ${-6 * dir} -3 l 0 6 z`);
+    svg.appendChild(head);
+    // Wide invisible overlay carrying the hover interaction for this link.
+    const hit = document.createElementNS(SVGNS, "path");
+    hit.setAttribute("class", "hit");
+    hit.setAttribute("data-link", link.id);
+    hit.setAttribute("d", d);
+    hit.addEventListener("mouseenter", () => hoverHighlight(link.id, true));
+    hit.addEventListener("mouseleave", () => hoverHighlight(link.id, false));
+    hit.addEventListener("click", (e) => { e.stopPropagation(); setPin(link.id); });
+    svg.appendChild(hit);
+  }
+  // Arrows are rebuilt on every draw, so re-apply the pinned link's highlight to the new paths.
+  if (pinnedLink != null)
+    svg.querySelectorAll('path[data-link="' + pinnedLink + '"]').forEach(p => p.classList.add("hl"));
+}
+
+// ---- toolbar actions ----
+document.getElementById("expand-all").onclick = () => { document.querySelectorAll("details").forEach(d => d.open = true); drawArrows(); };
+document.getElementById("collapse-all").onclick = () => { document.querySelectorAll("details").forEach(d => d.open = false); drawArrows(); };
+document.getElementById("clear-hl").onclick = clearPin;
+const lightToggle = document.getElementById("light-toggle");
+lightToggle.onchange = () => document.body.classList.toggle("light", lightToggle.checked);
+const search = document.getElementById("search");
+search.oninput = () => {
+  const q = search.value.toLowerCase().trim();
+  document.querySelectorAll(".card").forEach(c => {
+    c.classList.toggle("nomatch", q !== "" && !c.dataset.text.includes(q));
+  });
+  drawArrows();
+};
+
+window.addEventListener("load", drawArrows);
+window.addEventListener("resize", drawArrows);
+drawArrows();
+</script>
+</body>
+</html>
