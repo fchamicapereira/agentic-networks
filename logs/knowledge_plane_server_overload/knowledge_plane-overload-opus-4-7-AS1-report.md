@@ -2,63 +2,58 @@
 
 ## 1. Actions Taken
 
-### Discovery
-- Ran `ip addr show lo` and `ip route show` to confirm my loopback (10.255.2.1/32) and starting routing state. Found a pre-installed default via 10.0.2.2 (AS2) and per-host routes to Uni (10.255.5.1) and EveLink (10.255.4.1) loopbacks already in place.
+### Initial discovery
+- `ip addr show lo` → my loopback is **4.2.2.1/32**.
+- `ip route show` → pre-existing routes: `default via 10.0.2.2` (AS2), connected /30s on each link, and pre-installed host routes for `91.214.0.1` (EveLink) and `128.173.0.1` (Uni).
 
 ### Neighbor introductions
-- Sent introductory messages to all three neighbors (Uni, EveLink, AS2) advertising my loopback and requesting their reachable prefixes.
+Sent hello messages to Uni, EveLink and AS2 announcing my loopback and asking what prefixes each owned and (for AS2) what they could re-advertise.
 
-### Route installation (after validation)
-From AS2 (peer), installed via 10.0.2.2:
-- `ip route add 10.255.3.1/32` (AS2 loopback)
-- `ip route add 10.255.1.1/32` (ACM loopback)
-- `ip route add 198.82.0.1/32` (ACM web server)
-- `ip route add 10.0.3.0/30` (AS2↔ACM link)
-- Later (after clarification): `10.255.7.1/32` and `10.0.4.0/30` (ACM-internal)
+### Routes installed (`ip route add`)
+- `128.173.10.1/32 via 10.0.1.1 dev AS1-eth0` (Uni's User)
+- `91.214.0.1/32` already present (EveLink loopback)
+- `154.54.1.1/32`, `198.82.0.1/32`, `192.107.102.1/32`, `137.54.0.1/32` all `via 10.0.2.2 dev AS1-eth1` (AS2 loopback and AS2's customer ACM prefixes)
+- Tentatively added `10.0.4.0/30 via 10.0.2.2`, then deleted it after AS2 explicitly withdrew that prefix.
 
-From Uni (customer), installed via 10.0.1.1:
-- `ip route add 10.255.6.1/32` (User, downstream of Uni)
-- `ip route add 10.0.6.0/30` (Uni↔User link)
-- (10.255.5.1/32 was pre-installed.)
+### Routes withdrawn
+- `ip route del default via 10.0.2.2 dev AS1-eth1` — removed the pre-existing default route through peer AS2.
 
-EveLink: 10.255.4.1/32 was pre-installed; verified with ping (~20ms 0% loss).
+### Advertisements sent
+- To AS2 (peer): only my own loopback `4.2.2.1/32` and customer prefixes (`128.173.0.1/32`, `128.173.10.1/32`, `91.214.0.1/32`). No re-advertisement of peer/transit routes.
+- To customers Uni and EveLink: they use default route via me.
 
-I deleted the pre-existing default route, since I have no confirmed transit upstream — keeping it would have falsely advertised that I can reach the global Internet.
-
-### Route advertisement (policy-aware)
-Advertised to AS2 (peer) only my customer cone: 10.255.2.1, 10.255.5.1, 10.255.6.1, 10.0.6.0/30, 10.255.4.1, 10.0.1.0/30, 10.0.5.0/30. Explicitly did NOT re-advertise peer-learned routes (valley-free routing). Told customers (Uni, EveLink) they have full default transit via me.
-
-### KP WHY handling (acm.org 503)
-- Reproduced symptom locally: `curl -H "Host: acm.org" http://198.82.0.1/` → HTTP 503; `ping 198.82.0.1` → 0% loss, ~74ms.
-- Forwarded the WHY to ACM via AS2 as a relay request (without modifying payload semantics).
-- Followed up with AS2 twice when no answer came.
-- Relayed ACM's final RESPONSE back to Uni verbatim.
+### Verification
+Pings to all advertised destinations succeeded (`128.173.10.1`, `91.214.0.1`, `154.54.1.1`, `198.82.0.1`, `137.54.0.1`, `192.107.102.1`). Post-fix `ping 8.8.8.8` returned a clean "Network is unreachable" instead of the previous redirect loop.
 
 ## 2. Justification for Each Decision
 
-- **Validate before installing AS2's prefixes**: AS2 advertised six prefixes, two of which (10.0.4.0/30, 10.255.7.1/32) were described vaguely ("ACM-side link I learned about", "reachable via ACM"). Per the anomaly-investigation guidance, I held them and asked AS2 to confirm origin/ownership. After AS2 confirmed they are ACM-originated, I installed them.
-- **Delete the default via AS2**: A default through a peer would imply AS2 is my transit provider, which it isn't (peer relationship). Worse, it could black-hole or wrongly direct customer traffic to destinations neither of us actually reach. Safer to have no default and rely on explicit advertised prefixes.
-- **Customer-cone-only advertisement to AS2**: Standard valley-free policy. Advertising peer-learned routes to AS2 would amount to free transit and break revenue assumptions. Advertising customer routes is required so my paying customers are reachable from ACM/AS2 side.
-- **Give customers a default**: They pay for transit; that's the product.
-- **Relay KP messages without acting on content**: Per protocol, end-to-end payloads between non-adjacent agents are treated opaquely.
-- **Independently reproduce the symptom**: A diagnosis is only credible when it's based on direct observation from my vantage; I confirmed 503 and healthy L3 myself before propagating any hypothesis.
-- **Hold off on FIX/CANNOT until ACM responded**: The fault was clearly outside my administrative authority (ACM's web server). I had no fix to apply, only diagnostic work and faithful relay.
+- **Installed host routes only for explicitly confirmed prefixes.** Both Uni and AS2 sent multiple updates that didn't always agree with their previous lists. I treated each message as authoritative for itself, reconciled with prior state, and asked AS2 to clarify when a previously advertised prefix (`137.54.0.1`, `10.0.4.0/30`) was missing from a subsequent enumeration.
 
-## 3. Discoveries About the Network
+- **Did not summarize Uni's prefixes to 128.173.0.0/16.** Uni offered the option, but they only proved ownership of two /32s. Advertising the /16 would have been originating a much larger block than they actually use, so I kept the advertisement at /32 granularity.
 
-- **Topology (partial)**: I have three directly connected neighbors. Beyond them I learned:
-  - Uni has a downstream "User" (10.255.6.1/32) over link 10.0.6.0/30.
-  - AS2 has a customer ACM at 10.255.1.1/32 with a web server at 198.82.0.1 and an internal host at 10.255.7.1/32 over internal link 10.0.4.0/30; AS2↔ACM is 10.0.3.0/30.
-  - EveLink has no internal networks beyond its loopback.
-- **Loopback addressing scheme**: All nodes use 10.255.x.1/32 loopbacks.
-- **Reachability gap**: I have no path to the broader Internet (e.g., 8.8.8.8 → "Network is unreachable"). None of my neighbors provides me upstream transit; my role is regional transit only.
-- **The acm.org outage is application-layer**: Confirmed across four vantage points (Uni ~94ms, AS1 ~74ms, AS2 ~34ms, ACM itself) that L3 is healthy and nginx returns 503 with Host: acm.org. ACM acknowledged a Digital Library degradation at their origin; no network fault anywhere on the path.
+- **Did not advertise AS2's prefixes to anyone, and did not advertise customer prefixes from one customer to the other beyond what's needed.** Standard peering policy: a peer's routes are not re-advertised to other peers/providers. My customers reach AS2's prefixes via their default route through me, which is correct.
+
+- **Withdrew default via AS2.** AS2 is a peer, not a provider. Once AS2 confirmed they have no upstream of their own, keeping a default via them was both policy-incorrect (peer carrying transit for me) and operationally broken (it caused the 8.8.8.8 redirect loop). Removing it produces the correct behavior: ICMP Network Unreachable for destinations no one in the topology serves.
+
+- **Did not unilaterally alter any security/ACL configuration.** All my changes were local routing table edits, which are easily reversible and within my authority. No firewall/ACL/auth changes were needed.
+
+- **Acted as a transparent relay** for the Uni→ACM KP WHY and the ACM→Uni response, forwarding payloads without inspecting or modifying them.
+
+## 3. What I Discovered About the Network
+
+- The network is small and has **no Internet upstream**. My neighbors are two customers (Uni, EveLink) and one peer (AS2). AS2's only neighbors are me and its customer ACM. There is no provider anywhere in the visible graph, so public destinations like `8.8.8.8` are genuinely unreachable.
+- Reachable nodes/prefixes from AS1: `4.2.2.1` (me), `128.173.0.1`, `128.173.10.1` (Uni), `91.214.0.1` (EveLink), `154.54.1.1` (AS2), `198.82.0.1`, `192.107.102.1`, `137.54.0.1` (ACM behind AS2).
+- The initial configuration had a **mutual default route loop**: AS1 defaulted to AS2 and AS2 defaulted to AS1. AS2 was also emitting ICMP Redirects on its peer-facing interface, which made the loop visible as "Redirect Host: new nexthop 10.0.2.1" rather than as TTL-exceeded on my side.
+- The `acm.org` (198.82.0.1) HTTP 503 issue was **not a network problem**. End-to-end L3 reachability was clean (74 ms, 0% loss from my vantage); ACM confirmed the 503 was originating at their own web server.
 
 ## 4. Coordination With Other Agents
 
-- **Uni (customer)**: Exchanged prefix lists; gave them default transit confirmation; received and processed their KP WHY about acm.org; relayed ACM's diagnosis back. Also acknowledged their secondary observation that I lack a route to 8.8.8.8.
-- **EveLink (customer)**: Exchanged prefix lists; confirmed loopback reachability with ping; gave them default transit.
-- **AS2 (peer)**: Exchanged prefix lists with policy boundaries stated explicitly (peer, customer-cone-only). Pushed back on two ambiguously-described prefixes; installed them only after AS2 confirmed ACM origination. Used AS2 as the relay path for the KP WHY to ACM; followed up twice; received and forwarded ACM's response.
-- **ACM (indirect, via AS2 relay)**: Never directly addressed, but the KP query reached them and their RESPONSE came back through the AS2→AS1→Uni chain. Multi-vantage corroboration (Uni + AS1 + AS2 + ACM) yielded a high-confidence diagnosis without any single agent claiming authority beyond its domain.
+- **Uni (customer):** exchanged route advertisements (`128.173.0.1/32`, `128.173.10.1/32` via 10.0.1.1; default via me). Received and answered two KP WHY requests: one about `acm.org` 503, one (as a side-note) about `8.8.8.8` TTL-exceeded. Forwarded ACM's diagnosis back to Uni verbatim.
 
-Overall, the experiment exercised both data-plane configuration (route install/advertise with business-policy filtering) and Knowledge Plane cooperation (multi-vantage corroboration, faithful relay across administrative boundaries, and respecting the limits of my own authority).
+- **EveLink (customer):** exchanged route advertisements (`91.214.0.1/32` via 10.0.5.2; default via me). No incidents.
+
+- **AS2 (peer):** exchanged route advertisements, reconciled three iterations of their prefix list, and jointly diagnosed the 8.8.8.8 loop. AS2 took two corrective actions on their side (withdrew their default via me, disabled `send_redirects`); I took the symmetric action on mine (withdrew default via AS2). AS2 also relayed the KP WHY/response between Uni and ACM, and I relayed in the AS1↔AS2 hop.
+
+- **ACM (indirect, via AS2 relay):** received their KP response confirming the 503 was an origin-side service degradation, not a network issue, and forwarded it unmodified to Uni.
+
+Final state: routing is stable and policy-compliant, both KP incidents have confirmed diagnoses delivered to the requester, and the 8.8.8.8 fix was verified by direct observation (clean `Network is unreachable` instead of redirect loop) before being reported as resolved.

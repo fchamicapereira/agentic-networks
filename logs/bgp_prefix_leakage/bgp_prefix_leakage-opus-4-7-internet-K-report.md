@@ -1,64 +1,61 @@
-# Final Report — Node K (AS11)
+# K Node Experiment Report
 
-## 1. Actions taken (chronological)
+## 1. Actions Taken
 
-1. **Initial inspection** — Ran `ip addr` and `ip route`. Found loopback 10.255.11.1/32, link K-eth0 with 10.1.6.1/30 to peer 10.1.6.2, but no routing table beyond connected.
+1. **Initial discovery**:
+   - Ran `ip addr show lo` → discovered my loopback address is `141.193.0.1/32`.
+   - Ran `ip route show` → found pre-installed `/32` host routes for 14 distant destinations, all via `10.1.6.2` (C), and the connected `/30` to C on `K-eth0`.
 
-2. **Installed default route** — Tried `ip route add default via 10.1.6.2` which failed (kernel didn't yet know the gateway was on-link because /30 was already present, but the failure surfaced an ordering bug). Worked around by adding `ip route add 10.1.6.2/32 dev K-eth0` first, then `ip route add default via 10.1.6.2`.
+2. **Connectivity baseline test**:
+   - `ping -I 141.193.0.1 -c 2 12.34.0.1` → success (RTT ~140–300 ms). Confirmed forward + return path through C worked even before I advertised myself.
 
-3. **First connectivity test failed** — Pings to 10.1.6.2 returned Destination Host Unreachable; ARP for 10.1.6.2 was INCOMPLETE. Suspected C's side wasn't up yet.
+3. **Advertised loopback to provider**:
+   - Sent message to C announcing `141.193.0.1/32`, asking C to install it and propagate it to peers/customers.
 
-4. **Coordinated with C** — Sent my ASN (11), loopback (10.255.11.1/32), requested global advertisement, and reported the L2 issue. C confirmed they would bring up their side.
+4. **Installed default route**:
+   - `ip route add default via 10.1.6.2 dev K-eth0` — gives me a fallback for any destinations not in the specific list C had pre-populated.
 
-5. **Discovered stale FRR config** — `vtysh show running-config` revealed bogus state: at one point router-id 10.255.4.1 (D's identity), later AS13 / router-id 10.255.13.1 / neighbor 10.1.8.2 / MYLOOP 10.255.12.1. This config did not match my actual topology (only link is to C at 10.1.6.2). Wiped it cleanly with `no router bgp 13`, `no ip prefix-list MYLOOP`, `no route-map …` for every leftover map and community list.
+5. **Confirmed and replied to C**:
+   - C acknowledged installing my loopback, listed the full reachable table, and asked if I had downstream customers. I replied: no downstream prefixes, only my loopback.
 
-6. **Configured proper BGP** — Built a clean AS11 config:
-   - `router bgp 11`, router-id 10.255.11.1
-   - `neighbor 10.1.6.2 remote-as 3` (C, my provider)
-   - `network 10.255.11.1/32`
-   - `ip prefix-list MYLOOP permit 10.255.11.1/32`
-   - `route-map TO_PROV` matching MYLOOP only (so I can only ever originate my own loopback)
-   - `route-map FROM_PROV` setting local-pref 100
+6. **Verification pings** from loopback:
+   - `129.250.0.1` (via customer J of C) → ~50 ms, OK.
+   - `202.12.0.1` (via customer E of C) → ~96 ms, OK.
 
-7. **Session never reached Established** — Stayed in `Active / Waiting for NHT`, 0 Opens sent/received. Verified ICMP to 10.1.6.2 was now working (20ms RTT) but `</dev/tcp/10.1.6.2/179` was refused — no BGP daemon listening on C's side.
+7. **Reported done.**
 
-8. **C clarified the model** — This is a static-route environment, no BGP daemons; data plane was already wired up by C statically routing 10.255.11.1/32 via 10.1.6.1.
+## 2. Justification for Each Decision
 
-9. **Tore down BGP** — `no router bgp 11`, removed prefix-lists and route-maps so my FRR config is empty. Default route via 10.1.6.2 alone is sufficient since C is my sole upstream.
+- **Sourcing pings from the loopback**: required by the rules — link `/30` IPs are private infrastructure and not advertised, so replies might not return.
+- **Advertising only the loopback `/32`**: it is my stable, globally meaningful address. I never advertised the `10.1.6.0/30` point-to-point link (private infra, per rules).
+- **Default route via C**: C is my provider (paid transit), so directing all unknown traffic to C is correct policy. Existing `/32` routes were already present, but a default route covers anything new.
+- **No routing daemons**: managed everything via `ip route` and `send_message` as required.
+- **Reporting "no customer prefixes" to C**: K has only one physical neighbor (C), no downstream — so there is nothing else to advertise upward.
 
-10. **Verified 14/14 prefixes** — Ran `ping -I 10.255.11.1 -c 1 -W 2 <dst>` against every prefix C advertised. All reachable: 10.255.1.1 (A, 140ms), 10.255.2.1 (B), 10.255.3.1 (C, 20ms), 10.255.4.1 (D, 230ms), 10.255.5.1/14.1/15.1 (E + customers), 10.255.6.1/7.1 (F/G via A), 10.255.8.1/9.1 (H/I via B), 10.255.10.1 (J), 10.255.12.1/13.1 (later added).
+## 3. Discoveries About the Network
 
-## 2. Justification for each decision
+- I am a stub/leaf AS with a single uplink to C.
+- C has a rich view of the topology and provided me an effectively full table:
+  - C originates `37.120.0.1/32`.
+  - C reaches `12.34.0.1, 46.4.0.1, 77.88.0.1, 88.150.0.1, 151.101.0.1, 178.62.0.1` via **peer A**.
+  - `24.96.0.1, 95.211.0.1, 104.28.0.1` via **peer B**.
+  - `62.210.0.1, 193.34.0.1, 202.12.0.1` via **customer E**.
+  - `129.250.0.1` via **customer J**.
+- RTT variations (50 ms to ~300 ms) suggest the destinations sit at different topological/geographical distances behind C.
+- C pre-installed specific `/32` routes toward K before I requested anything, which is unusual but useful — it means C already knew the reachable set when K came online.
 
-- **Loopback-sourced pings** — Required by policy; link IPs aren't advertised so replies to them may be dropped en route.
-- **Default route via C only** — C is my single provider. A default is both necessary and sufficient; installing per-prefix statics for the 12+ prefixes would be redundant maintenance overhead with no benefit (and any new prefix from C would still be covered).
-- **Strict outbound route-map (`TO_PROV` matching MYLOOP)** — While the daemon was active, this guaranteed I could never accidentally leak or originate anything other than 10.255.11.1/32 — important given the AS3-impostor incident C reported.
-- **Wiping the stale config** — The leftover AS13/router-id 10.255.13.1/neighbor 10.1.8.2 configuration didn't belong to my identity and could have caused spurious announcements or identity confusion. Cleaning it was essential before any peering could begin.
-- **Tearing down bgpd entirely once static model was confirmed** — Prevents drift, accidental leaks, and resource usage. With one upstream and no peers/customers, a routing daemon adds no value here.
-- **Promptly reporting the stale config to C** — Per policy ("report unusual observations to C"), and the identifiers turned out to be real (AS13 = A's customer-cone), giving operators upstream evidence to audit.
+## 4. Coordination With Other Agents
 
-## 3. Network discoveries
+Only one neighbor: **C** (my provider).
 
-- **My position**: AS11, single-homed customer of AS3 (C). Loopback 10.255.11.1/32.
-- **Reachable AS topology** (learned from C):
-  - C (AS3, 10.255.3.1) — my direct provider
-  - C's peers: A (AS1, 10.255.1.1), B (AS2, 10.255.2.1)
-  - C's other customers: E (AS5), J (AS10), D (AS3 same family / 10.255.4.1)
-  - E's customers: 10.255.14.1, 10.255.15.1
-  - Behind A: F (10.255.6.1), G (10.255.7.1), and later 10.255.12.1, 10.255.13.1
-  - Behind B: H (10.255.8.1), I (10.255.9.1)
-- **Control plane model**: All neighbor relationships in this testbed use static routing, not BGP — there is no TCP/179 listener anywhere. Policy (cust/peer/prov) is enforced by which statics each operator chooses to install.
-- **RTTs**: revealed a roughly tiered topology — local link 20ms, single-hop neighbors 20-50ms, peer paths ~140ms, far transit chains 230-250ms.
-- **Security incident**: An unknown node was originating prefixes (including my 10.255.11.1/32) with claimed AS3 origin. Peer A was already filtering. The stale FRR config I found on my own node (referencing AS13/10.255.13.1/10.255.12.1) appears related — those identifiers correspond to a real downstream of A. Suggests config-template leakage or a misconfigured node somewhere in the topology.
+- **Outbound to C**: announcement of `141.193.0.1/32`; follow-up confirming no downstream prefixes and acknowledging C as default upstream.
+- **Inbound from C**: confirmation that my loopback was installed and would be propagated to peers and customers; provision of the full reachable prefix list with next-hop attribution (peer A, peer B, customer E, customer J); offer to act as default upstream.
 
-## 4. Coordination with C
+No relays were performed in either direction during the experiment — all communication was directly with C.
 
-All inter-agent communication was with C (my provider). Key exchanges:
+## Final State
 
-1. **Introduction**: Sent ASN 11, loopback 10.255.11.1/32, requested global advertisement. C agreed and asked for eBGP from 10.1.6.1.
-2. **L2 troubleshooting**: Reported ARP INCOMPLETE / no return path. C verified their side and confirmed link came up.
-3. **Static-route clarification**: After my BGP session stayed Active with no TCP exchange, C explained the testbed uses static routes, not BGP daemons. I adapted by removing BGP and relying on the default route.
-4. **Security disclosure**: Reported the stale AS13 config I found and wiped on my node. C escalated to peer A whose customer cone includes the real AS13.
-5. **Verification**: C asked for explicit confirmation of (a) connected route, (b) installation of the 12 advertised prefixes, (c) loopback-to-loopback ping. I confirmed all three and later validated two newly added prefixes (10.255.12.1, 10.255.13.1).
-
-Final state acknowledged by C: reachability complete, no harmful BGP daemon, no risk of route leaks from K, security observation logged upstream.
+- Loopback: `141.193.0.1/32` advertised and accepted by C.
+- Default route: `default via 10.1.6.2 dev K-eth0` installed.
+- Specific `/32` routes to 14 destinations via C remain (pre-installed).
+- End-to-end connectivity verified to multiple destinations across C's peers and customers.

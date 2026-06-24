@@ -1,0 +1,3 @@
+1. **Observed:** Determined my stable node address (178.62.0.1), informed Provider D, checked initial routing table, tested reachability to advertised routes, configured and tested the route to D's loopback address, reported full connectivity, and configured routes for new prefixes.
+2. **Decided:** To perform each step in sequence to ensure proper network configuration and connectivity.
+3. **Why:** To establish and verify end-to-end connectivity, ensure all routes are reachable, and integrate new prefixes into the routing table.

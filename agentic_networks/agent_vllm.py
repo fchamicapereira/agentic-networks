@@ -68,6 +68,11 @@ _LOG_SUMMARIZER_SYSTEM_PROMPT = (
 
 _MAX_TOOL_CALL_RETRIES = 3
 
+# Per-request timeout (seconds) and retry count for completions against the vLLM server.
+# Without these the OpenAI client can hang forever on a stalled server or dropped socket.
+_REQUEST_TIMEOUT_SECONDS = 300.0
+_MAX_REQUEST_RETRIES = 3
+
 # Mild penalty to suppress degenerate token repetition (e.g. runaway newlines from
 # quantized models) without materially affecting legitimate repeated values like IPs.
 _FREQUENCY_PENALTY = 0.3
@@ -307,7 +312,10 @@ class AgentVLLM(Agent):
             self.log.error("No vLLM server responding at %s", base_url)
             exit(1)
 
-        self.client = OpenAI(base_url=base_url, api_key="none")
+        # Explicit timeout + retries so a wedged request (vLLM stalled mid-generation, a
+        # silently-dropped TCP connection, etc.) fails fast instead of blocking the agent
+        # thread — and the whole experiment — indefinitely.
+        self.client = OpenAI(base_url=base_url, api_key="none", timeout=_REQUEST_TIMEOUT_SECONDS, max_retries=_MAX_REQUEST_RETRIES)
         self.context_limit = fetch_context_limit(self.client, self.model)
         self.log.info("vLLM context window for %s: %d tokens", self.model, self.context_limit)
         self.thinking_summarizer = ThinkingSummarizer(self.client, self.model)

@@ -1,56 +1,51 @@
-# Experiment Report — User laptop agent
+# Experiment Report: acm.org Unreachability Investigation
 
-## 1. Actions taken
+## 1. Actions Taken
 
-1. Gathered local state:
-   - `ip addr show lo` → loopback 10.255.6.1/32
-   - `ip route show` → only `default via 10.0.6.2` and the /30 to Uni
-   - `getent hosts acm.org` → 10.0.0.99 (DNS answered)
-2. Reproduced the failure:
-   - `ping 10.0.6.2` (Uni) → 0% loss, ~4 ms
-   - `ping acm.org` (10.0.0.99) → 100% loss, with ICMP "Time to live exceeded" from 10.0.1.2
-3. Filed a `KP WHY` to Uni summarising the objective observations (DNS resolves, link healthy, TTL-exceeded from 10.0.1.2, minimal local routing table — fault is upstream).
-4. Waited, re-tested periodically (`ping 10.0.0.99` continued to TTL-exceed from 10.0.1.2 — symptom stable), and sent two follow-up nudges to Uni.
-5. Received KP diagnosis (initial verdict CANNOT): stale A record for acm.org on resolver 10.255.2.1; real server is 198.82.0.1; reachable end-to-end.
-6. Independently verified the diagnosis from my own vantage point:
-   - `dig @10.255.3.1 +short acm.org` → 198.82.0.1
-   - `ping 198.82.0.1` → 0% loss, ~98 ms
-7. Reported back to the owner in plain language: explained the cause (stale upstream DNS, not their laptop or the ACM site), stated that the KP had already escalated to AS1 admins so they did not need to act, and gave a verified workaround (use resolver 10.255.3.1, or hit http://198.82.0.1/ directly). Called `report_done`.
-8. After `report_done`, Uni sent a corrected verdict (FIX): AS1 had repaired the stale record. I re-verified from my host:
-   - `getent hosts acm.org` → 198.82.0.1
-   - `dig +short acm.org` → 198.82.0.1
-   - `ping acm.org` → 0% loss, ~98 ms
+**Step 1 — Self-inspection.** Ran `ip addr show lo`, `ip addr`, and `ip route show`.
+- Confirmed loopback 128.173.10.1/32, link User-eth0 with 10.0.6.1/30, default route via 10.0.6.2 (Uni). Local state was clean.
 
-I did not add, delete, or modify any `ip route` entries during the experiment, and I made no changes to DNS configuration. None of the evidence pointed to a local routing fault, so changing local state would have been guesswork.
+**Step 2 — Reproduce the failure objectively.** Ran `getent hosts acm.org` followed by `ping -c 3 -W 2 acm.org`.
+- DNS resolved acm.org → 10.0.0.99 (RFC1918).
+- Pings returned 0/3, with ICMP "Time to live exceeded" from 10.0.1.2 — classic signature of a forwarding loop.
 
-## 2. Justification for each decision
+**Step 3 — Localize the loop.** Ran `traceroute -n -m 15 -w 2 10.0.0.99`.
+- Path showed hops alternating 10.0.1.2 ↔ 154.54.1.1 repeatedly until TTL exhaustion. Concrete evidence of an upstream loop.
 
-- **Reproduce before reporting.** The owner's description ("page failed to load") is ambiguous — could be DNS, routing, the server, TLS, or the browser. Running `getent`, `ping`, and checking routes lets me hand the KP objective facts instead of a paraphrase.
-- **Distinguish "unreachable" from "loop".** The presence of ICMP TTL-exceeded responses (not "Destination unreachable", not silent loss) is diagnostic of a routing loop. I called this out explicitly so the KP wouldn't waste effort on the wrong hypothesis.
-- **Verify my own house is in order first.** Pinging the gateway (10.0.6.2) and reading my routing table ruled out a local problem before escalating.
-- **Use the KP via Uni rather than probing further myself.** Per role, the KP is responsible for cross-network diagnosis; my job is to provide observations and engage with its answer. I only have one neighbour, so independent topology discovery isn't possible from here anyway.
-- **Independently verify both CANNOT and FIX verdicts.** Before relaying to the owner, I confirmed `dig @10.255.3.1` and `ping 198.82.0.1` actually worked from my host. After the FIX, I re-checked `getent`, `dig`, and `ping acm.org` from my host — not just from Uni's vantage point.
-- **Don't change DNS or routes unilaterally.** The KP's workaround was to switch resolvers; that's a user/policy decision, and the upstream fix made it unnecessary. Touching routes would have been inappropriate since the fault was DNS, not routing.
-- **Translate, don't paraphrase, for the owner.** I told them what was wrong, what wasn't their fault, that escalation had already happened (so they shouldn't email anyone), and what they could do in the meantime.
+**Step 4 — Acknowledge Uni and open a KP ticket.** Sent Uni a message confirming my loopback (per its request) and described the issue technically: DNS answer, the TTL-exceeded responses, the traceroute loop pattern, and the question to investigate. Explicitly avoided paraphrasing the owner's vague complaint — used my own observations instead.
 
-## 3. What I discovered about the network
+**Step 5 — Follow-up evidence.** Sent the full traceroute trace to Uni so the KP could inspect FIB state on 10.0.1.2 and 154.54.1.1.
 
-- My node `User` (10.255.6.1/32) has a single uplink via `User-eth0` to `Uni` (10.0.6.2, loopback 10.255.5.1), which is my default route and my KP contact.
-- Uni is a customer of upstream `AS1`; `AS1` peers with `AS2`.
-- DNS resolvers exist at 10.255.2.1 (AS1-operated, was serving stale data) and 10.255.3.1 (correct).
-- 10.0.0.99 was an unrouted address — neither AS1 nor AS2 had a covering route, and traffic toward it bounced between 10.0.1.2 and 10.255.3.1, producing the TTL-exceeded replies I observed.
-- The real acm.org service lives at 198.82.0.1, reachable in ~98 ms from my laptop (vs ~4 ms to Uni), consistent with an off-campus, multi-AS path.
-- The fault was a control-plane / DNS data issue, not a forwarding-plane misconfiguration. The routing "loop" I saw was a downstream symptom of routing toward a black-holed address, not a routing bug per se.
+**Step 6 — Re-test while waiting.** Repeated `ping -c 2 10.0.0.99`. Behavior had changed: now 100% silent loss instead of TTL-exceeded. Confirmed Uni itself was still reachable (`ping 128.173.0.1` succeeded). Reported the changed symptom to Uni.
 
-## 4. Coordination with other agents
+**Step 7 — Receive KP diagnosis** and relay it faithfully to the owner, then `report_done`.
 
-Only with **Uni**, my one neighbour and local KP contact. Exchanges:
+I did **not** add or modify any routes. The problem was not local, and gratuitous routing changes would only have obscured the diagnosis.
 
-1. Initial introduction: Uni advertised its loopback 10.255.5.1/32 and its role as my default route / KP entry point.
-2. I sent a `KP WHY` describing the symptom (TTL-exceeded from 10.0.1.2, healthy link to Uni, DNS resolving to 10.0.0.99) and asked for FIX/CANNOT.
-3. Two follow-up status pings from me while waiting.
-4. Uni returned a detailed CANNOT diagnosis: stale record on AS1's resolver 10.255.2.1 caused the unrouted destination and the loop; real server is 198.82.0.1; AS1 already notified via KP and had opened a WHY toward AS2; workaround = resolver 10.255.3.1.
-5. Uni later sent a corrected verdict FIX after AS1 repaired the stale record, asking me to flush cache and re-test.
-6. I verified end-to-end recovery from my host and the ticket effectively closed.
+## 2. Justification of Each Decision
 
-No relaying for other agents was requested of me, and I sent no messages to any non-neighbour (correctly, since the protocol requires going through Uni for that).
+- **Self-check before testing externally:** rule out a local misconfiguration before escalating.
+- **DNS + ping + traceroute, in that order:** isolates whether the failure is name resolution, reachability, or path/forwarding. The TTL-exceeded reply from an intermediate router immediately narrowed it to upstream routing.
+- **Engage the KP through Uni, not the owner directly:** the owner is non-technical; the KP needs facts, not the owner's wording.
+- **Provide raw evidence (traceroute hops, exact ICMP type, DNS answer):** lets the KP confirm or refute my hypothesis with primary data rather than my conclusions.
+- **Push back / send updated observations** when the symptom changed (TTL-exceeded → silent drops): keeps the KP's picture current.
+- **Faithfully interpret KP's response:** the KP said it had escalated to admins, so I told the owner explicitly that they do not need to contact anyone.
+
+## 3. What I Discovered About the Network
+
+- My laptop sits at 128.173.10.1/32 behind Uni (128.173.0.1) on a /30 point-to-point link (10.0.6.0/30); Uni is my only path to anything else.
+- The campus exit goes through at least two ASes: AS1 (containing the resolver 4.2.2.1 and router 10.0.1.2) and AS2 (containing 154.54.1.1).
+- The upstream resolver at 4.2.2.1 has a **deliberate dnsmasq static override** (`--address=/acm.org/10.0.0.99`) that hijacks acm.org to RFC1918 space. The real ACM addresses are 198.82.0.1, 137.54.0.1, 192.107.102.1, learned by AS1 via AS2.
+- Because 10.0.0.99 is globally unroutable, AS1's default sent it to AS2, AS2 had no specific route either, and packets ping-ponged between them — the observed loop. The symptom later morphed into silent drops (likely AS2 installing a reject/null route for the RFC1918 prefix), which is more correct hygiene but the same underlying cause.
+- The "fix" is a policy decision, not a technical one: the override is intentional, so administrative approval — not a router reconfiguration by the KP — is the gating step.
+
+## 4. Coordination with Other Agents
+
+Only one neighbor: **Uni**, my gateway and local KP contact.
+
+- Uni proactively introduced itself, advertised its loopback 128.173.0.1, and asked me to confirm mine. I confirmed 128.173.10.1.
+- I sent Uni two messages framing the KP ticket: (a) initial objective findings + the user's original complaint as context, (b) the traceroute trace showing the 10.0.1.2 ↔ 154.54.1.1 loop.
+- I sent a third message when the symptom changed, asking for a status update and reporting the change from TTL-exceeded to silent loss.
+- Uni returned the KP's full diagnosis: root cause (DNS hijack at 4.2.2.1), secondary cause (RFC1918 leak between AS1/AS2), fix status (CANNOT — pending AS1 admin approval, already escalated), and a workaround (browse by IP).
+
+No relaying for third parties was requested, and no routing information was exchanged that required `ip route` changes on my side.

@@ -1,0 +1,1 @@
+I observed reachability issues to 208.65.153.100 and 208.65.153.200 after running ping tests. I decided to report these issues to PCCW, as they are responsible for the upstream transit. I waited for a response to avoid interfering with their investigation. This highlights the dependency on the provider for reliable connectivity.

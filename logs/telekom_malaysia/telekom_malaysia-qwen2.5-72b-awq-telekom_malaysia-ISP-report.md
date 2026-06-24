@@ -1,0 +1,1 @@
+I verified the initial network state by checking ARP entries and routes, then informed TM about ICMP redirects. I continuously monitored the network to ensure no unexpected changes and waited for TM's response, as the issue seemed to be on their side. This approach ensured that the network was stable and any issues were promptly addressed.

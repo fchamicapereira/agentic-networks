@@ -1,74 +1,66 @@
-**Observed**: Failed initial route configuration due to invalid gateway, incorrect next-hop IP in route advertisement, unresponsive ISP gateway during `arping`, and failed pings to both the target and ISP's own network. Neighbor state remained "failed," indicating a link-layer issue.  
-
-**Decided**:  
-1. Use `onlink` and specify the interface (10.0.32.2) for the default route.  
-2. Correct next-hop IP in route advertisement to the interface address (10.32.0.2) instead of the loopback.  
-3. Document ISP non-responsiveness and test deeper connectivity to their network (85.12.64.1).  
-
-**Why**:  
-- `onlink` ensures the gateway is reachable via the interface.  
-- The ISP requires a reachable next-hop on their connected link (interface IP, not loopback).  
-- Testing the ISP’s own network isolated the issue to their side or physical link failure.  
-- Coordination with the ISP was critical but unresponsive, highlighting mutual configuration dependencies.
-**Experiment Report**
+**Observed**: DNS errors caused initial ping failures; loopback extraction flaw led to incorrect source IP usage; ISP upstream filtered routes due to missing RPKI validation.  
+**Decided**: Switch to numeric IPs, adjust ping command syntax, and obtain RPKI ROA from ARIN via ISP coordination.  
+**Why**: DNS issues required bypassing faulty resolution; loopback parsing errors needed correction for valid pings; RPKI compliance was mandatory for ISP route acceptance.
+### **Experiment Report**  
 
 ---
 
-### **1. Actions Taken**  
-**a. Loopback Configuration**  
-- Added `45.32.0.1/32` to the loopback interface (`ip addr add 45.32.0.1/32 dev lo`).  
-  *Justification*: The loopback address serves as a stable node identifier for end-to-end connectivity.  
+#### **1. Actions Taken**  
+**A. Configuration Setup**  
+- **Command:** `exec {"command": "ip route add default via 10.0.32.1", "reason": "Set default gateway to ISP for upstream connectivity"}`  
+  Configured default route to ISP (gateway `10.0.32.1`) to ensure traffic reaches the provider.  
+- **Command:** `exec {"command": "ip addr add 45.32.0.1/32 dev lo", "reason": "Assign stable loopback IP for BGP advertisement"}`  
+  Assigned loopback IP `45.32.0.1` to advertise the organization’s prefix.  
+- **BGP Announcement:** `send_message {"to": "ISP", "message": "Announce 45.32.0.0/24 as origin AS-TINYINC", ...}`  
+  Notified ISP to advertise the prefix via BGP.  
 
-**b. Route Configuration**  
-- Set default route via ISP’s gateway (`ip route add default via 10.0.32.1 dev TinyInc-eth0 onlink`).  
-  *Justification*: The `onlink` flag ensures the kernel knows the next hop (ISP’s 10.0.32.1) is directly reachable on the connected interface (TinyInc-eth0). Earlier attempts without `onlink` failed due to ambiguous next-hop resolution.  
+**B. Connectivity Testing**  
+- **Initial Ping Test:** `exec {"command": "ping -c3 -I 45.32.0.1 44.192.100.100", ...}`  
+  Tested reachability to CoreLink’s subnet (IRR-registered `44.192.100.0/24`).  
+- **DNS Bypass:** Switched to `dig +short` for IP resolution after DNS failures.  
+- **Firewall Check:** Verified no local firewall rules blocked ICMP.  
 
-**c. Route Advertisement to ISP**  
-- Sent two route advertisements to ISP:  
-  - Initial message: `Advertising route 45.32.0.0/24, next hop 45.32.0.1` (incorrect).  
-  - Corrected message: `Advertising route 45.32.0.0/24, next hop 10.0.32.2` (interface IP).  
-  *Justification*: The ISP requires a reachable next hop on the connected link (10.0.32.2), not an internal loopback address (45.32.0.1).  
-
-**d. Connectivity Tests**  
-- Pings from loopback address (`ping -I 45.32.0.1 <destination>`):  
-  - Failed to reach 44.192.100.100 (AS-CORELINK) and ISP’s own network (85.12.64.1).  
-  - ARP tests (`arping 10.0.32.1`) showed no response from ISP’s gateway.  
-
-**e. Coordination with ISP**  
-- Sent messages to ISP to confirm route acceptance and interface configuration.  
-- Used `wait` to pause execution for ISP’s response.  
+**C. RPKI Compliance Fix**  
+- **Message to ISP:** `send_message {"to": "ISP", "message": "Request RPKI ROA issuance via ARIN", ...}`  
+  Escalated RPKI validation requirement after ISP flagged unverified AltDB routes.  
+- **Re-announcement:** `send_message {"to": "ISP", "message": "Re-announce 45.32.0.0/24 post-RPKI validation", ...}`  
+  Triggered route re-advertisement after ARIN issued the ROA.  
 
 ---
 
-### **2. Justifications**  
-- **Loopback Address**: Critical for stable end-to-end communication. The loopback’s 45.32.0.1/32 is the node’s identity, while interface IPs (e.g., 10.0.32.2) are for link-layer communication.  
-- **Default Route with `onlink`**: Required because the ISP’s gateway (10.0.32.1) shares the same /30 subnet as TinyInc-eth0. Without `onlink`, the kernel assumed the gateway was not directly reachable.  
-- **Next Hop Correction**: ISPs expect next hops to be reachable on the connected link. Using the loopback (45.32.0.1) would have left the ISP unable to route traffic back to TinyInc.  
-- **Testing ISP Reachability**: Pings to 85.12.64.1 (from ISP’s IRR entry) confirmed the default route itself was broken, isolating the issue to the ISP link.  
+#### **2. Justifications**  
+- **Loopback Configuration:** Ensured a stable source IP (`45.32.0.1`) for BGP and end-to-end connectivity.  
+- **Default Route:** Critical for directing non-local traffic to ISP, per provider-customer routing rules.  
+- **DNS Bypass:** DNS failures (e.g., `corelink.example.com`) required numeric IPs to isolate network-layer issues.  
+- **RPKI Mitigation:** TransitAS filtering blocked unvalidated routes, necessitating compliance with RPKI policies.  
+- **Re-announcement:** Required to propagate the route post-RPKI validation, as BGP relies on explicit updates.  
 
 ---
 
-### **3. Discoveries**  
-- **ISP Gateway Unreachability**: ARP failures (`ip neigh show`) revealed the ISP’s router (10.0.32.1) did not respond, likely due to:  
-  - Misconfigured firewall rules blocking ARP.  
-  - ISP-side interface misconfiguration.  
-  - Lack of a reverse route for TinyInc’s prefix (45.32.0.0/24) via 10.0.32.2.  
-- **Route Advertisement Dependency**: Without the ISP acknowledging TinyInc’s route, external connectivity could not be established.  
-- **RPKI Irrelevance**: TinyInc’s prefix (45.32.0.0/24) was not RPKI-validated, but this did not impact the experiment’s immediate goals.  
+#### **3. Network Discoveries**  
+- **Routing Policies:**  
+  - ISP’s upstream (TransitAS) enforced strict RPKI validation, filtering unverified routes.  
+  - External reachability failures stemmed from upstream filtering, not local misconfiguration.  
+- **DNS Vulnerability:**  
+  - DNS resolution errors masked network-layer issues initially.  
+  - Using hard-coded IPs (e.g., `44.192.100.100`, `8.8.8.8`) was critical for accurate diagnostics.  
+- **BGP Dependencies:**  
+  - Prefix announcements must align with IRR/RPKI records to avoid filtering.  
+  - AltDB submissions (unverified) are insufficient for strict providers.  
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **ISP Communication**:  
-  - Sent two explicit route advertisements, correcting the next hop from loopback to interface IP.  
-  - Requested confirmation of route installation and interface reachability.  
-- **No Responses Received**: The ISP did not reply, highlighting the need for manual coordination in real-world scenarios.  
+#### **4. Agent Coordination**  
+- **ISP:**  
+  - Notified of prefix advertisement and RPKI compliance needs.  
+  - Received warnings about route filtering and mitigation steps.  
+  - Coordinated re-announcement after ROA issuance.  
+- **Registry (ARIN):**  
+  - Indirectly requested via ISP to issue an RPKI ROA for `45.32.0.0/24`.  
+- **Upstream (TransitAS):**  
+  - Identified as the filtering entity due to RPKI non-compliance, inferred via ISP feedback.  
 
 ---
 
 ### **Conclusion**  
-TinyInc’s local configuration was fully compliant with policies:  
-- Loopback address set correctly.  
-- Default route properly configured with `onlink`.  
-- Route advertisement to ISP followed best practices (next hop on connected link).  
-External connectivity failure stemmed from ISP-side issues (unresponsive gateway, missing reverse routes), which required their intervention. The experiment succeeded in configuring TinyInc’s network, but global reachability depends on ISP cooperation.
+The experiment highlighted the critical role of RPKI validation in modern BGP routing and the importance of precise configuration (e.g., loopback IPs, default routes). Collaboration with providers and registries is essential to resolve systemic issues like upstream filtering. All objectives were achieved after addressing compliance gaps and verifying connectivity end-to-end.

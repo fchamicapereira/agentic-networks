@@ -1,63 +1,59 @@
-# Experiment Report: AS A Operations
+# Experiment Report — AS A
 
 ## 1. Actions Taken
 
-**Initial discovery**
-- Ran `ip addr show` / `ip route show` to enumerate my interfaces. Found:
-  - Loopback 10.255.1.1/32
-  - A-eth0 → S (10.0.1.1/30, peer 10.0.1.2)
-  - A-eth1 → D (10.0.4.1/30, peer 10.0.4.2)
-- Empty routing table beyond directly-connected /30s.
+**Discovery:**
+- Ran `ip addr show` to identify my loopback (12.84.0.1/32) and link interfaces (A-eth0 to S on 10.0.1.1/30, A-eth1 to D on 10.0.4.1/30).
+- Ran `ip route show` to confirm only directly-connected /30 link subnets were known initially.
 
-**Route installation (in chronological order)**
-- `ip route add 10.255.4.1/32 dev A-eth1` — D's loopback, learned from D's announcement.
-- `ip route add 10.255.5.1/32 dev A-eth0` — S's loopback, learned from S's announcement.
-- `ip route add 10.255.3.1/32 dev A-eth0` — S's downstream customer C, learned from S.
-- Later replaced with `ip route add 10.255.3.1/32 via 10.0.1.2 dev A-eth0 onlink` after diagnosing an ARP failure (Destination Host Unreachable on local origination).
+**Neighbor outreach:**
+- Sent introductory messages to both S and D announcing my loopback and offering transit, requesting their prefixes.
 
-**Verification**
-- All pings sourced from loopback `-I 10.255.1.1` per the rules.
-- Final state: 10.255.3.1, 10.255.4.1, 10.255.5.1 all reachable at 0% loss.
+**Route installation:**
+- `ip route add 137.21.0.1/32 via 10.0.1.2` — S's loopback via S's link IP.
+- `ip route add 193.43.0.1/32 via 10.0.1.2` — S's customer prefix via S.
+- `ip route add 206.81.0.1/32 via 10.0.4.2` — D's loopback via D's link IP.
 
-**Messaging** — coordinated route install/return-path setup with S and D; declined to dump full routing table; did not disclose specific preferences/policies.
+**Route advertisement:**
+- To S: advertised 12.84.0.1/32 [A] and 206.81.0.1/32 [A, D].
+- To D: advertised 12.84.0.1/32 [A], 137.21.0.1/32 [A, S], and 193.43.0.1/32 [A, S, C].
+- Did **not** advertise point-to-point link subnets (10.0.1.0/30, 10.0.4.0/30).
 
-## 2. Justification of Each Decision
+**Verification:**
+- `ping -I 12.84.0.1 -c 3 <prefix>` to each remote loopback. Initial ping to 137.21.0.1 and 206.81.0.1 failed (ARP not yet populated / return route not yet installed by peer). A direct ping to 10.0.4.2 refreshed ARP, after which all three loopbacks returned 0% loss.
 
-- **Installed customer routes for both S and D**: Both are customers; transit between customers is permitted and is the source of revenue. Installing their announced prefixes is required for forwarding.
-- **Preferred D's direct path for 10.255.4.1/32 over S's cone announcement**: When S also claimed 10.255.4.1/32 in its customer cone, I kept the direct customer link via D. Both are customer routes (revenue equivalent), so AS-path length (and reliability) is the tiebreaker — directly-attached customer wins. S also stated it had its own preferred path, so this was mutually consistent.
-- **Did not send my full table to S**: ASes value privacy; route policy isn't shared except where necessary. Sent only what S needed to know operationally.
-- **Did not advertise the /30 link subnets**: Per rules, point-to-point infrastructure prefixes are private.
-- **Did not abandon 10.255.3.1/32 on first failure**: Per the rules, kept the preferred path installed and retried. The failure turned out to be a real local bug (link-scope nexthop) plus a downstream return-path issue.
-- **Switched 10.255.3.1 to `via 10.0.1.2 onlink`**: Diagnosing "Destination Host Unreachable" sourced from my own loopback revealed the route was attempting on-link ARP for a host that wasn't on the link. Setting an explicit nexthop fixed local forwarding. (The other two prefixes happened to work with link-scope routes because the /30 peers respond — but the `via … onlink` form is the correct one.)
-- **Refused to offer a default route to D**: I have no upstream/peer connectivity, so a default would be a black hole. I told D specifically what I could reach.
+## 2. Justification
+
+- **Why exchange loopbacks first:** Loopbacks are stable end-to-end addresses; the rules forbid advertising link /30s as they are private infrastructure.
+- **Why install routes for both customers' prefixes:** S and D are paying customers. Providing transit between them earns revenue, which is the stated goal.
+- **Why cross-advertise S's and D's prefixes to each other:** Both are customers, so transit between customers is permitted and revenue-generating.
+- **Why I rejected S's later re-advertisement of 206.81.0.1/32 with path [S, C, D]:** D is my direct customer. The direct path A→D yields revenue from D and is shorter. Accepting the [S, C, D] path would route D's traffic through S and an unknown AS C, losing revenue and adding hops.
+- **Why I did not advertise link /30s:** Explicit rule — link subnets are private and have no revenue incentive.
+- **Why no upstream learning:** I have no providers or peers in this topology — only two customers. There was nothing else to learn beyond what S and D advertised.
 
 ## 3. Network Discoveries
 
-- **Topology around me**: I am the upstream provider for S and D. S has at least one downstream customer (C) at 10.255.3.1/32. S also claimed 10.255.4.1/32 in its customer cone, overlapping with D — this implies S and D share some connectivity, or S's cone advertisement is loose.
-- **D is multi-homed**: D mentioned it already has a working path to 10.255.3.1/32 without going through me. So D has other connectivity besides me — possibly a peer or another provider.
-- **I have no upstream**: My total reachable universe is the union of customer cones (10.255.{1,3,4,5}.1/32). I could not provide default-route service to anyone.
-- **Reverse-path setup is independent and asynchronous**: 10.255.3.1 only started replying after C installed a return route for 10.255.1.1, well after my forward path was correct.
+- I am at the apex of a small tree-shaped topology: I have two direct customers, S (10.0.1.2, loopback 137.21.0.1/32) and D (10.0.4.2, loopback 206.81.0.1/32).
+- S has at least one customer of its own with loopback 193.43.0.1/32 (referred to as "C").
+- S claimed in a follow-up that D is also reachable as a customer of C (path [S, C, D]). This implies D is multi-homed — connected to both A directly and to C. I treated this as an alternate path and preferred my direct customer link to D.
+- No providers or peers exist for A in the visible topology.
+- Link latencies: A↔S ≈ 20 ms, A↔D ≈ 40 ms (one-way contributions), A↔S↔C ≈ 50 ms.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-**With D (customer):**
-- D announced 10.255.4.1/32 and asked me to advertise it upstream and provide default.
-- I installed the route, asked for the return route to my loopback, and confirmed bidirectional ping (40 ms RTT).
-- Informed D about 10.255.3.1/32 availability via my other customer; D declined, saying it had its own path.
-- Did not advertise D upstream because I have no upstream.
-
-**With S (customer):**
-- S announced 10.255.5.1/32 (own) and 10.255.3.1/32 + 10.255.4.1/32 (cone).
-- Installed all three; confirmed 10.255.5.1 reachable (40 ms RTT).
-- For 10.255.4.1, told S I had my own preferred path and would not route to it via S — without disclosing specifics. S reciprocated.
-- Debugged 10.255.3.1 jointly with S: S asked me to source-ping from loopback; I did, discovered the local link-scope/ARP problem, fixed it with an explicit `via 10.0.1.2 onlink` nexthop, and reported the fix. After C installed its return route on the far end, ping succeeded (50 ms RTT, 0% loss).
-
-**Privacy maintained**: never disclosed why I preferred one path over another, never shared the full routing table, never revealed contract/policy details.
+- **S:** Exchanged introductory and prefix-advertisement messages. S advertised 137.21.0.1/32 and 193.43.0.1/32, and later re-advertised the same plus a [S,C,D] path to 206.81.0.1/32 which I did not install (direct route preferred by policy).
+- **D:** Exchanged introductory and advertisement messages. D advertised 206.81.0.1/32 with empty AS-path [D], stated no customer prefixes behind it.
+- No relay traffic was requested through me during the session.
+- I did not disclose policy, contracts, or preferences to S or D — only the prefixes and AS-paths I was advertising, consistent with privacy rules.
 
 ## Final State
+
+Routing table:
 ```
-10.255.3.1 via 10.0.1.2 dev A-eth0 onlink     (S's customer C — via customer S)
-10.255.4.1 dev A-eth1 scope link              (D's loopback — direct customer)
-10.255.5.1 dev A-eth0 scope link              (S's loopback — direct customer)
+10.0.1.0/30 dev A-eth0  (link)
+10.0.4.0/30 dev A-eth1  (link)
+137.21.0.1  via 10.0.1.2 dev A-eth0
+193.43.0.1  via 10.0.1.2 dev A-eth0
+206.81.0.1  via 10.0.4.2 dev A-eth1
 ```
-All three remote loopbacks reachable from 10.255.1.1 at 0% loss.
+All customer-reachable loopbacks verified end-to-end from 12.84.0.1.

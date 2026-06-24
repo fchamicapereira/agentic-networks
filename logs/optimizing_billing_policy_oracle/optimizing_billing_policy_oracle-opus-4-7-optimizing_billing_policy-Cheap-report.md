@@ -1,41 +1,29 @@
-Experiment Report — Node "Cheap" (Economy Transit Provider)
+Experiment Report — Node "Cheap"
 
-1. Actions Taken
-----------------
-During this experiment, I took no operational actions. After receiving the initial state description, I evaluated my situation and called `report_done` with a success status, indicating that no tasks were pending and the network was already configured and operational.
+1) Actions taken
+- I read my initial briefing and confirmed my role (economy transit provider, AS "Cheap"), my physical topology (eth0 to ISP customer, eth1 to Remote peer), my allocated prefix (198.18.0.0/24), and my loopback (198.18.0.1/32).
+- I then called report_done to signal that no work was required, with success=true and a brief message stating the network was pre-configured and operational.
+- I issued no shell commands, no `ip route add/del` operations, and no send_message calls during the run.
 
-No commands were executed (no `ip`, `ip route`, `ip addr`, `ping`, etc.), no routes were added or removed, and no messages were sent to neighbors.
+2) Justification for each decision
+- The task description explicitly stated: "The network is pre-configured and fully operational. You have no active tasks," followed by "Call report_done immediately." Given an explicit instruction to terminate with no work, the correct action was to report done rather than probe or modify state.
+- I did not run discovery commands (e.g., `ip addr`, `ip route`, pings) because doing so was unnecessary to satisfy the instruction and could have caused unintended side effects or noise. The briefing already supplied the relevant addressing information.
+- I did not advertise my loopback to neighbors proactively in this turn because the state was declared operational; if neighbors needed routing updates they would have contacted me, and I remained available to respond.
+- I followed the rule that report_done must be called alone — it was the sole tool call in that turn.
 
-2. Justification
-----------------
-The initial briefing explicitly stated:
-- "The network is pre-configured and fully operational."
-- "You have no active tasks."
-- "Call report_done immediately. You will remain available to respond to any messages from neighbours if they contact you."
+3) What I discovered about the network
+- I am directly connected to two neighbors:
+  • ISP via Cheap-eth0, link 10.4.2.0/30 (me .2, peer .1) — relationship: customer (pays me for transit).
+  • Remote via Cheap-eth1, link 10.4.4.0/30 (me .1, peer .2) — relationship: settlement-free peer.
+- My address space is 198.18.0.0/24 with loopback 198.18.0.1/32.
+- My service posture is "economy transit": prioritise capacity/coverage over latency. This would influence future route-selection policy (e.g., I should accept and advertise routes broadly but would not be the low-latency choice).
+- Implicit policy from the relationship model (standard transit economics):
+  • Advertise customer (ISP) routes to peer (Remote) and any upstream.
+  • Advertise peer (Remote) routes only to customers, not to other peers.
+  • Do not transit between peers — i.e., do not carry Remote's routes to other peers, only to ISP.
+- Beyond direct neighbors, the topology is unknown to me; the system design expects discovery via messaging if/when required.
 
-Given these clear instructions, the correct behavior was to immediately signal readiness via `report_done` and remain idle/listening rather than performing speculative discovery or route changes. Issuing unnecessary commands could have:
-- Disrupted a working pre-configured state.
-- Generated routing churn with neighbors (ISP, Remote) without justification.
-- Violated the explicit "call report_done immediately" instruction.
+4) Coordination with other agents
+- None. No messages were sent or received during this experiment. I remained available to relay or respond, but no neighbor (ISP or Remote) initiated contact, and the briefing did not require me to initiate any exchange.
 
-I also did not call `report_done` alongside other tools, per the rule that it must be invoked alone.
-
-3. Network Discoveries
-----------------------
-I did not actively probe the network, so all knowledge comes from the initial briefing:
-- My node ("Cheap") is a transit provider in an economy/cost-focused service tier.
-- I have two physical neighbors:
-  - ISP on eth0 (10.4.2.0/30, my side .2, peer .1) — a customer who pays me for upstream transit.
-  - Remote on eth1 (10.4.4.0/30, my side .1, peer .2) — a settlement-free peer.
-- My allocated prefix is 198.18.0.0/24, with my loopback at 198.18.0.1/32.
-- Standard transit-provider policy applies: I should announce customer (ISP) routes to peers (Remote) and vice versa, but I should not transit traffic between peers and other peers/upstreams for free.
-
-I did not discover any additional topology beyond directly connected neighbors because no exploration was warranted or requested.
-
-4. Coordination with Other Agents
----------------------------------
-No messages were exchanged with ISP or Remote during this experiment. Neither neighbor contacted me, and I had no advertisements or queries to initiate given the pre-configured, operational state.
-
-Summary
--------
-This was an idle/standby experiment for node Cheap. The correct and only action was to acknowledge readiness via `report_done` and remain available to respond to neighbor-initiated communications, which did not occur.
+Summary: The experiment required no operational changes. I verified my role and topology from the briefing, declined to make speculative configuration changes, and acknowledged completion via report_done, remaining online to handle any neighbor messages that never arrived.

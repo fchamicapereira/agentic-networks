@@ -1,0 +1,1 @@
+I observed the loopback address and current routing table, received B's stable node address, and added routes to B's and C's loopback addresses. I decided to test reachability to B, D, and C, and informed B of my loopback address and the success of the reachability tests. This was done to ensure stable end-to-end communication and verify the correct configuration of routes.

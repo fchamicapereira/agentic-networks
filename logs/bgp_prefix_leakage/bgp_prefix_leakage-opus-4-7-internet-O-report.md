@@ -1,60 +1,50 @@
-# Network Bring-Up Report — Node O
+# Experiment Report — Node O
 
-## 1. Actions Taken
+## 1. Actions taken
 
-**Initial discovery**
-- Ran `ip addr show` and `ip route show` to inventory my interfaces and routing state.
-- Found: O-eth0 with 10.1.10.1/30 (peer 10.1.10.2 = E), loopback 10.255.15.1/32, no routes installed beyond connected.
+1. **Inspected local state.**
+   - `ip addr show lo` → loopback address `202.12.0.1/32`.
+   - `ip addr show` → single physical interface `O-eth0` with `10.1.10.1/30`, peer at `10.1.10.2` (E).
+   - `ip route show` → kernel route for the p2p link plus 14 pre-installed /32 host routes via `10.1.10.2`, but no default route.
 
-**Default route configuration**
-- First attempt: `ip route add default via 10.1.10.2` failed ("Nexthop has invalid gateway") because the kernel had no connected route for 10.1.10.2 yet (only the /30 was implicit; the gateway resolution failed in this netns setup).
-- Worked around it with two commands:
-  - `ip route add 10.1.10.2/32 dev O-eth0` (explicit on-link entry for the peer)
-  - `ip route add default via 10.1.10.2`
-- Confirmed link-layer reachability with an unsourced ping to 10.1.10.2 (16ms).
+2. **Installed an upstream default route.**
+   - `ip route add default via 10.1.10.2 dev O-eth0`
+   - Result: a single default via E now covers everything beyond the directly connected link.
 
-**Peering coordination with E**
-- Sent E my loopback (10.255.15.1/32) and asked them to advertise it upstream.
-- E confirmed they installed a reverse route via 10.1.10.1 and were propagating my prefix.
+3. **Advertised my loopback to E and asked for transit.**
+   - Sent message to E announcing `202.12.0.1/32` (my loopback) and stating I am a stub AS with no customers.
+   - E acknowledged and confirmed it would propagate `202.12.0.1/32` to its upstream and peer.
 
-**End-to-end verification**
-- After E provided a destination list, looped sourced pings (`ping -I 10.255.15.1 ...`) against all advertised loopbacks.
-- Reported results back to E, separating local-side success from upstream-side failure.
-- Re-tested 10.255.14.1 (N) after E fixed N's default route — success.
+4. **Verified end-to-end connectivity from the loopback.**
+   - `ping -I 202.12.0.1 62.210.0.1` (E itself) → 16 ms, 0% loss.
+   - `ping -I 202.12.0.1 12.34.0.1` → 196 ms, 0% loss.
+   - `ping -I 202.12.0.1 151.101.0.1` → 302 ms, 0% loss.
 
-**Wrap-up**
-- Called `report_done` with the final reachability matrix and configuration summary.
+5. **Reported done**, then handled two subsequent BGP UPDATE messages from E (initial path dump and a later path change for 46.4.0.1, 151.101.0.1, 178.62.0.1) by remaining idle — no forwarding action required.
 
-## 2. Justification for Each Decision
+## 2. Justification
 
-- **Default route via E only**: My only physical neighbor is E, my single transit provider. A default route is the simplest and correct config for a stub customer.
-- **Explicit on-link route for 10.1.10.2**: The kernel rejected the default-route install until the gateway had an explicit on-link entry. This is a benign workaround equivalent to a connected route and does not change reachability semantics.
-- **Advertise only loopback 10.255.15.1/32, not 10.1.10.0/30**: The rules explicitly forbid advertising point-to-point link subnets — they're private infrastructure. The loopback is the address customers/peers need to reach me.
-- **Source pings from loopback**: Required by the rules, and also semantically correct — replies to link IPs may have no return route since the /30 is not advertised. Loopback is the globally-visible address.
-- **Report A-side failures to E**: The rules require reporting connectivity issues to my provider. I shared the precise list (10.255.1.1, 10.255.6.1, 10.255.7.1) so E could correlate with their upstream's view.
-- **No attempt to fix A-side locally**: E confirmed the failure is also visible from their vantage — a return-path issue at peer A. There is nothing actionable at my layer.
+- **Default route via E rather than per-prefix installs.** I am a stub AS with exactly one upstream (E). A single default is the cleanest and most robust configuration; it automatically covers any new destination E can reach without me needing to maintain per-prefix state.
+- **Advertising only `202.12.0.1/32`.** That is my only owned address space. The p2p subnet `10.1.10.0/30` is private infrastructure and the rules forbid advertising it. I have no customers, so nothing else to announce.
+- **Sourcing pings from the loopback.** Per the rules, link IPs (10.1.10.1) are not advertised, so return traffic would be black-holed. The loopback is the only address reachable from the outside world.
+- **Treating E's BGP UPDATEs as informational.** The volume (≈14 prefixes) is consistent with E's role as my sole transit; the AS-paths begin with `[E, …]` indicating legitimate ownership/re-advertisement. Since my forwarding is via a default route, per-prefix path changes do not require any route table edits.
+- **No routing daemon used.** All routing state was managed exclusively with `ip route` and message-based exchange, as required.
 
-## 3. Network Discoveries
+## 3. What I discovered about the network
 
-- I am a single-homed stub customer of E (AS5, loopback 10.255.5.1).
-- E's upstream is C (10.255.3.1). C has peers A and B.
-- E has another customer N (10.255.14.1) and a peer D (10.255.4.1).
-- D has customers at 10.255.12.1 and 10.255.13.1.
-- Further out via C→B: J (10.255.10.1), K (10.255.11.1), and 10.255.2.1, 10.255.8.1, 10.255.9.1 are reachable.
-- Via C→A side: 10.255.1.1, 10.255.6.1, 10.255.7.1 are unreachable in both directions — propagation/return-path issue at A.
-- RTT pattern matches a reasonable topology: E≈16ms, D peer≈46ms, C≈76ms, J/K≈96–106ms, far loopbacks via B≈176–200ms.
-- N initially lacked a default route, so traffic from me to N succeeded on forward path but had no return path until E pinged N to fix it — a useful reminder that BGP-equivalent reachability requires symmetric default/routes at stubs.
+- I have exactly one neighbor, E (`10.1.10.2`), my paid transit provider. Loopback `62.210.0.1/32`.
+- Through E I can reach at least: `12.34.0.1, 24.96.0.1, 37.120.0.1, 46.4.0.1, 62.210.0.1, 77.88.0.1, 88.150.0.1, 95.211.0.1, 104.28.0.1, 129.250.0.1, 141.193.0.1, 151.101.0.1, 178.62.0.1, 193.34.0.1` (all /32 loopbacks of other nodes/ASes).
+- AS-paths revealed by E show structure beyond E: a customer `C` of E carries most prefixes, with further downstream ASes `A`, `B`, `J`, `K`; `N` is reachable directly via E; later a node `D` (with `L`, `M`) replaced `C, A` as the path for a few prefixes, indicating a path/peering change in the wider network.
+- RTTs (16 ms to E, ~200–300 ms further out) indicate E is one short hop away and other destinations are several hops deeper.
 
-## 4. Coordination with Other Agents
+## 4. Coordination with other agents
 
-All coordination was with **E** (my provider):
-1. Introduced myself, shared my loopback, asked E to advertise it upstream.
-2. E replied with their identity (AS5, loopback 10.255.5.1) and asked for my ASN/loopback/customer prefixes — I confirmed only 10.255.15.1/32, no downstream customers.
-3. E confirmed the reverse route was installed and propagation initiated.
-4. I verified the local link via sourced ping to 10.255.5.1 and reported success.
-5. E sent a list of confirmed-reachable destinations across the broader topology.
-6. I systematically tested every destination, plus the "uncertain" ones, and reported a clean reachable/unreachable split.
-7. E diagnosed the N failure (missing default route) and the A-side failures (upstream propagation), fixed N, and confirmed A-side is outside our control.
-8. I re-tested N (success) and closed out with a final reachability report.
+All coordination was with E (my only neighbor):
 
-No other agents were contacted directly — appropriate for a stub customer whose only routing relationship is with its single transit provider.
+- **O → E:** Announced `202.12.0.1/32` (loopback) and stated I would default-route through E.
+- **E → O:** Confirmed it would carry `202.12.0.1/32` upstream and to its peer; sent an initial BGP path dump for ~14 prefixes; later sent a path-change UPDATE for 3 prefixes (`46.4.0.1`, `151.101.0.1`, `178.62.0.1`).
+- **O → E (follow-up):** Reconfirmed loopback and stub-AS status; no further changes requested.
+
+No relay traffic was requested by or forwarded for any non-adjacent agent during the experiment.
+
+Final state: default route via 10.1.10.2 installed; `202.12.0.1/32` advertised and accepted by E; end-to-end reachability verified to multiple remote loopbacks.

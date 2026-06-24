@@ -92,15 +92,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    links = load_topology(args.topology)
-    rules = compute_optimal_rules(links)
+    topo = load_topology(args.topology)
+    rules = compute_optimal_rules(topo.links)
 
     output = (args.output or args.topology.removesuffix(".csv")).removesuffix(".pdf")
-    Route(Network(links), rules).render_matplotlib(output)
+    Route(Network(topo), rules).render_matplotlib(output)
     print(f"Written to {output}.pdf")
 
     # Print a human-readable summary of the routing table.
-    nodes = sorted({link.node1 for link in links} | {link.node2 for link in links})
+    nodes = sorted({link.node1 for link in topo.links} | {link.node2 for link in topo.links})
     width = max(len(n) for n in nodes)
     print()
     print(f"{'Source':<{width}}  {'Destination':<{width}}  Next-hop")

@@ -1,0 +1,1 @@
+I observed the loopback address and confirmed the link between J and C through a successful ping test. I decided to remain idle and wait for updates from C and A regarding the routing issue. This was because the issue was being investigated by C and A, and taking no immediate action helped avoid complicating the situation.

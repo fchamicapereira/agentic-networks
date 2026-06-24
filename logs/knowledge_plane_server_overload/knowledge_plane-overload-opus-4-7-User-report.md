@@ -1,57 +1,54 @@
-# Experiment Report: Investigating acm.org Load Failure
+# Experiment Report
 
 ## 1. Actions Taken
 
-**Initial state-gathering:**
-- `ip addr show lo` → confirmed my stable loopback is 10.255.6.1/32.
-- `ip route show` → confirmed default route already via 10.0.6.2 (Uni) with src 10.255.6.1; directly-connected /30 for User-eth0.
-- `ping -c 3 10.0.6.2` → 0% loss, ~4ms RTT to Uni.
+**Initial reconnaissance**
+- `ip addr show lo`, `ip addr show`, `ip route show` — discovered my loopback identity (128.173.10.1/32), my single interface User-eth0 with 10.0.6.1/30, and a pre-existing default route via 10.0.6.2 (Uni). No routing changes were needed during the experiment — the default route already covered all required destinations.
 
-**Reproducing the user's complaint:**
-- `getent hosts acm.org` → resolved to 198.82.0.1.
-- `host acm.org` → REFUSED (noted as a discrepancy).
-- `curl -v http://acm.org` → TCP connected on port 80 but server returned **HTTP 503 Service Unavailable** from `nginx/1.18.0`, Content-Length 24.
-- `ping -c 2 acm.org` → 0% loss, ~98ms RTT, TTL 60 (reachable).
-- `ping -c 2 8.8.8.8` → 100% loss (anomaly noted).
+**Reproduction of the user's complaint**
+- `getent hosts acm.org` → 198.82.0.1 (from /etc/hosts).
+- `nslookup acm.org` against the local stub (127.0.0.1) → REFUSED.
+- `ping -c 3 acm.org` → 3/3 success, ~98ms.
+- `ping -c 3 8.8.8.8` → TTL exceeded from 10.0.1.2 (routing loop).
+- `ping -c 3 10.0.6.2` → healthy gateway.
+- `curl -m 10 http://acm.org` and `https://acm.org` → both returned **HTTP 503** in ~0.2–0.4s.
+- `traceroute 198.82.0.1` → clean 5-hop path through 128.173.0.1 → 10.0.1.2 → 154.54.1.1 → 192.107.102.1 → 198.82.0.1.
+- `traceroute 8.8.8.8` → black-holed after 154.54.1.1.
+- `nslookup www.google.com` → also REFUSED (confirming the resolver itself is broken, not just one name).
 
-**Reporting to the Knowledge Plane:**
-- Sent a structured technical report to Uni containing: my L3/L4/L7 observations, the 503 details, the `host` vs `getent` resolver discrepancy, and the 8.8.8.8 anomaly. Explicitly framed the working hypothesis (application-layer failure at the ACM origin) and asked the KP to confirm from other vantage points.
+**Coordination with the KP**
+- Sent a structured report to Uni describing: the 503 at L7, clean L3 to 198.82.0.1, the separate 8.8.8.8 TTL-exceeded observation, and the REFUSED stub resolver. Explicitly asked the KP to confirm whether the 503 originated at ACM or at a transparent proxy along the path.
+- Followed up twice during long waits.
+- Received status updates and a final CANNOT diagnosis from the KP.
 
-**Follow-up while waiting:**
-- Re-ran `ping 10.0.6.2` and `curl` against acm.org to confirm the failure was steady-state, not transient — both confirmed (Uni reachable, acm.org still 503).
-- Sent two polite status-check messages to Uni when KP responses were slow.
-
-**Final action:**
-- Once the KP confirmed the interim hypothesis from multiple vantage points and gave me permission to inform the owner, I `report_done` with a non-technical explanation for the laptop's owner plus a technical summary.
+**Reporting back**
+- Drafted a plain-language message for the laptop owner explaining ACM's server-side outage, that no action was required on their part, and noting the separate local DNS issue as an optional follow-up.
+- Called `report_done`.
 
 ## 2. Justification for Each Decision
 
-- **Check loopback and routing first**: I needed to know my own stable identity (10.255.6.1) and verify the default route was sane before blaming anything external. Uni's later request to set the default via 10.0.6.2 was already satisfied.
-- **Reproduce before reporting**: The system prompt explicitly instructs me not to relay the owner's words. The owner said "page failed to load" — too vague. I needed objective layer-by-layer evidence.
-- **Layered diagnosis (DNS → ping → TCP → HTTP)**: Standard methodical isolation. Each layer succeeding pushed the fault upward; 503 at L7 with healthy L3/L4 is a strong signal of an origin-side application issue, not a network problem.
-- **Did not modify any routes**: There was no routing problem to fix. Default route was correct; adding/deleting routes would have been inappropriate. No prefix advertisements were exchanged because there was nothing to advertise beyond what Uni already needed (and my /32 loopback is reachable via the existing /30).
-- **Asked KP to corroborate from other vantage points**: A single-vantage 503 could be local (e.g., my IP being blocked, captive portal, MITM). Confirmation from Uni/AS1 ruled that out.
-- **Pushed back / asked follow-ups**: I queried the KP about the `host` REFUSED discrepancy and the 8.8.8.8 issue rather than ignoring them, per the instruction to engage with the KP rather than accept incomplete diagnoses.
-- **Reported to the owner before the definitive CANNOT arrived**: Uni explicitly said the interim finding was reportable, and the multi-vantage evidence was already conclusive. Waiting longer would have served no purpose. I framed the message for a non-technical user and made clear no action was needed from them — per the instruction that "if the KP says it has escalated, it has already done so."
+- **Inspect local state first** before touching anything else: I cannot reason about a reachability complaint without knowing my own address, interface, and routes.
+- **Reproduce the failure objectively** rather than relaying the user's words: the system prompt explicitly required this, and "page failed to load" is ambiguous — it could mean DNS failure, TCP failure, TLS failure, HTTP error, or a slow load. Only a `curl` with status code tells the KP what's actually happening.
+- **Test multiple layers (ping, HTTP, HTTPS, traceroute, DNS)** to localise the fault to a specific layer. This is what let me tell the KP "L3 is clean, the 503 is an L7 response from the origin" rather than "the site doesn't work."
+- **No routing changes**: the symptom was an HTTP 503 from a destination I could already reach. Adding or removing routes would not have helped and could have made things worse. I deliberately did not install anything new in response to anomalies elsewhere (e.g. the 8.8.8.8 loop) — that was outside my authority and the KP handled it upstream.
+- **Treat 8.8.8.8 failure and DNS REFUSED as separate observations** rather than lumping them with the acm.org complaint. They were real but did not explain the 503 (acm.org's address resolved correctly via /etc/hosts and was reachable), so they deserved mention but not conflation.
+- **Push back / engage with the KP**: I framed my message to challenge the easy answers (maybe a transparent proxy is injecting 503?) so the KP would actually verify, not just assume.
+- **Wait patiently** during the upstream escalation rather than spamming Uni. I only followed up after several idle rounds.
+- **Translate, don't paraphrase, for the user**: the owner is non-technical, so I gave them the conclusion ("ACM's servers are down, try later, nothing for you to do") without HTTP codes or AS numbers.
 
 ## 3. What I Discovered About the Network
 
-- **My node**: User (laptop), loopback 10.255.6.1/32, single uplink via User-eth0 to Uni (10.0.6.2) over 10.0.6.0/30.
-- **Topology beyond my horizon (learned from Uni)**: Uni (loopback 10.255.5.1/32) is the university gateway and my local KP contact. Upstream is AS1, then AS2, then ACM's network (198.82.0.0/?). At least four KP vantage points exist along this path.
-- **Health**: L3/L4 from my laptop all the way to 198.82.0.1 (acm.org) is healthy (~98ms, TTL 60). End-to-end TCP works.
-- **Fault**: acm.org's origin nginx is returning HTTP 503 — confirmed by ACM as a degraded Digital Library availability incident at their origin. Outside our administrative domain.
-- **Unrelated findings**:
-  - My laptop's `host` command points at 127.0.0.1:53 where no resolver listens, while `getent` uses nsswitch and finds the answer elsewhere (likely /etc/hosts or a different configured resolver). Client-side config quirk, not a network fault.
-  - AS1 currently holds no route to 8.8.8.8 — a real upstream gap that AS1 is tracking independently.
+- **My node**: User, loopback 128.173.10.1/32, single uplink via 10.0.6.1/30 to Uni at 10.0.6.2. Uni's loopback is 128.173.0.1/32.
+- **Topology toward ACM**: User → Uni (128.173.0.1) → 10.0.1.2 (AS1 edge) → 154.54.1.1 (AS2) → 192.107.102.1 → 198.82.0.1 (ACM). Five hops, ~98ms, well-behaved.
+- **Campus gateway behaviour**: Per Uni, only NAT MASQUERADE on its upstream — no transparent proxy, no DNAT, no L7 interception. So any L7 error seen from inside is genuinely from the remote origin.
+- **Upstream pathology (unrelated to user's complaint)**: AS1 and AS2 had mutually pointing stale default routes plus enabled ICMP redirects, forming a routing loop for any destination neither of them actually served (e.g. 8.8.8.8). The KP fixed this upstream by having AS2 withdraw its default and disable send_redirects, and AS1 withdraw its default via AS2.
+- **Reachable destinations in this topology** (per KP): 4.2.2.1 (AS1 recursive resolver), 91.214.0.1 (EveLink), 154.54.1.1 (AS2), 198.82.0.1 / 192.107.102.1 / 137.54.0.1 (ACM). 8.8.8.8 is **not** served by any provider in this testbed.
+- **DNS**: My local stub on 127.0.0.1 returns REFUSED for everything — it is misconfigured or not running a real resolver. AS1's recursive resolver at 4.2.2.1 works correctly and confirms acm.org → 198.82.0.1, matching my /etc/hosts. The campus gateway is not currently running a forwarder on :53; the KP flagged this as a service change needing admin approval rather than deploying it unilaterally.
+- **The actual failure**: ACM's origin (nginx/1.18.0) at 198.82.0.1 is itself emitting HTTP 503 — confirmed end-to-end from my laptop, from Uni, and from inside ACM's own AS. Their operators are engaged.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-All coordination was with **Uni**, my only neighbor and local KP contact:
-
-1. **Uni → me (unsolicited)**: Introduced itself (loopback 10.255.5.1/32 via 10.0.6.2), asked me to confirm default route. No action needed — already configured.
-2. **Me → Uni**: Sent the structured technical report (DNS, L3, L4, L7 evidence; hypothesis; two side-questions).
-3. **Uni → me (interim)**: Confirmed the same 503 from its vantage and from AS1; said the WHY had been forwarded toward ACM via AS2; explained both side-anomalies (resolver config; AS1's missing route to 8.8.8.8); said I could share interim findings with the owner.
-4. **Me → Uni (two status checks)**: Polled for updates while waiting.
-5. **Uni → me (definitive CANNOT)**: ACM officially acknowledged the origin-side outage; FIX ownership lies with ACM; no action required from us; KP will push updates if status changes.
-
-No relaying for third parties was required (no relay requests arrived). No prefix advertisements were exchanged — the existing /30 plus default-route arrangement was already sufficient and my /32 loopback is reachable via that route. No routing daemons were used; everything was done with diagnostic tools and `send_message`.
+- **Uni (local KP contact, 10.0.6.2 / 128.173.0.1)**: my single neighbor and only channel to the rest of the network. I sent Uni one detailed initial report describing my technical observations and one explicit question for the KP, plus two short follow-ups during long waits. Uni acted as the KP's local entry point, reproducing the 503 from its own vantage, ruling out campus-side L7 interception, and relaying the WHY upstream.
+- **Indirect chain (relayed by Uni, not directly contacted)**: AS1 verified clean transit and relayed the question to AS2; AS2 relayed to ACM's operator; ACM responded with the definitive CANNOT diagnosis. I never spoke to AS1, AS2 or ACM directly — Uni is my only physical neighbor, and the KP overlay handled the multi-hop investigation on my behalf, exactly as the architecture intends.
+- **No relays were requested through me** during the experiment, so I did not act as an intermediary for anyone else's traffic.
+- **No routing protocol exchanges occurred**: the topology was static for the duration of my involvement, the default route covered everything I needed, and the upstream loop fix was performed by other agents under KP coordination rather than by me.

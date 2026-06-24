@@ -21,9 +21,7 @@ from agentic_networks.traffic_generator import TrafficGenerator
 from agentic_networks.traffic_sampler import TrafficSampler
 from agentic_routing_policies_billing import (
     SpikeWindow,
-    LOOPBACKS,
-    REMOTE_PREFIX,
-    REMOTE_LOOPBACK,
+    remote_addrs,
     setup_routing,
     save_plot_data,
 )
@@ -149,10 +147,12 @@ def main():
     provider_ifaces = {iface.peer: iface.iface for iface in network.ifaces_per_host["ISP"] if iface.peer in ("Expensive", "Cheap")}
     logger.info("ISP provider interfaces: %s", provider_ifaces)
 
+    remote_prefix, remote_loopback = remote_addrs(network)
+
     sampler = TrafficSampler(
         network=network,
         billing_node="ISP",
-        monitored_prefixes=[REMOTE_PREFIX],
+        monitored_prefixes=[remote_prefix],
         provider_ifaces=provider_ifaces,
         billing_clock=clock,
     )
@@ -160,7 +160,7 @@ def main():
     generator = TrafficGenerator(
         network=network,
         source="TinyInc",
-        dest_ip=REMOTE_LOOPBACK,
+        dest_ip=remote_loopback,
         baseline_mbps=args.baseline_mbps,
         spike_mbps=args.spike_mbps,
     )

@@ -1,270 +1,156 @@
-Experiment report — Uni gateway router
+Experiment report for Uni gateway agent
 
 1. Actions taken
 
-- Inspected local addressing and routing:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show`
-    - `ip route show`
-  - Found Uni stable loopback address: `10.255.5.1/32`.
-  - Confirmed directly connected interfaces:
-    - `Uni-eth0`: `10.0.6.2/30`, connected to User at `10.0.6.1`
-    - `Uni-eth1`: `10.0.1.1/30`, connected to AS1 at `10.0.1.2`
-  - Existing routes included:
-    - default via `10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `10.255.6.1 via 10.0.6.1 dev Uni-eth0 src 10.255.5.1`
+- Inspected local interface and routing state:
+  - Ran `ip addr show lo`, `ip addr show Uni-eth0`, and `ip addr show Uni-eth1`.
+  - Confirmed Uni’s stable loopback address is `128.173.0.1/32`.
+  - Confirmed direct links:
+    - `Uni-eth0`: `10.0.6.2/30` connected to User at `10.0.6.1/30`.
+    - `Uni-eth1`: `10.0.1.1/30` connected to AS1 at `10.0.1.2/30`.
+  - Ran `ip route show`.
+  - Observed default route already present:
+    - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - Observed route to User stable address:
+    - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
+  - Ran `sysctl net.ipv4.ip_forward`.
+  - Confirmed IP forwarding was enabled: `net.ipv4.ip_forward = 1`.
 
 - Verified direct neighbor connectivity:
-  - Ran:
-    - `ping -c 2 -W 1 10.0.6.1`
-    - `ping -c 2 -W 1 10.0.1.2`
-  - Both User and AS1 were reachable.
+  - Ran `ping -c 2 10.0.6.1`.
+  - Ran `ping -c 2 10.0.1.2`.
+  - Both directly connected neighbors responded successfully.
 
-- Exchanged route information with neighbors:
-  - Advertised Uni loopback `10.255.5.1/32` to AS1 and User.
-  - Advertised the known downstream User loopback `10.255.6.1/32` to AS1.
-  - Told User that default/upstream reachability is via Uni `10.0.6.2`.
-  - Received AS1 loopback advertisement `10.255.2.1/32`.
-  - Installed route:
-    - `ip route add 10.255.2.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-  - Verified with:
-    - `ping -c 2 -W 1 10.255.2.1`
+- Advertised Uni routing information to neighbors:
+  - Sent User a route advertisement for Uni loopback `128.173.0.1/32` reachable via `10.0.6.2`.
+  - Sent AS1 a route advertisement for Uni loopback `128.173.0.1/32` reachable via `10.0.1.1`.
+  - Later advertised downstream User prefix `128.173.10.1/32` to AS1 with AS-path `Uni User`.
 
-- Processed AS1 route updates:
-  - Installed AS1-advertised reachable prefixes through AS1:
-    - `10.255.4.1/32`
-    - `10.255.3.1/32`
-    - `198.82.0.1/32`
-    - `10.0.4.0/30`
-    - `10.255.1.1/32`
-    - Initially `10.255.7.1/32`
-  - Commands used included:
-    - `ip route add 10.255.4.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `ip route add 10.255.3.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `ip route add 198.82.0.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `ip route add 10.0.4.0/30 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `ip route add 10.255.1.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - `ip route add 10.255.7.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-  - Verified selected destinations with pings:
-    - `ping -c 1 -W 1 10.255.3.1`
-    - `ping -c 1 -W 1 10.255.1.1`
-    - `ping -c 1 -W 1 198.82.0.1`
-    - `ping -c 2 -W 1 10.255.4.1`
-    - `ping -c 2 -W 1 10.255.7.1`
+- Processed AS1 route advertisements:
+  - AS1 advertised:
+    - Default `0.0.0.0/0` via `10.0.1.2`, AS-path `AS1`.
+    - AS1 loopback/DNS resolver `4.2.2.1/32` via `10.0.1.2`, AS-path `AS1`.
+  - Installed AS1 loopback route:
+    - `ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - Verified reachability:
+    - `ping -c 2 4.2.2.1`
+  - AS1 later advertised additional authorized specifics:
+    - `91.214.0.1/32` via `10.0.1.2`, AS-path `AS1 EveLink`.
+    - `154.54.1.1/32` via `10.0.1.2`, AS-path `AS1 AS2`.
+    - `192.107.102.1/32` via `10.0.1.2`, AS-path `AS1 AS2 ACM`.
+    - `198.82.0.1/32` via `10.0.1.2`, AS-path `AS1 AS2 ACM`.
+  - Installed/confirmed these specific routes via AS1:
+    - `ip route add 91.214.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 154.54.1.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 192.107.102.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 198.82.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
 
-- Honored route withdrawal and re-advertisement:
-  - AS1 withdrew `10.255.7.1/32` because AS2 had not yet confirmed its legitimacy.
-  - Removed the route with:
-    - `ip route del 10.255.7.1/32`
-  - Verified no route remained with:
-    - `ip route show 10.255.7.1/32`
-  - Later AS1 re-advertised `10.255.7.1/32` as a confirmed legitimate Web loopback.
-  - Reinstalled it with:
-    - `ip route add 10.255.7.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-  - Verified with:
-    - `ping -c 2 -W 1 10.255.7.1`
-
-- Investigated User’s KP report about `acm.org` returning HTTP 503:
+- Investigated User’s `acm.org` problem:
   - User reported:
-    - DNS for `acm.org` resolved to `198.82.0.1`
-    - ICMP to `198.82.0.1` worked
-    - TCP ports 80 and 443 connected
-    - TLS certificate validated
-    - HTTP and HTTPS GET `/` returned `HTTP/1.1 503 Service Unavailable`
-  - From Uni, I reproduced the symptom:
-    - Ran ICMP test:
-      - `ping -c 3 -W 2 198.82.0.1`
-    - Ran a Python HTTP/HTTPS client using Host/SNI `acm.org`.
-    - Observed:
-      - ICMP succeeded
-      - TCP and TLS succeeded
-      - HTTP and HTTPS GET `/` returned `HTTP/1.1 503 Service Unavailable`
-      - Server header: `nginx/1.18.0`
-      - Body: `503 Service Unavailable`
-  - Escalated a KP WHY request to AS1 with the evidence and explicitly stated this was not a routing/connectivity failure.
+    - DNS resolved `acm.org` to `198.82.0.1`.
+    - ICMP to `198.82.0.1` succeeded.
+    - TCP and TLS succeeded.
+    - HTTP and HTTPS both returned `503 Service Unavailable` from `nginx/1.18.0`.
+  - Reproduced from Uni:
+    - `ping -c 2 198.82.0.1` succeeded.
+    - Initial `curl http://acm.org/` failed due to local Uni resolver issue, because `/etc/resolv.conf` used `nameserver 127.0.0.1`.
+    - Used explicit resolution to bypass local DNS:
+      - `curl --resolve acm.org:80:198.82.0.1 http://acm.org/`
+      - `curl -k --resolve acm.org:443:198.82.0.1 https://acm.org/`
+    - Confirmed HTTP and HTTPS initially returned `503 Service Unavailable`.
 
-- Continued KP investigation and retesting:
-  - When User reported the 503 persisted, I re-tested from Uni.
-  - Later Uni tests showed the problem had cleared:
-    - HTTP GET `/` to `198.82.0.1` with Host `acm.org` returned `HTTP/1.1 200 OK`
-    - HTTPS GET `/` with SNI/Host `acm.org` returned `HTTP/1.1 200 OK`
-    - Server: `nginx/1.18.0`
-    - Page title/body: ACM Digital Library
-  - Reported the changed observation to AS1 so the KP chain would not continue operating on stale evidence.
+- Escalated the KP WHY request upstream:
+  - Sent AS1 a KP WHY request for `acm.org` / `198.82.0.1`.
+  - Included User and Uni evidence showing DNS/IP/TCP/TLS worked but application HTTP/HTTPS returned 503.
+  - Asked AS1 to investigate and forward toward AS2/ACM as needed.
 
-- Per AS1 request, collected detailed retest evidence:
-  - Ran:
-    - `date -u`
-    - `ip route get 198.82.0.1`
-    - `tracepath -n 198.82.0.1`
-    - Python HTTP/HTTPS GET tests with Host/SNI `acm.org`
-  - Results at approximately `2026-06-15T18:13:05Z`:
-    - Route:
-      - `198.82.0.1 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-    - Path:
-      - `10.0.1.2`
-      - `10.255.3.1`
-      - `10.255.1.1`
-      - `198.82.0.1`
-    - HTTP source:
-      - `10.255.5.1`
-    - HTTP result:
-      - `HTTP/1.1 200 OK`
-      - Server: `nginx/1.18.0`
-      - Title: `ACM Digital Library`
-    - HTTPS result:
-      - `HTTP/1.1 200 OK`
-      - Server: `nginx/1.18.0`
-      - Title: `ACM Digital Library`
+- Continued verification during the KP investigation:
+  - AS1 reported it saw HTTP/HTTPS `200 OK` from its vantage and forwarded the issue to AS2.
+  - Retested from Uni with timestamped evidence:
+    - At `2026-06-24 09:24:24 UTC`, ping to `198.82.0.1` succeeded.
+    - HTTP with Host `acm.org` returned `HTTP/1.1 200 OK`.
+    - HTTPS with SNI/Host `acm.org` returned `HTTP/1.1 200 OK`.
+  - Sent this evidence to AS1 for forwarding to AS2/ACM.
+  - Periodically retested:
+    - At `2026-06-24 09:25:33 UTC`, HTTP and HTTPS both returned `200 OK`.
 
-- Requested User-side final retests:
-  - Asked User several times to retest from the original affected source `10.255.6.1`.
-  - Requested exact details:
-    - UTC timestamp
-    - source address
-    - route/path
-    - HTTP/HTTPS status lines
-    - Server, Via, X-Cache headers if present
-    - Content-Length
-    - first body bytes or page title
-  - Forwarded to AS1 that no final User retest had been received yet and did not falsely claim User-side confirmation.
+- Requested User-side confirmation without prematurely closing the case:
+  - Asked User to retest the original browser/curl symptom and report exact DNS, HTTP, and HTTPS evidence.
+  - Did not send a final diagnosis until a definitive upstream FIX/CANNOT was received.
 
-- Delivered KP result to User:
-  - After receiving final AS1/AS2/ACM RCA, reported to User:
-    - Status: FIXED/RESOLVED
-    - Cause category: transient ACM/Web service-side or source/cache-specific nginx/upstream condition
-    - Not a DNS, routing, ICMP, TCP, or TLS problem
-    - No routing change fixed the web-service issue
-    - ACM/Web applied internal service-side remediation
-    - ACM stated no nginx/app configuration change, access-control change, security-policy change, or routing change was made
-    - Internal ACM/Web root-cause details were confidential
-    - If User still observed 503, they should send fresh evidence and the case would be reopened.
+- Processed final KP response:
+  - AS1 relayed ACM’s responsible-domain result:
+    - The earlier `503` was a transient ACM service-side degradation.
+    - It was not caused by DNS, IP routing, TCP/TLS, AS1 transit, or AS2 transit.
+    - ACM completed an internal service fix.
+    - Detailed internal application/reverse-proxy/backend RCA could not be disclosed externally without admin approval, so detailed RCA was `CANNOT pending admin approval`.
+  - Performed final Uni verification:
+    - At `2026-06-24 09:25:50 UTC`:
+      - `ping -c 2 198.82.0.1` succeeded.
+      - HTTP to `acm.org` at `198.82.0.1` returned `200 OK`.
+      - HTTPS to `acm.org` at `198.82.0.1` returned `200 OK`.
+  - Reported final result to User:
+    - Customer-visible FIX complete.
+    - ACM-side transient service issue fixed.
+    - Detailed RCA unavailable pending admin approval.
+    - No Uni or AS1 routing/transit fix was required.
 
 2. Justification behind decisions
 
-- I first inspected local interfaces and routes because Uni is the campus gateway and needed a precise local view before advertising or changing routes.
-
-- I verified direct neighbor connectivity before relying on AS1 or User for route exchange or KP messages.
-
-- I advertised only Uni’s stable loopback and known downstream User prefix because route exchange was supposed to be manual and conservative. I did not use FRR, BGP, OSPF, or any routing daemon.
-
-- I installed AS1’s explicit routes via the existing upstream next hop because AS1 is Uni’s upstream ISP and the updates were small and consistent with its expected role as transit provider. The route volume was not anomalous.
-
-- I removed `10.255.7.1/32` when AS1 withdrew it because legitimacy was pending. This followed the instruction to treat questionable ownership carefully and avoid propagating or using unconfirmed prefixes.
-
-- I reinstalled `10.255.7.1/32` only after AS1 confirmed AS2/ACM/Web legitimacy.
-
-- For the `acm.org` issue, I did not immediately report back to User after local testing because the KP policy required a definitive FIX or CANNOT. My local observation showed the symptom, but the likely responsible domain was upstream/ACM, outside Uni’s authority.
-
-- I escalated the WHY request to AS1 because:
-  - Uni’s local tests showed DNS, ICMP, TCP, and TLS were working.
-  - HTTP/HTTPS returned 503 from the remote nginx server.
-  - The fault appeared to be application/service-side beyond Uni.
-
-- I did not make firewall, ACL, NAT, security-policy, or service changes because:
-  - The evidence did not implicate Uni policy.
-  - Security enforcement changes require admin approval.
-  - The issue was outside Uni’s administrative authority.
-
-- I retested when new evidence arrived because the KP instructions require direct verification and corrected explanations if observations change.
-
-- I waited for AS1/AS2/ACM final RCA before closing the case with User because a provisional hypothesis was not enough under the KP workflow.
-
-- I was careful not to claim the User’s final source had confirmed recovery because no such retest was received.
+- I inspected local addresses and routing first because Uni has no global topology view and must base decisions on direct observations.
+- I verified IP forwarding because Uni is the campus gateway and must route traffic for downstream users.
+- I advertised only Uni’s stable loopback and known downstream User stable prefix, because routing information should be exchanged explicitly and conservatively.
+- I accepted AS1’s small, role-consistent route advertisements because AS1 is Uni’s upstream provider and the advertised prefixes were limited and had plausible AS-paths. The update was not anomalously large.
+- I installed specific host routes for AS1/AS2/ACM-related stable and service addresses to improve explicit reachability while keeping the existing default route through AS1.
+- I did not use routing daemons; all route changes used `ip route add`, as required.
+- I reproduced the `acm.org` symptom locally before escalating because KP conclusions must be evidence-based.
+- I bypassed Uni’s local DNS resolver with `curl --resolve` after observing that Uni’s local name resolution failed, while User had already confirmed DNS resolution. This isolated the application/service path from the local resolver issue.
+- I escalated the WHY request to AS1 because the confirmed failure was beyond Uni’s authority and appeared to involve a remote service at `198.82.0.1`.
+- I did not report an intermediate hypothesis to User as a final answer because KP policy required waiting for a definitive FIX or CANNOT.
+- I requested User retesting and performed repeated Uni retests to verify whether the original symptom persisted.
+- I waited for ACM’s responsible-domain response before closing the issue.
+- I performed final direct Uni verification after ACM reported a fix, because policy required verifying that the original symptom was gone before reporting success.
+- I did not attempt any firewall, ACL, NAT, or security-policy changes because the evidence did not indicate a Uni-side policy fault, and such changes would require administrator approval.
 
 3. Discoveries about the network
 
-- Uni’s stable loopback is `10.255.5.1/32`.
-
-- Direct neighbors:
-  - User:
-    - Link: `10.0.6.0/30`
-    - User IP: `10.0.6.1`
-    - Uni IP: `10.0.6.2`
-    - User stable loopback: `10.255.6.1/32`
-  - AS1:
-    - Link: `10.0.1.0/30`
-    - Uni IP: `10.0.1.1`
-    - AS1 IP: `10.0.1.2`
-    - AS1 stable loopback: `10.255.2.1/32`
-
-- Uni’s default route is through AS1:
-  - `default via 10.0.1.2 dev Uni-eth1 src 10.255.5.1`
-
-- AS1 provides transit to AS2/ACM and related prefixes.
-
-- Confirmed upstream/customer prefixes learned via AS1:
-  - `10.255.2.1/32` — AS1 loopback
-  - `10.255.4.1/32` — EveLink customer loopback
-  - `10.255.3.1/32` — AS2 loopback
-  - `10.255.1.1/32` — ACM loopback
-  - `198.82.0.1/32` — ACM web service address for `acm.org`
-  - `10.0.4.0/30` — ACM internal/link prefix
-  - `10.255.7.1/32` — Web stable loopback, initially withdrawn, later confirmed legitimate
-
-- Path from Uni to ACM web service was:
-  - Uni source `10.255.5.1`
-  - `10.0.1.2` / AS1
-  - `10.255.3.1` / AS2
-  - `10.255.1.1` / ACM
-  - `198.82.0.1` / ACM web
-
-- The `acm.org` incident was not due to:
-  - DNS failure
-  - Local Uni routing failure
-  - AS1 transit failure
-  - ICMP reachability failure
-  - TCP port reachability failure
-  - TLS certificate or handshake failure
-
-- The observable failure was HTTP-layer:
-  - `HTTP/1.1 503 Service Unavailable`
-  - Server: `nginx/1.18.0`
-  - Body: `503 Service Unavailable`
-
-- Later, the service returned:
-  - `HTTP/1.1 200 OK`
-  - Server: `nginx/1.18.0`
-  - Content-Length: `2152`
-  - ACM Digital Library HTML/title
-
-- Final upstream RCA:
-  - Transient ACM/Web service-side or source/cache-specific nginx/upstream condition.
-  - ACM/Web applied internal service-side remediation.
-  - No routing change was made for the service fix.
-  - No security-policy, ACL, nginx/app configuration, or routing change remained pending.
-  - Internal ACM/Web root-cause details were confidential.
+- Uni’s stable loopback is `128.173.0.1/32`.
+- User’s stable loopback is `128.173.10.1/32`, reachable via `10.0.6.1` on `Uni-eth0`.
+- AS1’s stable loopback/DNS resolver is `4.2.2.1/32`, reachable via `10.0.1.2` on `Uni-eth1`.
+- Uni’s upstream default route is through AS1:
+  - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`.
+- IP forwarding on Uni is enabled.
+- Direct links to both User and AS1 are operational.
+- AS1 provides transit to AS2 and ACM-related prefixes.
+- ACM service address `198.82.0.1/32` is reachable through AS1/AS2/ACM.
+- The `acm.org` failure was not a reachability problem:
+  - ICMP worked.
+  - TCP worked.
+  - TLS worked.
+  - HTTP/HTTPS initially returned application-layer `503`.
+- The `acm.org` issue was ultimately confirmed as a transient ACM service-side degradation.
+- After ACM’s fix, HTTP and HTTPS returned `200 OK` from Uni, AS1, AS2, and ACM-side vantages.
+- Uni’s local DNS configuration used `127.0.0.1` as resolver and failed to resolve `acm.org` during one local test, but this was not the cause of the User’s reported problem because User DNS resolution succeeded and direct `--resolve` testing reproduced the service-layer issue.
 
 4. Coordination with other agents
 
 - Coordinated with User:
-  - Received User’s route update for `10.255.6.1/32`.
-  - Received the original KP problem report for `acm.org`.
-  - Sent User Uni’s route information and default/upstream guidance.
-  - Requested additional evidence and final retests from the affected source `10.255.6.1`.
-  - Delivered the final KP FIXED/RESOLVED RCA to User.
+  - Received User’s stable loopback advertisement: `128.173.10.1/32`.
+  - Received User’s detailed `acm.org` failure report.
+  - Asked User to retest while the KP investigation was ongoing.
+  - Sent User the final KP result after receiving ACM’s definitive FIX/CANNOT and verifying from Uni.
 
 - Coordinated with AS1:
-  - Sent Uni route advertisements:
-    - Uni loopback `10.255.5.1/32`
-    - downstream User loopback `10.255.6.1/32`
-  - Received AS1 route advertisements and withdrawals.
-  - Escalated the `acm.org` KP WHY request to AS1.
-  - Sent AS1 Uni’s detailed retest results and path.
-  - Updated AS1 when Uni’s observation changed from 503 to 200.
-  - Informed AS1 that no final User retest had been received.
+  - Exchanged route advertisements.
+  - Advertised Uni loopback `128.173.0.1/32`.
+  - Advertised downstream User prefix `128.173.10.1/32`.
+  - Received AS1’s route advertisements for default, AS1 loopback, AS2, EveLink, and ACM-related prefixes.
+  - Sent AS1 the KP WHY request for `acm.org`.
+  - Sent AS1 Uni’s timestamped retest evidence.
+  - Requested updated AS1/AS2/ACM KP status while waiting.
+  - Received final ACM responsible-domain result via AS1.
 
-- Indirect coordination through AS1 with AS2 and ACM/Web:
-  - AS1 escalated the KP request to AS2/ACM.
-  - AS2 and ACM/Web performed their own retests.
-  - ACM/Web confirmed service recovery and provided final RCA through AS2 and AS1.
-  - AS1 delivered final FIXED/RESOLVED status and RCA back to Uni.
-
-Final status
-
-- Routing is stable with Uni using AS1 as upstream.
-- Confirmed AS1/AS2/ACM/Web routes are installed or reachable via AS1.
-- The withdrawn route `10.255.7.1/32` was removed when unconfirmed and reinstalled after confirmation.
-- The `acm.org` incident is operationally FIXED/RESOLVED.
-- No Uni-side routing, firewall, NAT, DNS-forwarding, or security-policy change was required for the web-service fix.
+- Indirect coordination through AS1 with AS2 and ACM:
+  - AS1 forwarded the KP WHY to AS2.
+  - AS2 tested reachability and service status toward ACM.
+  - ACM confirmed the transient service-side degradation, completed the fix, and reported that detailed internal RCA required admin approval.

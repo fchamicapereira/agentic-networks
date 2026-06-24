@@ -1,51 +1,46 @@
-# Experiment Report — Autonomous System G (Stub AS)
+# G Node Experiment Report
 
 ## 1. Actions Taken
 
-**Inspection of local state:**
-- Ran `ip addr show` and `ip route show` to discover my interfaces and existing routes.
-- Found: loopback `10.255.7.1/32`, link `G-eth0` with IP `10.1.2.1/30` peering with A at `10.1.2.2`. No routes were preinstalled.
+1. **Inspected local state**: Ran `ip addr show lo`, `ip addr show G-eth0`, `ip route show` to discover:
+   - Loopback address: `88.150.0.1/32`
+   - Link to A: local `10.1.2.1/30`, peer `10.1.2.2/30` via `G-eth0`
+   - No routes installed beyond the connected `/30`.
 
-**Routing configuration:**
-- Attempted `ip route add default via 10.1.2.2` — failed with "Nexthop has invalid gateway" because the /30 subnet route wasn't installed automatically (only the /32 host address was on the interface).
-- Worked around this by first adding a host route: `ip route add 10.1.2.2/32 dev G-eth0`.
-- Then added the default: `ip route add default via 10.1.2.2`.
+2. **Installed default route**: `ip route add default via 10.1.2.2 dev G-eth0`.
 
-**Connectivity verification:**
-- Pinged A's loopback `10.255.1.1` from my loopback `10.255.7.1` using `ping -I 10.255.7.1`.
-- First attempts failed with "Destination Host Unreachable" (ARP entry FAILED/INCOMPLETE), likely due to the netem qdisc on the link dropping initial ARP probes.
-- Retried after a brief delay; ARP resolved and 5/5 ping bursts succeeded (~16 ms RTT).
+3. **Advertised loopback to A**: Sent a message to A announcing `88.150.0.1/32` with AS-path `[G]` as origin, and confirmed I had no customer prefixes behind me.
 
-**Coordination message:**
-- Replied to A confirming I want my loopback `10.255.7.1/32` advertised globally, stated I have no customer prefixes, and that I will use A as default gateway.
+4. **Received and acknowledged A's route list** containing 14 prefixes reachable via A (AS-paths up to 4 hops). Did not install any per-prefix routes — relied on the default.
 
-## 2. Justifications
+5. **Verified connectivity** from my loopback to three destinations of increasing AS-path depth:
+   - `ping -I 88.150.0.1 12.34.0.1` (A itself) → success
+   - `ping -I 88.150.0.1 46.4.0.1` (A D) → success
+   - `ping -I 88.150.0.1 202.12.0.1` (A C E O, 4 hops) → success
 
-- **Default route via A**: As a stub AS with a single provider, A is my only gateway to the rest of the internet. A single default route is correct and minimal.
-- **Advertising only my loopback**: The rules forbid advertising point-to-point link subnets (`10.1.2.0/30` is private infrastructure). I have no customers, so the only legitimate prefix to share is my own loopback.
-- **No transit offered**: As a stub I don't provide transit to anyone, consistent with the rules (no customers, no peers, and I must not transit my provider's traffic).
-- **Sourcing pings from loopback**: Required by the operational rules; link IPs aren't advertised so replies to them may not return.
-- **Retrying on initial ping failure**: The rules state to keep a policy-preferred path installed and retry rather than abandoning it on transient failure. The ARP issue resolved itself on retry, validating this approach.
-- **Privacy in messaging to A**: I shared only what A needs (my loopback) and didn't disclose policy details — though A is my provider and a natural trust partner here.
+6. **Reported done** with a summary of posture.
+
+## 2. Justification of Each Decision
+
+- **Default route only via A**: A is my sole provider and I am a stub AS. A default route is the simplest and most efficient configuration; installing 14 per-prefix routes would yield identical forwarding behavior because every destination goes through the same next-hop.
+- **Advertised only my loopback `88.150.0.1/32`**: Stub policy — I originate only my own address space. I deliberately did *not* advertise the `10.1.2.0/30` point-to-point subnet (private infrastructure, per the rules) and have no customers whose prefixes I could legitimately re-advertise.
+- **Did not re-advertise A's routes back to anyone**: I have no other neighbors, but as a stub I would never provide transit anyway — and especially never back toward a provider.
+- **Sourced pings from the loopback** (`-I 88.150.0.1`): Link IPs are not advertised globally; replies to them might be dropped or unrouteable. The loopback is the stable, advertised identity.
+- **Kept policy private**: My message to A only listed prefixes; I did not disclose preferences, contracts, or internal policy.
 
 ## 3. Network Discoveries
 
-- I have exactly one neighbor: provider A, reachable across `10.1.2.0/30`.
-- A's loopback is `10.255.1.1/32`.
-- My loopback is `10.255.7.1/32`.
-- The link to A has a netem qdisc applied, introducing latency (~16 ms) and occasional packet loss — observable as initial ARP failures before stabilizing.
-- I did not directly observe any other ASes; A handles all upstream reachability.
+- I have exactly one neighbor: **A**, who is my transit provider (loopback `12.34.0.1/32`).
+- Through A's advertisement I learned of at least 14 reachable loopbacks belonging to ASes including A, B, C, D, E, F, H, I, J, K, L, M, N, O — A is well-connected and likely a tier-1-style transit.
+- The topology behind A is multi-tiered (paths up to 4 ASes long, e.g., `A C E O`).
+- RTTs grow with AS-path length (≈16 ms, 106 ms, 212 ms), consistent with each AS hop adding propagation delay.
+- A accepted my `88.150.0.1/32` announcement and confirmed it would carry it upstream.
 
 ## 4. Coordination With Other Agents
 
-- **A (provider)** sent a greeting requesting my loopback and any customer prefixes I wanted advertised, and provided its own loopback `10.255.1.1` and the link addressing.
-- I responded with my loopback `10.255.7.1/32` for global advertisement, stated I had no customer prefixes, and confirmed A as my default gateway.
-- A acknowledged and confirmed it would advertise `10.255.7.1/32` to its peers and other customers.
-- No other agents contacted me during the experiment, consistent with my role as a stub AS reachable only through A.
+Only with **A** (my single neighbor):
+1. I sent A my loopback announcement (`88.150.0.1/32`, origin G, no customer prefixes).
+2. A replied confirming installation of my prefix and provided its full list of 14 globally-reachable prefixes with AS-paths, plus next-hop `10.1.2.2` and permission to use it as default.
+3. No relay requests passed through me, and I had no contact with any non-adjacent agent (correct for a stub with one uplink).
 
-## Final State
-
-- Loopback: `10.255.7.1/32`
-- Routes: `default via 10.1.2.2 dev G-eth0`, `10.1.2.2 dev G-eth0 scope link`
-- Verified: bidirectional reachability to A's loopback from my loopback.
-- Outcome: stub AS correctly configured; revenue posture optimal given no customer opportunities exist.
+Final posture: stub AS G is reachable globally via A, pays only A for transit, provides transit to no one, and leaks no private/infrastructure prefixes.

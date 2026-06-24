@@ -2,44 +2,48 @@
 
 ## 1. Actions Taken
 
-**Initial inspection.** Ran `ip addr show` and `ip route show` to discover my configuration. Found:
-- lo: 10.255.9.1/32 (loopback, my advertised identity)
-- I-eth0: 10.1.4.1/30, peer 10.1.4.2 (provider B)
-- No routes installed beyond directly connected.
+**Initial reconnaissance:**
+- Ran `ip addr show lo` → discovered my loopback address: 104.28.0.1/32
+- Ran `ip addr show` → confirmed single physical interface I-eth0 (10.1.4.1/30) toward B
+- Ran `ip route show` → found ~14 specific /32 routes already pre-installed via 10.1.4.2 (B), but no default route
 
-**Default route installation.** Attempted `ip route add default via 10.1.4.2` — failed ("invalid gateway") because the peer subnet wasn't in the kernel routing table yet (link route hadn't been auto-installed since ARP hadn't resolved). Worked around it with:
-- `ip route add 10.1.4.2/32 dev I-eth0` (explicit link route to peer)
-- `ip route add default via 10.1.4.2`
+**Routing configuration:**
+- Added a default route: `ip route add default via 10.1.4.2 dev I-eth0`
+- Did not add or remove any other routes (the specifics were already present and consistent with B being my upstream).
 
-**Peer reachability test.** `ping -c 2 10.1.4.2` failed initially (ARP FAILED). After B fixed its end (it was missing the connected route for 10.1.4.0/30), pings succeeded.
+**Advertisement:**
+- Sent a message to B announcing my loopback prefix 104.28.0.1/32 and informing B I would use it as upstream.
+- I deliberately did *not* advertise the 10.1.4.0/30 link subnet (per rules).
 
-**Loopback-sourced reachability sweeps.** Used `ping -I 10.255.9.1 -c N -W 2 <ip>` against 10.255.{1..15}.1 to test internet reachability. Iterated multiple times as B's routing table converged.
+**Verification:**
+- Pinged three destinations sourced from my loopback:
+  - `ping -I 104.28.0.1 24.96.0.1` (B) → 0% loss, ~12 ms
+  - `ping -I 104.28.0.1 95.211.0.1` (H via B) → 0% loss, ~36 ms
+  - `ping -I 104.28.0.1 151.101.0.1` (peer A side) → 0% loss, ~198 ms
 
-**Diagnostics during partial reachability.** Used `traceroute -n -s 10.255.9.1` to determine where packets were being dropped — saw "!H" returns at B's hop, indicating B had no FIB entry for some prefixes.
+**Final advertisement from B:**
+- B then sent its full table (14 prefixes with AS-paths). All prefixes were already covered by my default route and by the pre-existing specifics. I took no further action, as the update was consistent with B's role as my transit provider and the volume was modest.
 
-## 2. Justification for Each Decision
+## 2. Justification
 
-- **Default route via B only:** B is my sole provider; I have one link and no other neighbors, so a single default toward 10.1.4.2 is sufficient and avoids advertising/managing complexity.
-- **Not advertising 10.1.4.0/30:** Rule explicitly prohibits advertising point-to-point link subnets — these are private infrastructure between B and me.
-- **Advertising 10.255.9.1/32 only:** That's my loopback and the only thing I host. No customer prefixes exist behind me.
-- **Sourcing pings from loopback:** Rule mandates it; link interface IPs aren't advertised globally, so replies to 10.1.4.1 would not return.
-- **Explicit `/32` link route as workaround:** Allowed the default route to install during the brief window before ARP/connectivity settled with B.
-- **Reporting issues to B promptly:** Rule requires reporting connectivity anomalies to provider — I sent status updates after each test cycle, including specific failing destinations and traceroute evidence.
+- **Default route via B**: As a single-homed customer with only one neighbor (my paid transit), the simplest correct configuration is a default route pointing to that provider.
+- **Advertising only the loopback**: My loopback is my stable, routable identity. The point-to-point link 10.1.4.0/30 is private infrastructure and must not be advertised per the rules.
+- **Sourcing pings from loopback**: Link IPs are unadvertised; replies might not return. Using the loopback ensures end-to-end reachability validation.
+- **Accepting B's full table without alarm**: 14 prefixes from a transit provider is a reasonable volume, and the AS-paths (B-rooted, with sensible transit/peer structure) look legitimate. No anomaly worth reporting.
 
-## 3. Discoveries About the Network
+## 3. Network Discoveries
 
-- The topology contains at least 14 remote loopbacks reachable via B: 10.255.{1–8,10–15}.1, plus B's own 10.255.2.1.
-- B sits at the center of a multi-AS arrangement: B has at least one peer (A), one upstream/peer (C), and a customer (D). Different destinations depend on different B sessions.
-- The network exhibits asymmetric paths — return traffic for some prefixes wasn't following the same path as outbound, which triggered rp_filter drops at B (in "loose" mode = 2, return packets were still being filtered).
-- Convergence was incremental: prefixes became reachable in waves as B accepted/installed them from each peer.
+- I am single-homed to provider B over 10.1.4.0/30.
+- B reaches the broader network through:
+  - A peer **A** (carrying F, G, L?, M? indirectly; routes 12.34, 77.88, 88.150)
+  - Customers/peers **C**, **D**, **H** (95.211 via H; 37.120/62.210/129.250/141.193/193.34/202.12 via C; 46.4/151.101/178.62 via D)
+- AS-paths revealed transit hierarchy: e.g., B→C→E→... and B→D→L/M.
+- End-to-end latencies grew with AS-path length (12 ms to B, 36 ms one hop further, ~200 ms across multi-AS paths), consistent with the topology.
 
-## 4. Coordination with B
+## 4. Coordination with Other Agents
 
-I exchanged 5 messages with B:
-1. **Initial advertisement + link issue report:** Sent my prefix (10.255.9.1/32) and reported the ARP failure on the P2P link. B replied that it was missing the connected route 10.1.4.0/30 and fixed it.
-2. **Partial reachability report (first):** Reported that only 10.255.2.1 and 10.255.8.1 were reachable. B replied that convergence was ongoing — A was peering, C and D still pending.
-3. **Partial reachability report (second):** After more destinations came up, listed remaining failures (10.255.{1,4,6,7}.1). B replied later with a full prefix list now installed.
-4. **Configuration confirmation + traceroute evidence:** After B asked me to confirm my default route, I confirmed it and supplied traceroute output showing packets reached B and then hit "!H" or were silently dropped — pointing the diagnosis at B's FIB or its rp_filter. B subsequently disabled rp_filter (loose=2 → 0).
-5. **Final confirmation:** Reported 14/14 destinations reachable.
+Only B (my sole neighbor):
+- **I → B**: Announced 104.28.0.1/32 and declared B as upstream.
+- **B → I**: Acknowledged receipt, confirmed propagation to peers/customers, then later sent a full-table advertisement (14 prefixes with AS-paths and next-hop 10.1.4.2).
 
-The interaction demonstrated good provider/customer protocol: I sourced all tests correctly, reported observable symptoms (traceroute hops, !H codes, specific failing prefixes) rather than guessing at causes, and let B own the remediation on its own infrastructure.
+No relay traffic for other agents was requested through me during the experiment.

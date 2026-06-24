@@ -1,65 +1,79 @@
-# Network Configuration Report — AS E (Tier-2 Regional Transit)
+# Experiment Report — AS E (Tier-2 Regional Transit)
 
 ## 1. Actions Taken
 
 ### Discovery
-- Inspected local state with `ip addr show` and `ip route show`. Found loopback 10.255.5.1/32 and four point-to-point links (E-eth0..eth3) to C, D, N, O. No connected or dynamic routes were pre-installed.
-- Sent introductory messages to all four neighbors (C, D, N, O) asking for their loopback addresses and any customer prefixes.
+- Inspected local state with `ip addr show lo`, `ip route show`, and `ip addr show`.
+- Identified my loopback (62.210.0.1/32) and four point-to-point links: C (10.0.6.0/30), D (10.0.7.0/30), N (10.1.9.0/30), O (10.1.10.0/30).
+
+### Initial neighbor outreach
+Sent introductory messages to all four neighbors (C, D, N, O):
+- Identified myself by loopback and link IP.
+- Asked customers (N, O) to list originated prefixes; offered them a default route.
+- Asked provider C for upstream reachability.
+- Proposed peer prefix exchange (no transit) with D.
 
 ### Route installation
-On first attempt, `ip route add ... via 10.0.7.1` failed with "invalid gateway" because the connected /30 routes were missing from the main table. I added them explicitly:
+After receiving advertisements I issued:
 ```
-ip route add 10.0.6.0/30 dev E-eth0 src 10.0.6.2
-ip route add 10.0.7.0/30 dev E-eth1 src 10.0.7.2
-ip route add 10.1.9.0/30 dev E-eth2 src 10.1.9.2
-ip route add 10.1.10.0/30 dev E-eth3 src 10.1.10.2
-```
-Then I installed neighbor-loopback and customer routes:
-```
-ip route add 10.255.3.1/32 via 10.0.6.1 dev E-eth0     # C (provider)
-ip route add 10.255.4.1/32 via 10.0.7.1 dev E-eth1     # D (peer)
-ip route add 10.255.14.1/32 via 10.1.9.1 dev E-eth2    # N (customer)
-ip route add 10.255.15.1/32 via 10.1.10.1 dev E-eth3   # O (customer)
-ip route add default via 10.0.6.1 dev E-eth0           # Provider default
-ip route add 10.255.12.1/32 via 10.0.7.1 dev E-eth1    # L via D (peer)
-ip route add 10.255.13.1/32 via 10.0.7.1 dev E-eth1    # M via D (peer)
+ip route add 193.34.0.1/32 via 10.1.9.1 dev E-eth2      # N (customer)
+ip route add 202.12.0.1/32 via 10.1.10.1 dev E-eth3     # O (customer)
+ip route add 46.4.0.1/32   via 10.0.7.1 dev E-eth1      # D (peer)
+ip route add 151.101.0.1/32 via 10.0.7.1 dev E-eth1     # L (D's customer)
+ip route add 178.62.0.1/32  via 10.0.7.1 dev E-eth1     # M (D's customer)
+ip route add default via 10.0.6.1 dev E-eth0            # provider C fallback
+ip route add 37.120.0.1/32   via 10.0.6.1 dev E-eth0    # C
+ip route add 12.34.0.1/32    via 10.0.6.1 dev E-eth0    # A
+ip route add 24.96.0.1/32    via 10.0.6.1 dev E-eth0    # B
+ip route add 129.250.0.1/32  via 10.0.6.1 dev E-eth0    # J
+ip route add 141.193.0.1/32  via 10.0.6.1 dev E-eth0    # K
+ip route add 95.211.0.1/32   via 10.0.6.1 dev E-eth0    # H
+ip route add 104.28.0.1/32   via 10.0.6.1 dev E-eth0    # I
+ip route add 77.88.0.1/32    via 10.0.6.1 dev E-eth0    # F
+ip route add 88.150.0.1/32   via 10.0.6.1 dev E-eth0    # G
 ```
 
-### Prefix advertisement
-- **To C (provider):** advertised 10.255.5.1/32, 10.255.14.1/32 (N), 10.255.15.1/32 (O). Withheld D's and D-customer prefixes.
-- **To D (peer):** advertised 10.255.5.1/32, 10.255.14.1/32 (N), 10.255.15.1/32 (O). Withheld C-learned prefixes.
-- **To N and O (customers):** offered full transit / default route via me.
-- Never advertised the /30 point-to-point link subnets to anyone.
+### Advertisements sent
+- **To C (provider):** my loopback 62.210.0.1/32 + customer prefixes 193.34.0.1/32 (N), 202.12.0.1/32 (O). Nothing else.
+- **To D (peer):** same set — my loopback + customer prefixes only.
+- **To N, O (customers):** offered default route and a list of all reachable loopbacks for verification.
 
 ### Verification
-Pinged every learned remote loopback from 10.255.5.1. All 14 destinations (A, B, C, D, F, G, H, I, J, K, L, M, N, O loopbacks) returned successfully.
+Pinged all 14 known loopbacks sourced from `62.210.0.1`. All replied successfully.
 
 ## 2. Justification
 
-- **Default via C only:** C is my paid provider — it's my gateway to anything I don't have a more specific path for. I install a default rather than the full table from C since a default suffices for unknown destinations.
-- **More-specific routes to D and D's customers (L, M) via the D link:** D is a settlement-free peer. C also advertised L and M (via A), but routing those through C would cost me money. Using the direct E–D link for L and M is the revenue-maximizing choice and the canonical BGP "prefer peer over provider" policy. Longest-prefix match ensures the /32s win over the default.
-- **Advertising only my loopback + customer prefixes to C and D:** Standard "valley-free" routing.
-  - To C (provider): announcing customer cones is what I'm paid to do; advertising peer routes would make me transit traffic for D at my own expense (prohibited).
-  - To D (peer): announcing my customer cones lets D send L/M traffic over the free peering link; advertising C-learned routes would make me a free transit for D toward the rest of the internet (prohibited).
-- **Default route to customers N and O:** They pay me for full reachability, so I propagate everything to them.
-- **Not advertising /30 link subnets:** They're private infrastructure and have no business being in the global table.
-- **No information leaks:** When acknowledging C's update about 10.255.12.1/13.1 being reachable via A, I declined to explain that I was preferring D — just said "my routing decisions are my own."
+- **Customer routes via direct link:** N and O pay me for transit, so I install their /32s with the direct next-hop.
+- **D and D's customers via the D peering link, even though C also advertised L and M:** D is a settlement-free peer, so traffic to D's cone over the E–D link is free, whereas the same destinations via C would incur transit costs. Peer routes therefore beat provider routes by policy, independent of any reachability comparison.
+- **Provider C used for everything else + default:** C is my upstream and the only path to the rest of the Internet.
+- **Advertisement filters:**
+  - I never advertised provider C's routes to peer D (would be giving D free transit through me).
+  - I never advertised peer D's routes to provider C (would be giving D's cone to C and providing transit to a peer).
+  - I never advertised C's or D's prefixes to customers as separate announcements; instead, customers receive a default that resolves through my policy-correct table.
+  - I never advertised the /30 point-to-point link subnets, as required by the rules.
+- **No routing daemon used.** Everything was static `ip route add`, with prefix exchange done over `send_message`.
+- **Privacy:** When acknowledging C, I said only “I already have routes for L and M via another path” — I did not reveal that D is a peer or describe the policy.
 
 ## 3. Network Discoveries
 
-From neighbor messages, the topology around E looks like:
-- **C (10.255.3.1)** — my provider — connects upstream to peers **A (10.255.1.1)** and **B (10.255.2.1)**, and has additional customers **J (10.255.10.1)** and **K (10.255.11.1)**.
-- **A's customer cone** (as advertised by C): 10.255.4.1 (D), 10.255.6.1, 10.255.7.1, 10.255.12.1 (L), 10.255.13.1 (M).
-- **B's customer cone**: 10.255.8.1, 10.255.9.1, and also a path to 10.255.4.1.
-- **D (10.255.4.1)** — my peer — has customers **L (10.255.12.1)** and **M (10.255.13.1)**. D is dual-homed (also reachable via A through C).
-- **N (10.255.14.1)** and **O (10.255.15.1)** — my customers — have no downstream customers themselves.
+From neighbor messages I built the following partial topology and reachability picture (AS / loopback):
 
-So globally I know 14 ASes/loopbacks and have full reachability to all of them.
+- **My direct neighbors:** C (provider, 37.120.0.1), D (peer, 46.4.0.1), N (customer, 193.34.0.1), O (customer, 202.12.0.1).
+- **Behind D (peer's customers):** L (151.101.0.1), M (178.62.0.1).
+- **Behind C, via its peers A and B:**
+  - A's cone: A (12.34.0.1), F (77.88.0.1), G (88.150.0.1), and A also has a path to D/L/M.
+  - B's cone: B (24.96.0.1), D (46.4.0.1), H (95.211.0.1), I (104.28.0.1).
+  - C's direct customers: J (129.250.0.1), K (141.193.0.1).
+- N and O have no customers of their own; each originates a single /32.
 
-## 4. Agent Coordination
+End-to-end pings from my loopback to all 14 known loopbacks succeeded, confirming bidirectional propagation through C, D, and direct customer links.
 
-- **With C:** Exchanged loopbacks and next-hops. C advertised its full table of peers/customers. I advertised only my own loopback and my customers (N, O). Politely deflected when C noted L/M were also reachable through it.
-- **With D:** Bilateral peer setup. Exchanged loopbacks and customer prefixes (mine: N, O; D's: L, M). Both sides installed routes via the direct E–D link. Confirmed working pings.
-- **With N and O:** Provider–customer setup. They installed default routes via my interface IP; I installed /32s back to their loopbacks. Both confirmed end-to-end reachability from their loopbacks to multiple remote destinations through me.
+## 4. Coordination with Other Agents
 
-Net result: E is operating per policy — earning revenue from N and O, paying C only for traffic to destinations not reachable via the free D peering link, and not leaking transit to C or D.
+- **N (customer):** Exchanged loopback info, agreed I am their upstream, installed 193.34.0.1/32, sent them a default + reachable-prefix list.
+- **O (customer):** Same pattern; O explicitly confirmed I am their sole upstream and installed `0.0.0.0/0 via 10.1.10.2`. O asked for and received a list of reachable loopbacks for end-to-end testing.
+- **C (provider):** Iterative exchange — C advertised its directly originated and peer-derived prefixes in several rounds (C, A's cone, B's cone). I acknowledged installs without disclosing peering policy.
+- **D (peer):** Negotiated symmetric peer exchange — I advertised E + N + O; D advertised D + L + M. No transit either direction.
+- **No relays were required**, as all the prefix advertisements I needed came from directly connected neighbors.
+
+The session ended in a stable, policy-compliant state with full reachability verified and routing aligned to maximize revenue: customer traffic to D's cone uses the free peer link, while all other off-net destinations transit C.

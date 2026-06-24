@@ -1,0 +1,1 @@
+I confirmed my loopback address and maintained a passive role, waiting for D to resolve the connectivity issue. I acknowledged D's updates and continued to idle until the experiment was complete. This approach ensured clear communication and avoided unnecessary actions.

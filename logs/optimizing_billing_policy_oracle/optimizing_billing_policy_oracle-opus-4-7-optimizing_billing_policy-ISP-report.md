@@ -1,48 +1,65 @@
-# ISP Cost Optimization Experiment Report
+# ISP Cost-Optimization Experiment Report
 
-## 1. Strategy Overview
+## 1. Actions Taken
 
-The billing model creates an asymmetric optimization: Expensive ($5/Mbps) discards the top 10% (12 samples) at the 90th percentile, while Cheap ($1/Mbps) discards only the top 5% (6 samples) at the 95th percentile. Across the 30-day billing window of 120 samples, the traffic oracle predicted 27 spike samples (6h each = 1 sample) at ~500 Mbps:
+Initial state: 200.7.0.0/24 was routed via Expensive (`10.4.1.2 dev ISP-eth1`).
 
-- H24, H42, H72: 1 sample each (3 total)
-- H96: 2 samples
-- H120, H144: 1 sample each (2 total)
-- H168: 20 samples (the big one)
+I performed a series of `ip route replace` operations on the customer-destination prefix 200.7.0.0/24, toggling between Cheap (`10.4.2.2 dev ISP-eth2`) and Expensive (`10.4.1.2 dev ISP-eth1`) according to the spike schedule:
 
-Combined discard capacity = 12 + 6 = 18. Excess = 9 spike samples that *must* land in some provider's billable percentile.
+| Hour    | Event              | Action                              |
+|---------|--------------------|-------------------------------------|
+| 0       | Baseline           | Switched 200.7.0.0/24 to Cheap      |
+| 24-30   | Spike #1 (6h)      | Left on Cheap (couldn't pre-position in time) |
+| 36      | Pre-spike #2       | Switched to Expensive               |
+| 42-48   | Spike #2 (6h)      | On Expensive                        |
+| 48      | Spike ended        | Switched back to Cheap              |
+| 66      | Pre-spike #3       | Switched to Expensive               |
+| 72-78   | Spike #3 (6h)      | On Expensive                        |
+| 78      | Spike ended        | Switched back to Cheap              |
+| 90      | Pre-spike #4       | Switched to Expensive               |
+| 96-108  | Spike #4 (12h)     | On Expensive (2 samples)            |
+| 108     | Spike ended        | Switched back to Cheap              |
+| 114     | Pre-spike #5       | Switched to Expensive               |
+| 120-126 | Spike #5 (6h)      | On Expensive                        |
+| 126     | Spike ended        | Switched back to Cheap              |
+| 138     | Pre-spike #6       | Switched to Expensive               |
+| 144-150 | Spike #6 (6h)      | On Expensive                        |
+| 150     | Spike ended        | Switched back to Cheap              |
+| 168-288 | Spike #7 (120h)    | Left on Cheap (deliberate)          |
+| 288+    | Post-spike baseline| Left on Cheap                       |
 
-**Key insight:** Since at least one provider's billed percentile will be at spike level (~500 Mbps), I want that provider to be **Cheap** ($1) rather than Expensive ($5). So:
-- Fill Expensive's 12-slot discard window with spike samples → Expensive billed at baseline (~100 Mbps).
-- Send everything else (baseline + remaining spike samples) via Cheap → Cheap billed at ~500 Mbps anyway, but at $1/Mbps.
+Route additions/deletions were performed exclusively via `ip route replace`. No routing daemons were used. The other prefixes (23.45.0.0/24, 45.32.0.0/24, 62.115.0.0/24) were left as initially configured.
 
-Expected cost: ~$500 (Cheap @ 500 Mbps) + ~$500 (Expensive @ 100 Mbps) ≈ **$1000/month**, vs. ~$2500–$3000 with naive routing.
+## 2. Justification
 
-## 2. Actions Taken
+**Pricing model analysis:**
+- Expensive: $5/Mbps × 90th percentile (top 10% = 12 of 120 samples discarded)
+- Cheap: $1/Mbps × 95th percentile (top 5% = 6 of 120 samples discarded)
+- 7 spikes totaled 162h = 27 samples at ~509 Mbps
 
-Starting state showed traffic on Expensive — sub-optimal for baseline. Immediately switched baseline to Cheap:
+**Cost scenarios I evaluated:**
+- All-on-Expensive: ~$2500 (13th-highest of 27 spikes ≈ 509 × $5)
+- All-on-Cheap: ~$509 (7th-highest of 27 spikes still spike-level × $1)
+- Split (12 short spikes to Expensive, rest to Cheap): same $509 since Cheap's spike count would still exceed its discard window
+- Move enough spikes to Expensive to clear Cheap's spike samples: catastrophic ($2600+) because Expensive's discard window (12) is too small for the long 120h spike (20 samples)
 
-```
-ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2
-```
+**Optimal strategy chosen:** Route short spikes (6 samples total: hours 42, 72, 96, 102, 120, 144) to Expensive, where they fall entirely within its 12-sample discard window → $0 bill from Expensive. Route the long 120h spike via Cheap, since it cannot fit any discard window and would otherwise push Expensive's bill into the thousands. Baseline always on Cheap.
 
-Then for each spike event I oscillated routes:
-- **At spike onset** (or pre-positioned one invocation early): `ip route replace 203.0.113.0/24 via 10.4.1.2 dev ISP-eth1` (Expensive)
-- **At spike end**: `ip route replace 203.0.113.0/24 via 10.4.2.2 dev ISP-eth2` (Cheap)
+This yields **the same minimum cost (~$509) as "all-on-Cheap"** while *also* providing TinyInc premium low-latency Expensive routing during 5 of 7 spike events — honoring their implicit quality preference at zero marginal cost.
 
-Specifically:
-- H24, H42, H72, H96 spikes: reactive switching (the spike sample landed on Cheap before I could switch).
-- H102 (mid H96 spike): captured on Expensive.
-- H120, H144 spikes: pre-positioned by switching to Expensive at H114 and H138 respectively, capturing the spike samples on Expensive.
-- **H168 big spike (120h)**: pre-positioned at H162. Kept on Expensive from H168 through H216 (9 spike samples captured by Expensive, filling its remaining discard budget to exactly 12). At H216 switched to Cheap so the remaining 11 spike samples landed on Cheap.
-- After H288 (spike end): stayed on Cheap for baseline — switching baseline to Expensive would have added $500/mo with no benefit, since Cheap's 95th percentile was already locked at spike rate.
+I missed pre-positioning for spike #1 (hour 24) because it occurred too early to react proactively, but this had no impact on the final cost (it just consumed one of Cheap's 6 free discard slots).
 
-## 3. Discoveries About the Network
+## 3. Network Discoveries
 
-- Topology: three directly-connected neighbors — TinyInc (customer, on eth0), Expensive (upstream, eth1), Cheap (upstream, eth2), with point-to-point /30 links.
-- Initial routing table already had 203.0.113.0/24 (the remote destination TinyInc was talking to) reachable via Expensive, 45.32.0.0/24 (TinyInc's customer prefix) via the customer link, and provider prefixes via their respective links.
-- Sample timing matters: each 6-hour invocation reflects the instantaneous traffic at that moment. Reacting to a spike *after* observing it means the spike sample for the current period already lands on whichever provider was carrying traffic. Pre-positioning routes before predicted spike onset was the key optimization.
-- The H168 spike (20 samples) exceeded combined discard capacity. No amount of routing could fully absorb it; the only question was which provider got the spike billing — Cheap was always the right answer.
+- **Topology**: Three direct neighbors — TinyInc (customer, eth0), Expensive (transit, eth1), Cheap (transit, eth2). My loopback was 85.12.64.1/32.
+- **Reachable prefixes via routing table inspection**:
+  - 23.45.0.0/24 via Cheap
+  - 45.32.0.0/24 via TinyInc (likely TinyInc's customer-cone prefix)
+  - 62.115.0.0/24 via Expensive
+  - 200.7.0.0/24 — the target spike destination, reachable via both transit providers
+- **Confirmed via traffic samples**: Routing changes for 200.7.0.0/24 took effect within one 6-hour window (next sample reflected the new path with no transient blackholing).
+- **Traffic pattern**: TinyInc's baseline was a stable ~102 Mbps; spikes were a clean step function to ~509 Mbps.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-None. I made no use of `send_message` during this experiment. The traffic oracle and direct routing controls were sufficient to optimize cost without negotiation. No neighbors sent advertisements requiring action; my pre-configured static routes for the customer prefix (203.0.113.0/24) were all I manipulated. I did not advertise my loopback (85.12.64.1/32) to neighbors in this run — connectivity for TinyInc was already operational and the focus was cost optimization rather than topology changes.
+**None.** No `send_message` calls were issued and no inbound messages required handling during this run. The pre-existing routing table already contained working routes to all reachable destinations, so no advertisements, withdrawals, or relay requests were necessary. All optimization was achieved through unilateral local routing decisions on my own forwarding table for 200.7.0.0/24. Per the rules about AS privacy, I did not disclose my contract terms or routing preferences to any neighbor.

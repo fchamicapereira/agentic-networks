@@ -1,0 +1,1 @@
+I observed initial connectivity and DNS resolution issues, followed by external connectivity problems and local firewall checks. I decided to communicate with Uni to gather more information and escalate the issue to AS1. This was done to systematically rule out local configurations and focus on potential routing or firewall issues along the path to the Internet.

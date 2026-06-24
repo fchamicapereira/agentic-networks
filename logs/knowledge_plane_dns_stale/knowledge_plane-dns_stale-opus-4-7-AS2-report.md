@@ -2,48 +2,43 @@
 
 ## 1. Actions Taken
 
-**Discovery & local inventory**
-- `ip addr show lo` → loopback 10.255.3.1/32.
-- `ip addr` and `ip route show` → confirmed two interfaces (AS2-eth0 to AS1 peer, AS2-eth1 to ACM customer) and a pre-installed default via AS1 plus customer-side routes (10.0.4.0/30, 10.255.1.1, 10.255.7.1, 198.82.0.1) via ACM at 10.0.3.2.
+**Discovery (local state)**
+- `ip addr show lo` → loopback 154.54.1.1/32
+- `ip addr show` / `ip route show` → confirmed two interfaces (eth0 to AS1, eth1 to ACM), pre-existing routes to ACM's prefixes (137.54.0.1, 192.107.102.1, 198.82.0.1) and a default via AS1 (10.0.2.1).
 
-**Routing exchange**
-- Sent initial advertisements to AS1 (peer) and ACM (customer) and asked for theirs.
-- ACM confirmed it only originates 10.255.1.1/32 and 198.82.0.1/32; 10.255.7.1 and 10.0.4.0/30 are ACM-internal.
-- Sent a corrected, authoritative advertisement to AS1: 10.255.3.1/32, 10.255.1.1/32, 198.82.0.1/32 only.
-- AS1 advertised: 10.255.2.1/32 (AS1), 10.255.5.1/32 (Uni), 10.255.6.1/32 (User), 10.255.4.1/32 (EveLink). I installed them:
-  - `ip route add 10.255.2.1/32 via 10.0.2.1 dev AS2-eth0`
-  - `ip route add 10.255.5.1/32 via 10.0.2.1 dev AS2-eth0`
-  - `ip route add 10.255.6.1/32 via 10.0.2.1 dev AS2-eth0`
-  - `ip route add 10.255.4.1/32 via 10.0.2.1 dev AS2-eth0`
-- Verified reachability with `ping` to all four AS1-side loopbacks plus 10.255.1.1 and 198.82.0.1 — 0% loss everywhere.
+**Routing changes**
+- `ip route add 4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1` — AS1's loopback.
+- `ip route del default via 10.0.2.1 dev AS2-eth0` — removed the inappropriate default route.
+- `ip route add 128.173.0.0/16 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1` — AS1 customer Uni aggregate.
+- `ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1` — AS1 customer EveLink.
 
-**KP WHY investigation (10.0.0.99 / acm.org)**
-- `ip route get 10.0.0.99` → matched default via 10.0.2.1 (AS1), confirming my side has no specific route and falls back to default — exactly the behavior that produces a ping-pong with AS1, who also defaults to me.
-- `ss -tulnp | grep :53` and `ps aux | grep dnsmasq` → found multiple dnsmasq instances on the host:
-  - On 10.255.3.1 (my loopback): `--address=/acm.org/198.82.0.1` — correct.
-  - On 10.255.2.1 (AS1's loopback): `--address=/acm.org/10.0.0.99` — stale.
-  - A user-side dnsmasq pointing at 10.255.2.1 as upstream.
-- Confirmed externally with `dig`: `@10.255.3.1 acm.org → 198.82.0.1`, `@10.255.2.1 acm.org → 10.0.0.99`.
-- Sent a KP diagnosis to AS1 with FIX recommendation (correct the static entry on their resolver).
-- After AS1 reported the fix, re-ran `dig @10.255.2.1 acm.org` → `198.82.0.1` ✓. Symptom verified gone.
+**Verification pings (all 0% loss)**
+- 4.2.2.1 (40 ms), 198.82.0.1 (34 ms), 128.173.0.1 (60 ms), 128.173.10.1 (64 ms), 91.214.0.1 (60 ms).
 
-## 2. Justification for Each Decision
+**Messages**
+- Sent hello/advertisement to AS1 with my loopback + ACM customer prefixes.
+- Sent hello to ACM advertising my loopback and offering transit.
+- Sent a follow-up advertisement to AS1 listing ACM's three prefixes with next-hop 10.0.2.2.
+- Sent an updated reachability list to ACM, clarifying I have no default upstream.
 
-- **Advertise only my loopback + customer prefixes to AS1.** Standard transit policy: a peer should only see my own and my customers' prefixes, not internal transit links or someone else's internals. After ACM confirmed 10.255.7.1 and 10.0.4.0/30 were internal, I explicitly withdrew them from the advertisement.
-- **Install AS1's four loopbacks via 10.0.2.1.** Concrete /32 next-hops were given and AS1 is my peer; routes are low-risk, easily reversible, and required to reach AS1's customers.
-- **Default route via AS1 left in place.** Pre-installed; appropriate for upstream reachability and didn't conflict with anything ACM owns.
-- **Did not suppress ICMP redirects, did not install a null route for 10.0.0.99.** The "loop" is the correct behavior for a destination nobody owns; suppressing redirects would mask a symptom whose true cause was DNS. Also, changes to ICMP behavior touch other parties' traceroute observations, so I deferred the decision to AS1 (who declined — agreed).
-- **Did not modify AS1's resolver.** That host is in AS1's administrative domain. Per the admin-approval policy, fixing it from my side would be both out of scope and overreach. I produced a clear FIX recommendation instead.
-- **Verified the fix directly with `dig` before reporting success.** The instructions explicitly required confirming the symptom was gone via direct observation, not just trusting the remote agent's report.
+## 2. Justification
 
-## 3. What I Discovered About the Network
+- **Advertising my loopback first**: stable end-to-end addressing needs every node to know it.
+- **Installing only what neighbors advertised**: per the lab rules, routes are exchanged via messages; no routing daemon.
+- **Removing the default via AS1**: AS1 is a peer (settlement-free), not a provider. Keeping a default through a peer would (a) imply they provide me transit, which they don't, and (b) cause traffic to be black-holed at AS1 for any destination outside AS1's customer cone.
+- **Re-advertising ACM's prefixes to AS1 but not AS1's prefixes to AS1's neighbors**: standard valley-free routing — I announce customer routes to peers, and peer routes only to customers. This is also what AS1 explicitly asked for.
+- **Telling ACM the real reachable set**: ACM was using 0.0.0.0/0 via me. Since I cannot reach the whole Internet, it would be misleading to leave them assuming full transit. I listed the prefixes that actually work so they understand the scope.
+- **Volume of AS1's advertisement (5 prefixes)** was small and consistent with their expected role; no anomaly check beyond inspection was warranted.
 
-- Topology around me: AS1 (peer) on eth0, ACM (customer) on eth1; behind AS1 sit Uni and User (and EveLink); behind ACM sit the acm.org web server (198.82.0.1) and internal infra (10.255.7.1, 10.0.4.0/30).
-- Both AS1 and AS2 carry a default route pointing at each other for unknown destinations — typical peer-with-default arrangement that becomes a TTL-bounded loop for unowned addresses.
-- Three DNS resolvers coexist on this testbed host: mine on 10.255.3.1 (correct), AS1's on 10.255.2.1 (was stale), and the user-side resolver forwarding to 10.255.2.1. The naming-layer bug is what users actually experienced; the data-plane loop was just its tail.
-- End-to-end latencies (one-way ping RTT) reflect the topology: ACM ~30 ms, AS1 ~40 ms, Uni ~60 ms, User ~64 ms.
+## 3. Discoveries About the Network
+
+- **Topology learned**: AS2 sits between AS1 (peer) and ACM (customer). AS1 has its own customers Uni (128.173.0.0/16, with downstream User 128.173.10.1) and EveLink (91.214.0.1). ACM originates 192.107.102.1, 198.82.0.1, 137.54.0.1.
+- **Loopbacks**: AS1 = 4.2.2.1, AS2 = 154.54.1.1, ACM loopback = 192.107.102.1.
+- **No upstream provider visible to AS2**: I am a transit ISP for ACM but have only peering with AS1, so I have no path to destinations outside the union {ACM cone ∪ AS1 cone ∪ AS1 itself}.
+- **Latency profile**: ~30–40 ms one peer hop, ~60 ms two peer hops, ~64 ms three hops — consistent with the netem delay shaping on the links.
 
 ## 4. Coordination With Other Agents
 
-- **ACM (customer):** Exchanged prefix advertisements, clarified which prefixes were ACM-originated vs. internal, confirmed default route via me, offered my DNS resolver, and shared the externally-reachable loopback list (AS1, Uni, User, EveLink, me) for their end-to-end testing. Informed them when AS1 fixed the DNS bug.
-- **AS1 (peer):** Exchanged advertisements, reconciled an initial over-broad advertisement from me (I withdrew 10.255.7.1, 10.0.3.0/30, 10.0.4.0/30 from external propagation), installed their four customer/loopback prefixes. Handled their KP WHY for 10.0.0.99: delivered diagnosis (stale DNS at 10.255.2.1, not a routing bug on my side), recommended FIX on their resolver, and after they applied it, independently verified with `dig` and confirmed closure. Returned CANNOT for any further action on my side since the residual data-plane behavior is correct for an unowned destination.
+- **AS1 (peer)**: Exchanged hellos, loopback addresses, and customer prefix lists. Both sides agreed explicitly on peering policy (no transit re-advertisement to other peers; only to customers). AS1 advertised 4.2.2.1/32, 128.173.0.0/16 (with 128.173.0.1, 128.173.10.1 covered), and 91.214.0.1/32 with next-hop 10.0.2.1.
+- **ACM (customer)**: Exchanged hellos; ACM confirmed the three origin prefixes (192.107.102.1, 198.82.0.1, 137.54.0.1) and its default route via 10.0.3.1. I followed up with an honest reachability list so ACM understands what its default through me actually covers.
+- **No KP WHY/FIX queries** were raised during this experiment — the network converged via the routing exchange alone.

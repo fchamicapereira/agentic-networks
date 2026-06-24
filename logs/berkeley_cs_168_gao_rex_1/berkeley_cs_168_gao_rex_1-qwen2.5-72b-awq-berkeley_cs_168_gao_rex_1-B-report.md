@@ -1,0 +1,1 @@
+I observed that the link to S (10.0.2.2) was in a FAILED state, and later in a STALE state, which affected connectivity. I decided to check and refresh the ARP cache, verify the routing table, and add a specific route to S's loopback address (99.12.0.1). These actions were taken to resolve the connectivity issues and ensure that S could reach my loopback address (50.16.0.1).

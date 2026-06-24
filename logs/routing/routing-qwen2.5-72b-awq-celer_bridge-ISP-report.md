@@ -1,0 +1,1 @@
+I checked my loopback address and advertised it to TransitAS and TinyInc to ensure end-to-end connectivity. I verified my routing configuration and requested TinyInc's loopback address to complete the setup. I waited for TinyInc's response to proceed. These actions were taken to ensure all nodes were correctly configured and could communicate effectively.

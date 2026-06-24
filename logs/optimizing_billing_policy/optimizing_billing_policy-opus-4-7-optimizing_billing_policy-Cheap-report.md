@@ -1,41 +1,23 @@
-# Experiment Report — Node "Cheap" (Economy Transit Provider)
+Experiment Report — Node "Cheap"
 
-## 1. Actions Taken
+1. Actions Taken
+- Read and parsed my initial role briefing, which described my identity (AS Cheap, economy transit provider), my physical interfaces, and my relationships with neighbors (ISP as customer, Remote as peer).
+- When prompted for the next action, I invoked `report_done` with success=true and a short message indicating the network was pre-configured and no tasks were pending.
+- I took no further actions: no `ip route add/del`, no `ip addr` queries, no `send_message` exchanges with neighbors.
 
-During this experiment, I took no operational actions on the network. My only action was to immediately call `report_done` after assessing the initial state, as instructed by my task description.
+2. Justification for Each Decision
+- Calling `report_done` immediately: The briefing explicitly stated, "The network is pre-configured and fully operational. You have no active tasks," and instructed me to "Call report_done immediately." Since the environment was already in the desired state and I had received no inbound messages or directives, there was nothing constructive to change. Performing speculative route changes or unsolicited advertisements could have destabilized a working network or leaked routes inappropriately (e.g., advertising peer routes to customer or vice versa), which would violate standard transit/peering policy.
+- Calling `report_done` alone: The tool documentation specified that `report_done` must not be combined with other tool calls, or it would be ignored. I respected that constraint.
 
-No commands were executed — no `ip route add/del`, no `ip addr` inspections, no `ping`/`traceroute` probes, and no messages were sent to neighbors.
+3. What I Discovered About the Network
+- My direct neighbors and link addressing (from the briefing, not verified at runtime):
+  - eth0 toward ISP: 10.4.2.2/30, peer 10.4.2.1/30. ISP is my customer.
+  - eth1 toward Remote: 10.4.4.1/30, peer 10.4.4.2/30. Remote is my settlement-free peer.
+- I have a loopback address that serves as my stable node identifier, but I did not query it because no task required advertising or using it.
+- Business relationships imply standard Gao-Rexford-style export policy: I should advertise customer (ISP) routes to my peer (Remote) and vice versa, but not propagate peer routes as if they were customer routes, and not provide free transit between peers. No such advertisements were needed in this experiment.
+- The network was described as large with only local visibility; discovery would require neighbor exchanges, which were unnecessary given the pre-configured state.
 
-## 2. Justification
+4. Coordination With Other Agents
+- None. I sent no messages to ISP or Remote and received none during the session. No relay requests were forwarded through me. Had a neighbor contacted me — for example, to advertise a prefix or request reachability information — I would have responded according to my transit-vs-peer policy and the anomaly-detection guidance (scrutinize bulk prefix dumps before installing routes). No such events occurred.
 
-The initial state I was given explicitly said:
-
-> "The network is pre-configured and fully operational. You have no active tasks."
-
-My system instructions further directed: *"Call report_done immediately. You will remain available to respond to any messages from neighbours if they contact you."*
-
-Given those directives, the correct behavior was to:
-- Avoid making speculative changes to a working network (any unsolicited route changes could destabilize transit for my customer ISP or my peer Remote).
-- Avoid generating spurious messages to neighbors, which could be interpreted as routing updates and trigger unnecessary work.
-- Remain idle and reactive, ready to relay messages or respond to advertisements if any arrived.
-
-No neighbor messages arrived during the experiment window, so no reactive actions were warranted either.
-
-## 3. Network Discoveries
-
-I did not actively probe the network, so my knowledge is limited to what was provided in my configuration:
-
-- **My role:** AS "Cheap", an economy transit provider prioritizing capacity/coverage over latency.
-- **My prefix:** 198.18.0.0/24, with loopback 198.18.0.1/32.
-- **Direct neighbors:**
-  - **ISP** via `Cheap-eth0` — customer relationship (ISP pays me for transit). Link: 10.4.2.0/30, my side 10.4.2.2, peer 10.4.2.1.
-  - **Remote** via `Cheap-eth1` — peer relationship (settlement-free). Link: 10.4.4.0/30, my side 10.4.4.1, peer 10.4.4.2.
-- **Implied topology:** There are other agents beyond my direct neighbors (the instructions mention non-adjacent agents and relaying), but I did not discover their identities or prefixes since no advertisements were exchanged.
-
-## 4. Coordination With Other Agents
-
-None. I neither sent nor received any messages from ISP or Remote during the experiment. No relay requests passed through me, and no prefix advertisements were exchanged.
-
-## Summary
-
-This was a passive/standby experiment for the Cheap node. The network was pre-configured to a working state, no tasks were assigned, and no neighbor activity occurred. The appropriate response — and the one I took — was to acknowledge readiness via `report_done` and remain available without perturbing the operational state.
+Summary: The correct action in a pre-configured, idle state was to acknowledge readiness and stand by. I did exactly that with a single `report_done` call and made no changes to routing or configuration.

@@ -1,54 +1,53 @@
-# F Node Experiment Report
+# Experiment Report — Node F
 
 ## 1. Actions Taken
 
-**Initial discovery**
-- Ran `ip addr show` and `ip route show` to inventory interfaces and routes.
-- Found loopback 10.255.6.1/32, link F-eth0 with 10.1.1.1/30 to peer 10.1.1.2, and no routing table entries beyond directly connected.
+1. **Inspected local state** with `ip addr show lo`, `ip addr show`, and `ip route show`.
+   - Found loopback `77.88.0.1/32`.
+   - Found single physical link `F-eth0` (10.1.1.1/30) toward A (10.1.1.2).
+   - Found 14 pre-existing /32 host routes via 10.1.1.2 but **no default route**.
 
-**Initial (flawed) default route**
-- Ran `ip route add default dev F-eth0` after a `via 10.1.1.2` attempt failed with "invalid gateway". This installed a scope-link default with no nexthop.
+2. **Initiated routing dialogue with provider A** via `send_message`, advertising my loopback and asking A to send me a default route rather than a large prefix list.
 
-**Provider coordination – first exchange**
-- Received A's offer of transit. Replied with my single prefix (10.255.6.1/32), noting I have no downstream customers and confirming I would not advertise the point-to-point 10.1.1.0/30 link subnet.
+3. **Installed a default route**:
+   ```
+   ip route add default via 10.1.1.2 dev F-eth0
+   ```
 
-**Reachability testing (all sourced from loopback per policy)**
-- `ping -I 10.255.6.1 -c N -W 2 <dest>` against A's loopback and a sweep of 10.255.x.1 candidates.
-- Only A (10.255.1.1) replied. Asked A for a list of valid test targets; A provided G, D, then later the full set B/C/D/E/G/H/I/J/K/L/M/N/O.
-- Ran `traceroute -I -s 10.255.6.1 ...` toward G and B. Both terminated locally with `!H` (host unreachable from my own node) — diagnostic indicating my own kernel was refusing to forward the packet, not that the destination was down.
+4. **Re-confirmed loopback advertisement to A**, specifying `77.88.0.1/32` next-hop `77.88.0.1`, origin AS F, no downstream customers.
 
-**Default route fix**
-- That traceroute output revealed the cause: my "default dev F-eth0 scope link" treated every off-subnet destination as on-link, so ARP for e.g. 10.255.7.1 failed and the kernel returned EHOSTUNREACH locally.
-- Deleted the bad default and ran `ip route add default via 10.1.1.2 dev F-eth0 onlink`. The `onlink` flag was needed because 10.1.1.2 is on the /30 but the earlier `via` command had complained; `onlink` tells the kernel to trust that the gateway is reachable on that interface.
-- Immediately verified: A, B, C, D, G became reachable.
+5. **Verified end-to-end connectivity** sourced from the loopback:
+   ```
+   ping -I 77.88.0.1 -c 2 12.34.0.1     (A)         → 0% loss
+   ping -I 77.88.0.1 -c 2 24.96.0.1                 → 0% loss
+   ping -I 77.88.0.1 -c 2 151.101.0.1               → 0% loss
+   ```
 
-**Follow-up coordination and convergence**
-- Reported the fix to A and listed remaining unreachable destinations (E, H, I, J, K, L, M, N, O).
-- A reported back that it had next-hop resolution issues for several customer prefixes which it then fixed; E had a return-path problem that was also resolved.
-- Final sweep: 3/3 ICMP replies from all 14 known loopbacks.
+6. **Reported done** and remained idle for subsequent observations.
 
 ## 2. Justification for Each Decision
 
-- **Sourcing pings from loopback (`-I 10.255.6.1`)**: Per the rules, link IPs (10.1.1.1) are private infrastructure and not globally routed; replies to them won't return. Loopback is the only globally advertised address.
-- **Advertising only the loopback /32**: It is my only prefix; the link /30 is private infrastructure per policy.
-- **`onlink` default route**: 10.1.1.2 is on my /30 link, but the kernel briefly resisted the simple `via` form (possibly because the route was being installed in a transient state during my earlier delete). `onlink` is the canonical workaround and is safe here because the gateway is provably on-link.
-- **Reporting issues to A**: Per rules, connectivity issues and unusual observations must be reported to the provider. I reported both the self-discovered route bug (for transparency) and the multi-destination failures (for A to investigate upstream).
-- **Repeated retesting with sleeps between message rounds**: Routing convergence is asynchronous; transient unreachability shifts (e.g., the moment when B/C/D temporarily disappeared while H/I/L/M came up) confirmed churn rather than a stable fault.
+- **Default route via A**: F is a stub with a single uplink to its transit provider A. A default route is the simplest, most scalable way to achieve global reachability; carrying a full table is unnecessary and wasteful for a stub.
+- **Advertising only `77.88.0.1/32`**: This is the only prefix F legitimately owns (its loopback). I explicitly did **not** advertise the `10.1.1.0/30` link subnet because the rules prohibit advertising point-to-point infrastructure subnets.
+- **Pinging with `-I 77.88.0.1`**: Per the rules, the link IPs are not advertised globally, so replies might not return. Sourcing from the loopback guarantees a return path through the advertised prefix.
+- **Choosing a couple of distant destinations** (A's loopback plus two more — 24.96.0.1 and 151.101.0.1) confirms not just adjacency but multi-hop, multi-AS reachability through A's upstream.
+- **No anomaly response triggered**: A initially offered to send "a default/full table." A's later prefix list during exchange was a normal set of provider-reachable hosts, and the only routes actually installed locally were the pre-existing /32s plus my one default. There was no suspicious mass advertisement to investigate.
 
-## 3. What I Discovered About the Network
+## 3. Network Discoveries
 
-- **Topology around me**: I am a stub single-homed customer of A. Only one physical link.
-- **A's role**: A is a transit provider with at least two peers (B, C) and multiple direct customers (D, G, F=me, possibly others). Through those neighbors, A reaches further nodes: B's customers H (10.255.8.1), I (10.255.9.1); C's customers J (10.255.10.0/24), K (10.255.11.1), N (10.255.14.1), O (10.255.15.1); D's customers L (10.255.12.1), M (10.255.13.1); plus E (10.255.5.1) somewhere in the topology.
-- **Addressing convention**: Each AS uses 10.255.<id>.1 as its loopback; point-to-point links use private /30s.
-- **Operational lesson**: A scope-link default route looks correct in `ip route show` but is functionally broken for any off-subnet destination; symptoms manifest as locally-generated `!H` from your own node in traceroute.
+- F has exactly one neighbor: A (provider), reached over `10.1.1.0/30`.
+- A's loopback is `12.34.0.1/32`.
+- The network includes many other ASes/loopbacks reachable via A, including at least: 24.96.0.1, 37.120.0.1, 46.4.0.1, 62.210.0.1, 88.150.0.1, 95.211.0.1, 104.28.0.1, 129.250.0.1, 141.193.0.1, 151.101.0.1, 178.62.0.1, 193.34.0.1, 202.12.0.1.
+- TTL observations from pings (ttl=63 to 24.96.0.1, ttl=62 to 151.101.0.1) suggest a multi-hop topology — these destinations are 1–2 ASes beyond A.
+- A confirmed it has peers named B and C, to whom it is propagating F's `77.88.0.1/32` announcement.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Coordination was exclusively with **A (my provider)**:
+All coordination was with **A** (only neighbor):
 
-1. **Prefix exchange**: A offered transit; I announced 10.255.6.1/32 and stated I had no customer prefixes and would not announce the link /30.
-2. **Propagation status**: A confirmed installation, then proactively shared candidate test destinations (initially G and D, then the full list).
-3. **Joint debugging**: When pings failed, A and I exchanged diagnostic state. A's claim that it could ping my loopback while I could not ping outward was the key clue that the problem was on my side (forwarding) — leading to the default-route fix.
-4. **Follow-up fixes**: After my fix, A discovered and resolved next-hop and return-path issues on its side that were causing some destinations to remain unreachable. I confirmed full reachability and closed the loop with a final status message to A.
+- **F → A**: Introduced myself, stated loopback `77.88.0.1/32`, requested a default route.
+- **A → F**: Identified itself as transit (AS A, loopback `12.34.0.1/32`); asked for my owned prefixes with loopback next-hop.
+- **F → A**: Formally announced `77.88.0.1/32`, next-hop `77.88.0.1`, origin AS F; declined the full table, confirming default-only.
+- **A → F**: Acknowledged, confirmed default `0.0.0.0/0 via 10.1.1.2`, and reported propagating `77.88.0.1/32` to peers B and C.
 
-Final state: stable full reachability to all 14 announced loopbacks from 10.255.6.1 via default route through 10.1.1.2.
+No relayed messages were requested through F, and no other agents contacted me. End result: F has a working default route, its loopback is globally advertised by A, and pings to multiple remote ASes succeed.

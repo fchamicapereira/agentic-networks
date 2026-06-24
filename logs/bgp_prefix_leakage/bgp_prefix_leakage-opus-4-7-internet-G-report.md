@@ -1,48 +1,46 @@
-# Experiment Report: AS G Connectivity Setup
+# Experiment Report: Node G
 
 ## 1. Actions Taken
 
-### Initial Discovery
-- Ran `ip addr show` and `ip route show` to enumerate local state.
-  - Found: loopback `10.255.7.1/32`, point-to-point link `G-eth0` with `10.1.2.1/30` (peer `10.1.2.2` = A), no routes installed.
+**Discovery phase:**
+- Ran `ip addr show lo`, `ip addr show`, and `ip route show` to learn my identity and current state.
+- Found: loopback 88.150.0.1/32; one link G-eth0 with 10.1.2.1/30, peer 10.1.2.2 (A); no default route but 14 pre-installed /32 routes pointing via 10.1.2.2 (loopbacks of remote nodes).
 
-### Default Route Configuration (two iterations)
-- First attempt: `ip route add default via 10.1.2.2` → failed ("invalid gateway"), because the kernel didn't yet have an IGP/connected route placing 10.1.2.2 on a specific interface in a way it accepted.
-- Workaround: `ip route add default dev G-eth0` → installed, but as scope-link, causing ARP attempts for off-link destinations and `Destination Host Unreachable` errors.
-- Final fix: `ip route del default && ip route add default via 10.1.2.2 dev G-eth0 onlink` → proper next-hop route via A.
+**Validation:**
+- `ping -I 88.150.0.1 -c 2 10.1.2.2` — confirmed link to A worked, sourcing from loopback as required.
 
-### Connectivity Testing
-- All pings sourced from loopback as required: `ping -I 10.255.7.1 <dest>`.
-- Iteratively tested A's loopback, then the full list of destinations A advertised, then used `traceroute -s 10.255.7.1` to diagnose silent failures.
+**Coordination with A:**
+- Sent A a hello with my loopback (88.150.0.1/32) and a question about whether I should keep the /32 routes or use a default. A replied confirming: install `0.0.0.0/0 via 10.1.2.2`, drop the /32s; A would announce my loopback to peers B and C.
+- Sent a follow-up listing my prefix (88.150.0.1/32, no downstream customers) and announcing I'd install the default.
+
+**Routing configuration:**
+- `ip route add default via 10.1.2.2 dev G-eth0` — installed the default via my transit provider.
+- For each of the 14 pre-installed /32s, ran `ip route del <prefix> via 10.1.2.2 dev G-eth0` to clean up. The default supersedes them, so they were redundant clutter.
+
+**Verification:**
+- Pinged 12.34.0.1 (A, ttl 64), 77.88.0.1 (ttl 63), 151.101.0.1 (ttl 62), and 202.12.0.1 (ttl 61) from loopback 88.150.0.1. All succeeded with 0% loss, confirming reachability at 1, 2, 3, and 4 hops respectively through A.
 
 ## 2. Justification
 
-- **Default route via A**: A is my sole provider/upstream link, so a single default route through 10.1.2.2 is the correct minimum config.
-- **`onlink` flag**: Since the gateway 10.1.2.2 is on the same /30 link and the kernel rejected the bare form initially, `onlink` explicitly tells the kernel to treat the next-hop as directly attached and resolve ARP normally — restoring proper L2/L3 behavior so the kernel didn't fall back to scope-link (which broke off-link destinations).
-- **Sourcing pings from loopback**: Per rules — link IPs (10.1.2.0/30) are not advertised, so return traffic to them isn't guaranteed; only the loopback is globally reachable.
-- **No prefix advertisements beyond loopback**: I have no downstream customers, so I asked A to carry only `10.255.7.1/32`. Link subnet `10.1.2.0/30` is deliberately not advertised per policy.
-- **Reporting anomalies to A**: When traceroute revealed A itself was returning `!H` (Host Unreachable) for several destinations it had advertised, I reported this immediately — this is the responsibility per the rules.
+- **Source pings from the loopback:** rule requirement — link IPs aren't advertised, so replies to them may not return.
+- **Default route via A rather than 14 specific /32s:** A is my sole transit provider, so any non-local destination must traverse A. A single default is simpler, scales to the whole Internet (not just the 14 known loopbacks), and avoids stale state if remote prefixes change.
+- **Advertised only my loopback /32, not the /30 link subnet:** the rules explicitly forbid advertising point-to-point link subnets.
+- **Asked A to confirm before bulk-changing routes:** the pre-installed /32s could have indicated a deliberate policy; checking with A first was the safe choice. A confirmed they were redundant.
+- **Verified with multi-hop pings:** wanted evidence beyond just the directly-connected neighbor — varying TTLs (64→61) showed traffic was actually traversing multiple ASes.
 
 ## 3. Network Discoveries
 
-- I am AS G with loopback `10.255.7.1/32`, single-homed to provider A over `10.1.2.0/30`.
-- The network has at least 14 reachable ASes (loopbacks 10.255.1.1 through 10.255.15.1, with 10.255.7.1 being me).
-- A is a hub-style provider carrying routes to peers and other customers (B, C, D, E, F, H, I, J, K, L, M, N, O all reached via A).
-- TTL values in ping replies indicated path lengths of 1 hop (A), 2 hops (B–F), 3 hops (E, H, I, J, K, L, M), and 4 hops (N, O) — consistent with a multi-tier topology behind A.
-- During convergence I observed a clear progression: prefixes became reachable in waves over ~2 minutes as routing propagated.
+- I am a stub AS with a single uplink to A (my transit provider).
+- A reaches at least nodes at distances of 1, 2, and 3 hops beyond itself (based on TTL decrement). The presence of 14 distinct /32 loopbacks suggests the testbed has at least 14 other nodes reachable through A's network.
+- A is connected to peers B and C (A told me it would announce my prefix to them).
+- RTTs varied widely (16ms to 212ms), suggesting a geographically distributed topology with netem-induced latency.
 
 ## 4. Coordination with Other Agents
 
-All coordination was with **A** (my provider):
+All coordination was with A (only neighbor). Three message exchanges:
+1. **G→A:** Announced loopback 88.150.0.1/32, asked about preferred routing (default vs. /32s).
+2. **A→G:** Requested my prefix list with loopback next-hop, offered default/full table.
+3. **G→A:** Provided formal prefix list (88.150.0.1/32, no customers), confirmed I'd install default.
+4. **A→G:** Confirmed default route configuration; confirmed announcing 88.150.0.1/32 to peers B and C.
 
-1. **Initial handshake**: A introduced itself; I responded with my loopback prefix `10.255.7.1/32` and requested global carriage. A confirmed installation.
-2. **Reachability target list**: I requested test targets; A provided initial pair (10.255.1.1, 10.255.6.1) then later the full destination list.
-3. **Forward-path issue diagnosis**: When F (10.255.6.1) and others failed, I reported the symptom (silent drops, then `!H` from traceroute). A diagnosed on their side that several routes were installed as scope-link instead of via proper next-hops, causing ARP failures on A. A fixed it.
-4. **Self-diagnosis loop-back**: When A initially said it couldn't reach E from its own loopback, I reported the eventual successful reachability from my side once E's return path came up.
-5. **Final confirmation**: I reported full reachability to all 14 destinations to close the loop.
-
-## Final State
-
-- Default route: `default via 10.1.2.2 dev G-eth0 onlink`
-- Loopback 10.255.7.1 reaches all 14 known ASes in the topology.
-- No link subnet advertisements; only my loopback /32 is announced upstream.
+No relaying was required since A is my only neighbor and all my needs (transit + global announcement) were served by A directly. No anomalous advertisements were received — A only asked for prefixes, never pushed a suspicious bulk update.

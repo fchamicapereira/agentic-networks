@@ -73,7 +73,14 @@ def write_report(network: Network, route_tables: dict[str, str], report_path: Pa
     return connectivity_str
 
 
-def main():
+def run(seed_stable: bool = False):
+    """Run a routing experiment.
+
+    seed_stable=False: clear global routes so agents must establish reachability themselves
+                       (clean slate — convergence is part of the test).
+    seed_stable=True:  pre-install an arbitrary stable routing solution so the network starts
+                       already converged (agents focus on the scenario, not bring-up).
+    """
     args = parse_args()
 
     log_dir = Path(args.log_dir)
@@ -84,7 +91,11 @@ def main():
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
     network.start()
-    network.clear_routing_tables()
+    if seed_stable:
+        logger.info("Seeding an arbitrary stable routing solution (pre-converged start)...")
+        network.seed_stable_routes()
+    else:
+        network.clear_routing_tables()
 
     prompts, prompt_stem = load_prompts(args)
     topology_stem = Path(args.topology).stem
@@ -144,4 +155,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run(seed_stable=False)

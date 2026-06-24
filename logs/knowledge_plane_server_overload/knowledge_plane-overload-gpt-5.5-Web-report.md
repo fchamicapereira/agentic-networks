@@ -1,268 +1,171 @@
-Experiment Report — Web Node
+Experiment report — Web node
 
 1. Actions taken
 
-- Inspected local addressing and routing state:
+- Inspected local addressing and routing:
   - Ran:
     - `ip addr show lo`
     - `ip addr show Web-eth0`
     - `ip route show`
-  - Found loopback addresses:
-    - `10.255.7.1/32`
+  - Confirmed loopback addresses:
+    - `137.54.0.1/32`
     - `198.82.0.1/32`
-  - Found direct neighbor interface:
-    - `Web-eth0 = 10.0.4.2/30`
+  - Confirmed direct interface:
+    - `Web-eth0` = `10.0.4.2/30`
     - ACM peer = `10.0.4.1/30`
-  - Found default route already installed:
-    - `default via 10.0.4.1 dev Web-eth0 src 10.255.7.1`
+  - Confirmed existing default route:
+    - `default via 10.0.4.1 dev Web-eth0 src 137.54.0.1`
 
-- Advertised Web’s stable/service address to ACM:
-  - Sent ACM a message stating that Web’s stable semantic service address is `198.82.0.1`.
-  - Asked ACM to advertise reachability upstream and provide any needed routes.
+- Advertised Web’s stable/service addresses to ACM:
+  - Sent ACM a route advertisement for:
+    - `137.54.0.1/32`
+    - `198.82.0.1/32`
+  - No local route changes were required because the default route via ACM was already installed.
 
-- Installed ACM stable-address route:
-  - ACM advised that Web should use default via `10.0.4.1` and optionally install ACM’s stable address route.
+- Verified direct ACM connectivity:
   - Ran:
-    - `ip route show 10.255.1.1/32 | grep -q . || ip route add 10.255.1.1/32 via 10.0.4.1 dev Web-eth0`
-    - `ip route show`
-    - `ping -c 3 10.255.1.1`
-  - Installed:
-    - `10.255.1.1/32 via 10.0.4.1 dev Web-eth0`
-  - Verified ACM reachability with 3/3 ICMP replies.
+    - `ping -c 3 10.0.4.1`
+  - Result: 0% packet loss, ~4 ms RTT.
 
-- Verified upstream reachability through ACM/default:
-  - Ran:
-    - `ip route show default`
-    - `ping -c 3 10.255.3.1`
-  - Confirmed default route:
-    - `default via 10.0.4.1 dev Web-eth0 src 10.255.7.1`
-  - Verified AS2 loopback `10.255.3.1` with 3/3 ICMP replies.
-
-- Investigated HTTP 503 reported by ACM:
-  - Ran service and process inspection:
-    - `hostname`
-    - `ip addr show lo`
+- Responded to ACM’s status query:
+  - ACM reported it had route `198.82.0.1/32 via 10.0.4.2` and stable loopback `192.107.102.1/32`.
+  - I verified the Web service IP and local HTTP listeners:
+    - `ip addr show lo | grep -E 'inet (137\.54\.0\.1|198\.82\.0\.1)'`
     - `ss -ltnp`
-    - `ps -eo pid,ppid,comm,args,%cpu,%mem --sort=-%cpu | head -40`
-    - `curl -v --max-time 5 http://127.0.0.1/`
-    - `curl -v --max-time 5 http://198.82.0.1/`
-  - Observed:
-    - HTTP/HTTPS server listening on `198.82.0.1:80` and `198.82.0.1:443`
-    - Server process: `python3 /workspace/assets/kp_webserver.py`
-    - Local GET to `198.82.0.1/` returned `503 Service Unavailable`
-    - Several local curl loops were repeatedly requesting `/slow`.
-
-- Inspected web server code and slow-client processes:
-  - Ran:
-    - `ps -fp 1762,1770,1771,1772,1773,1774,1777,1779,1962,1963,1964 -ww`
-    - `tr '\0' ' ' </proc/1762/cmdline; echo`
-    - `ls -l /workspace/assets`
-    - `sed -n '1,240p' /workspace/assets/k* 2>/dev/null | head -240`
+    - `curl -sS -I --max-time 5 http://198.82.0.1/`
   - Found:
-    - `kp_webserver.py` uses `MAX_WORKERS = 3`
-    - `/slow` holds a worker semaphore for 90 seconds
-    - normal `GET /` returns 503 if the semaphore cannot be acquired
-    - five local bash/curl loops were repeatedly calling `http://198.82.0.1/slow`
+    - `198.82.0.1/32` configured on loopback.
+    - Listeners on `198.82.0.1:80` and `198.82.0.1:443`.
+    - HTTP `HEAD` returned `501 Unsupported method`, indicating reachability but unsupported HEAD handling.
 
-- Applied local low-risk fix for HTTP 503:
-  - Stopped the runaway local slow clients:
-    - `pkill -f 'curl -s --max-time 120 http://198.82.0.1/slow' || true`
-    - `pkill -f 'while true; do curl -s --max-time 120 http://198.82.0.1/slow' || true`
-  - Restarted the local web server to clear exhausted semaphore state:
-    - `kill 1762`
-    - `nohup python3 /workspace/assets/kp_webserver.py >/tmp/kp_webserver.log 2>&1 &`
-  - Verified listeners and HTTP status:
-    - `ss -ltnp | grep '198.82.0.1:80\|198.82.0.1:443'`
-    - `curl -sS -o /tmp/web_http_body -w 'HTTP_STATUS=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-  - Confirmed HTTP returned `200`.
-
-- Verified AS2 and AS1-side reachability:
+- Tested user-facing HTTP GET:
   - Ran:
-    - `ping -c 3 10.255.3.1`
-    - `ping -c 3 10.0.2.1`
-    - `ping -c 3 10.0.2.2`
-    - `curl -sS -o /tmp/web_http_body -w 'HTTP_STATUS=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-  - Confirmed:
-    - AS2 loopback `10.255.3.1`: reachable
-    - AS2-AS1 peer-link addresses `10.0.2.1` and `10.0.2.2`: reachable
-    - HTTP remained `200`
+    - `curl -sS --max-time 5 -o /tmp/web_http_body -w 'HTTP_CODE=%{http_code}\nREMOTE_IP=%{remote_ip}\nTIME_TOTAL=%{time_total}\n' http://198.82.0.1/`
+  - Result:
+    - `HTTP_CODE=503`
+    - Body: `503 Service Unavailable`
+  - Also tested ACM loopback reachability:
+    - `ping -c 3 192.107.102.1`
+  - Result: 0% packet loss, ~4 ms RTT.
 
-- Confirmed ownership of Web loopback prefix:
-  - Reported to ACM that `10.255.7.1/32` is a legitimate Web loopback/stable node address on `lo`.
-  - Confirmed ACM/AS2 may advertise it upstream.
-
-- Rechecked HTTP and HTTPS after ACM requested further validation:
+- Investigated the local HTTP 503:
   - Ran:
-    - `ps -eo pid,ppid,comm,args --sort=pid | grep -E 'kp_webserver|/slow|curl' | grep -v grep || true`
-    - `curl -sS -o /tmp/web_http_body -w 'HTTP_STATUS=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-    - `curl -k -sS -o /tmp/web_https_body -w 'HTTPS_STATUS=%{http_code}\n' --max-time 5 https://198.82.0.1/`
-  - Confirmed:
-    - no active `/slow` curl loops remained
-    - HTTP returned `200`
-    - HTTPS returned `200`
+    - `ss -ltnp`
+    - `ps -ef | grep -E 'python3|nginx|http|web' | grep -v grep`
+    - Inspected Python process command lines and working directories under `/proc`.
+    - `curl -sS -v --max-time 5 http://198.82.0.1/`
+  - Found the web server process:
+    - `python3 /workspace/assets/kp_webserver.py`
+  - Found multiple local load-generating processes repeatedly calling:
+    - `curl -s --max-time 120 http://198.82.0.1/slow`
+  - Confirmed `GET /` returned HTTP 503 locally.
 
-- Investigated later Uni/User-specific 503 report:
-  - Checked connections, threads, Host/SNI behavior, and local status:
-    - `date`
-    - `ss -tnp state established '( sport = :80 or sport = :443 )' || true`
-    - `ss -tnp state syn-recv '( sport = :80 or sport = :443 )' || true`
-    - `ps -L -p $(pgrep -f '/workspace/assets/kp_webserver.py' | head -1) -o pid,tid,stat,comm,wchan:30`
-    - `curl --noproxy '*' -k -sS -o /tmp/ip_https -w 'IP_HTTPS_STATUS=%{http_code}\n' --max-time 5 https://198.82.0.1/`
-    - `curl --noproxy '*' -k --resolve acm.org:443:198.82.0.1 -sS -o /tmp/host_https -w 'HOST_HTTPS_STATUS=%{http_code}\n' --max-time 5 https://acm.org/`
-    - `curl --noproxy '*' -sS -H 'Host: acm.org' -o /tmp/host_http -w 'HOST_HTTP_STATUS=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-  - Confirmed:
-    - no active established web connections
-    - no thread exhaustion
-    - HTTPS to IP returned `200`
-    - HTTPS with SNI/Host `acm.org` returned `200`
-    - HTTP with `Host: acm.org` returned `200`
-
-- Verified return path and reachability to affected Uni/User source:
+- Inspected web server code:
   - Ran:
-    - `ip route get 10.255.6.1`
-    - `ping -c 3 10.255.6.1`
-  - Found:
-    - route to `10.255.6.1` via `10.0.4.1 dev Web-eth0 src 10.255.7.1`
-    - ICMP to `10.255.6.1` succeeded 3/3
+    - `sed -n '1,240p' /workspace/assets/kp_webserver.py`
+  - Discovered:
+    - The server binds to `198.82.0.1`.
+    - It listens on ports 80 and 443.
+    - It uses `MAX_WORKERS = 3`.
+    - Requests to `/slow` acquire a semaphore and sleep for 90 seconds.
+    - Normal requests return 503 if the semaphore cannot be acquired.
 
-- Started a short packet capture for coordinated Uni/User retest:
-  - Ran:
-    - `timeout 60 tcpdump -i Web-eth0 -nn -tttt -s 160 'host 10.255.6.1 and (tcp port 80 or tcp port 443)' > /tmp/uni_web_capture.txt 2>&1 &`
-  - Purpose was to observe whether requests from Uni/User reached Web during the reported source-specific issue.
-  - Later reviewed the capture and performed final HTTP/HTTPS checks:
-    - `wc -l /tmp/uni_web_capture.txt`
-    - `tail -40 /tmp/uni_web_capture.txt`
-    - `curl --noproxy '*' -k -sS -o /tmp/final_https -w 'HTTPS_STATUS=%{http_code}\n' --max-time 5 https://198.82.0.1/`
-    - `curl --noproxy '*' -sS -o /tmp/final_http -w 'HTTP_STATUS=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-  - Final local HTTP/HTTPS checks both returned `200`.
+- Stopped local overload generators:
+  - Ran commands using `pkill -f` to terminate recurring `/slow` curl loops:
+    - `pkill -f 'curl -s --max-time 120 http://198\.82\.0\.1/slow' || true`
+    - `pkill -f 'while true; do curl -s --max-time 120 http://198\.82\.0\.1/slow' || true`
+  - Verified only the web server process remained.
 
-2. Justification behind each decision
-
-- I first inspected addresses and routes because Web did not have a global topology view. I needed to identify the stable loopback address, directly connected neighbor, and current routing table before advertising reachability or adding routes.
-
-- I advertised `198.82.0.1/32` to ACM because this is Web’s semantic service address for `acm.org`, and ACM is the only directly connected neighbor and organizational peer responsible for upstream advertisement.
-
-- I kept the default route via ACM because ACM confirmed it provides transit through AS2. Since Web is a host with a single neighbor, default routing through ACM is sufficient and avoids unnecessary specific static routes.
-
-- I installed `10.255.1.1/32 via 10.0.4.1` because ACM explicitly recommended it for ACM stable-address reachability. This was local, low-risk, and easily reversible.
-
-- I did not install extra routes for AS2 or AS1-side prefixes because ACM stated they were reachable through the existing default route. Adding unnecessary specific routes would increase configuration complexity without benefit.
-
-- I investigated the HTTP 503 locally because ICMP reachability was working but application-layer HTTP failed. This indicated that the network path was likely functional and the fault was probably on Web’s service process or application behavior.
-
-- I inspected the server process and code because the returned server banner was `nginx/1.18.0`, but the actual listener was a Python process. The code revealed the exact overload behavior: a three-worker semaphore and `/slow` endpoint that could deliberately exhaust workers.
-
-- I killed the local `/slow` curl loops because they were local self-load, not legitimate user traffic or security policy. Removing them was a local operational cleanup, low-risk, and reversible. It did not alter access control, authentication, firewall policy, rate limits, or routing.
-
-- I restarted the web server because the semaphore workers could remain blocked for up to 90 seconds due to `/slow` requests. Restarting the local service cleared the exhausted worker state and was a local, low-risk remediation.
-
-- I verified HTTP and HTTPS directly after the fix because KP guidance required confirming that the original symptom was gone before reporting success.
-
-- I confirmed `10.255.7.1/32` ownership because AS2 asked whether ACM was legitimately advertising it. Since it was configured on Web’s loopback, I confirmed it as a legitimate Web stable node address.
-
-- I investigated Host/SNI behavior when Uni/User still reported 503 because ACM and AS2 were seeing 200, making the problem appear source-specific or request-specific. Testing with both direct IP and `acm.org` Host/SNI allowed me to check whether the application behaved differently based on hostname.
-
-- I checked the route and ping to `10.255.6.1` because Uni/User source reachability and return path needed to be verified before concluding the problem was outside Web.
-
-- I started a short packet capture because the Uni/User-specific 503 could not be reproduced locally. A capture for `10.255.6.1` on TCP ports 80/443 was a diagnostic-only action and did not change network or security policy.
-
-- I did not make any access-control, firewall, authentication, rate-limit, or security-policy changes because no evidence showed such a change was necessary, and the admin policy prohibited autonomous changes in those areas.
-
-3. What I discovered about the network
-
-- Web has one physical neighbor:
-  - ACM on `Web-eth0`
-  - Web IP: `10.0.4.2/30`
-  - ACM peer IP: `10.0.4.1/30`
-
-- Web loopback addresses are:
-  - `198.82.0.1/32` — semantic service address for `acm.org`
-  - `10.255.7.1/32` — Web stable node loopback address
-
-- Web’s default route is:
-  - `default via 10.0.4.1 dev Web-eth0 src 10.255.7.1`
-
-- Added route:
-  - `10.255.1.1/32 via 10.0.4.1 dev Web-eth0`
-  - This provides explicit reachability to ACM’s stable loopback.
-
-- ACM provides upstream/default reachability to AS2.
-
-- AS2 loopback `10.255.3.1/32` is reachable from Web through ACM/default.
-
-- AS2-AS1 peer-link addresses are reachable from Web:
-  - `10.0.2.1`
-  - `10.0.2.2`
-
-- Uni/User source `10.255.6.1` was reachable from Web:
-  - route via ACM/default
-  - ICMP succeeded 3/3
-
-- The main incident was not a routing failure. ICMP and TCP/TLS connectivity worked. The actual failure was application-layer service overload on Web.
-
-- The HTTP service is implemented by:
-  - `python3 /workspace/assets/kp_webserver.py`
-  - listening on:
+- Restarted the local web server to clear occupied worker slots:
+  - Terminated existing `kp_webserver.py` process.
+  - Started:
+    - `nohup python3 /workspace/assets/kp_webserver.py >/tmp/kp_webserver.out 2>/tmp/kp_webserver.err &`
+  - Verified listeners:
+    - `ss -ltnp | grep '198.82.0.1'`
+  - Confirmed listeners on:
     - `198.82.0.1:80`
     - `198.82.0.1:443`
 
-- The server intentionally reports its version string as:
-  - `nginx/1.18.0`
+- Verified the fix locally:
+  - Ran:
+    - `curl -sS --max-time 5 -o /tmp/web_get_final -w 'HTTP_CODE=%{http_code}\nTIME_TOTAL=%{time_total}\n' http://198.82.0.1/`
+  - Result:
+    - `HTTP_CODE=200`
+    - ACM Digital Library HTML body returned.
+  - Rechecked:
+    - `ps -eo pid,ppid,stat,args | grep -E 'python3 /workspace/assets/kp_webserver.py|/slow|curl -s --max-time 120' | grep -v grep`
+  - Confirmed only the web server remained and `/slow` overload generators were absent.
 
-- The root cause of the 503s was local self-induced load:
-  - Five local bash/curl loops repeatedly hit `http://198.82.0.1/slow`.
-  - The `/slow` endpoint held worker slots for 90 seconds.
-  - The server only had `MAX_WORKERS = 3`.
-  - Once all workers were held, normal `GET /` returned `503 Service Unavailable`.
+- Asked ACM for external verification:
+  - Sent ACM a request to test HTTP GET from the ACM boundary.
+  - ACM verified:
+    - Direct `GET http://198.82.0.1/` returned HTTP 200.
+    - `http://acm.org/` resolved to `198.82.0.1` and returned HTTP 200.
+    - `https://acm.org/` with SNI/Host `acm.org` returned HTTP 200.
 
-- After stopping the loops and restarting the server:
-  - local HTTP returned `200`
-  - local HTTPS returned `200`
-  - ACM verified HTTP/HTTPS `200`
-  - AS2, AS1, and Uni/User later verified HTTP/HTTPS `200`
+- Reported completion:
+  - Called final completion after local and ACM boundary verification confirmed the original symptom was gone.
+
+2. Justification behind each decision
+
+- I inspected local interfaces and routes first because Web has no global topology view and must begin from directly observed local state.
+- I advertised `137.54.0.1/32` and `198.82.0.1/32` to ACM because ACM is Web’s only neighbor and is responsible for providing reachability into the broader network.
+- I did not add or delete any routes because the correct default route via ACM already existed:
+  - `default via 10.0.4.1 dev Web-eth0 src 137.54.0.1`
+- I verified direct link connectivity to ACM before relying on ACM for routing or relay functions.
+- I treated the HTTP `HEAD` result as non-conclusive because the server returned `501 Unsupported method`; the user-facing problem was HTTP GET, so I tested GET directly.
+- When HTTP GET returned 503 locally, I investigated the application instead of routing because ICMP and TCP reachability were working and the server itself was returning an application-layer error.
+- I inspected processes and server source code to determine whether 503 was intentional, due to overload, or caused by misconfiguration.
+- I stopped only the local overload-generator processes because they were local, non-security-related, reversible, and clearly causing worker exhaustion. This did not require admin approval under the experiment policy.
+- I restarted the web server because existing `/slow` requests had already occupied worker slots; stopping the generators prevented new load, but restarting cleared the held semaphore state immediately.
+- I did not modify firewall rules, ACLs, authentication policy, rate limits, or any security boundary because those changes require administrator approval.
+- I required ACM boundary verification before declaring full success because the Knowledge Plane instructions require confirming that the original externally observed symptom is gone, not merely that the local test passes.
+
+3. What I discovered about the network
+
+- Web is directly connected only to ACM:
+  - Web address: `10.0.4.2/30`
+  - ACM address: `10.0.4.1/30`
+- Web has two global loopback addresses:
+  - Stable node address: `137.54.0.1/32`
+  - ACM Digital Library service address: `198.82.0.1/32`
+- Web’s default route points to ACM:
+  - `default via 10.0.4.1 dev Web-eth0 src 137.54.0.1`
+- ACM’s stable loopback is:
+  - `192.107.102.1/32`
+- ACM had installed reachability for:
+  - `198.82.0.1/32 via 10.0.4.2`
+- The IP/routing layer was healthy:
+  - Web could ping ACM’s link address and loopback.
+  - ACM and AS2 reported ICMP reachability to `198.82.0.1`.
+- The failure was not a network routing failure. It was an application-layer service degradation on Web.
+- The HTTP server was a Python process emulating nginx:
+  - `python3 /workspace/assets/kp_webserver.py`
+  - It listened on `198.82.0.1:80` and `198.82.0.1:443`.
+- The service returned 503 because local recurring `/slow` requests exhausted the server’s worker semaphore.
+- After stopping overload processes and restarting the service, the ACM Digital Library became reachable locally, at the ACM boundary, and from external Uni/AS1 vantage points.
 
 4. Coordination with other agents
 
-- Coordinated only with directly connected neighbor ACM, as required.
+- Coordinated with ACM throughout the experiment:
+  - Reported Web’s loopback/service prefixes.
+  - Reported local interface and service status.
+  - Received ACM’s route status and stable loopback address.
+  - Received ACM’s WHY/FIX request for HTTP 503.
+  - Sent ACM detailed internal findings and repair status.
+  - Requested ACM boundary verification after the local fix.
+- ACM relayed an AS2 WHY request to Web:
+  - AS2 observed HTTP 503 from `154.54.1.1` while ICMP to `198.82.0.1` succeeded.
+  - I treated this as confirmation that the issue was user-visible beyond ACM.
+- After the fix, I asked ACM to relay a status update to AS2:
+  - Web found local worker exhaustion.
+  - Web stopped the overload processes.
+  - Web restarted the HTTP service.
+  - Web verified local GET returned 200.
+- ACM independently verified recovery from its boundary and reported sanitized public status externally.
+- ACM later reported that AS2/AS1/Uni also retested successfully:
+  - Ping succeeded.
+  - HTTP Host `acm.org` returned 200.
+  - HTTPS SNI/Host `acm.org` returned 200 with ACM Digital Library body.
 
-- Sent ACM initial route advertisement:
-  - Identified Web as connected on `10.0.4.2/30`
-  - Advertised service address `198.82.0.1/32`
-  - Requested route guidance
-
-- Received from ACM:
-  - instruction to keep default route via `10.0.4.1`
-  - confirmation that ACM advertised `198.82.0.1/32` upstream to AS2
-  - known upstream reachability information for AS2 and AS1-side prefixes
-
-- Responded to ACM’s internal WHY requests:
-  - Reported service diagnosis
-  - Explained the local `/slow` curl-loop overload
-  - Reported the fix applied
-  - Reported verified HTTP/HTTPS status
-
-- Responded to ACM’s route confirmation request:
-  - Confirmed `10.255.7.1/32` is a legitimate Web loopback/stable node address
-  - Authorized ACM/AS2 to treat it as legitimately reachable via Web/ACM
-
-- Provided ACM with information to relay to AS2:
-  - Web ownership of `10.255.7.1/32`
-  - reachability to `10.255.3.1/32`
-  - reachability to `10.0.2.1` and `10.0.2.2`
-
-- During the Uni/User-specific persistence report:
-  - Told ACM that Web could not reproduce the 503
-  - Reported current Web measurements as healthy
-  - Asked ACM to coordinate a Uni/User retest during a short packet capture
-  - Stated that public status could safely be summarized as healthy locally but degraded from one external vantage pending investigation
-
-- Received final confirmation from ACM:
-  - ACM verified recovery
-  - AS2 verified recovery
-  - AS1 and Uni/User verified recovery
-  - Incident was marked fixed/resolved
-  - No further testing or admin action was required
-
-Final outcome
-
-The experiment ended with Web service fully restored and verified from local, ACM, AS2, AS1, and Uni/User vantages. The fault was a transient Web-side application overload caused by local `/slow` curl loops. The remediation was local and operational only: stop the loops and restart the web server. No routing, security policy, access-control, firewall, authentication, or service configuration changes were made.
+No routing rules were changed during the experiment. The only repair actions were local process termination of overload generators and restart of the Web HTTP service.

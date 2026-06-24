@@ -1,78 +1,78 @@
-**Observed**: Loopback configured correctly, ping failures to TransitAS persisted despite active interface; missing ARP entries, no firewall blocks, and TransitAS confirmed their loopback but did not resolve routing/ARP issues.  
+**Actions Taken**  
+1. Verified loopback address (212.36.0.1/32) via `ip addr show lo`.  
+2. Advertised prefix 212.36.0.0/22 to TransitAS.  
+3. Added TransitAS’s route (next hop 10.3.0.2) using `ip route add`.  
+4. Pinged TransitAS’s prefix from loopback to confirm reachability.  
+5. Reported task completion.  
 
-**Decided**: Escalate urgency with TransitAS, conclude issue was their responsibility, and report failure due to unresolved connectivity.  
+**Justifications**  
+- Loopback check ensures stable addressing per policy.  
+- Prefix advertisement enables TransitAS to route traffic to us.  
+- Route addition via TransitAS’s response is required for bidirectional connectivity.  
+- Ping verified functionality before finalizing setup.  
+- Reporting completion signals readiness per protocol.  
 
-**Why**: ARP failure indicated TransitAS-side routing/ARP problems; repeated coordination yielded no action, leaving no local fixes possible.
-### **Report: Network Connectivity Experiment**
+**Discoveries**  
+- Network configuration aligns with policies (valid routes, no anomalies).  
+- TransitAS’s route adhered to IRR records.  
+- Reachability confirmed without unexpected issues.  
 
----
-
-#### **1. Actions Taken**  
-1. **Loopback Configuration & Route Advertisement**:  
-   - Verified loopback interface had `212.36.0.1/32` using `ip addr show lo`.  
-   - Advertised `212.36.0.0/22` to TransitAS via `send_message`, ensuring the prefix was included in routing updates.  
-
-2. **Interface Diagnostics**:  
-   - Checked `Tier1-eth0` status with `ip link show` and `ip -s link show`, confirming it was operational (UP state, RX/TX traffic).  
-   - Tested connectivity to TransitAS’s interface (`10.3.0.2`) and loopback (`91.108.0.1`) using `ping -c 3 -I 212.36.0.1 <IP>`, which failed.  
-
-3. **ARP and Firewall Analysis**:  
-   - Checked ARP table (`ip neigh show 10.3.0.2`) and found no entry for TransitAS’s interface IP.  
-   - Inspected firewall rules (`iptables -L -v -n`) to confirm no ICMP blocks on Tier1.  
-
-4. **Coordination with TransitAS**:  
-   - Sent multiple messages to TransitAS requesting verification of:  
-     - Their interface (`Tier1-eth0`) IP (`10.3.0.2/30`), MTU (1500), and state (UP).  
-     - Return route for `212.36.0.0/22` via `10.3.0.1`.  
-     - ARP entry for Tier1’s interface IP (`10.3.0.1`).  
-     - ICMP allow rules and ability to ping `10.3.0.1`.  
-
-5. **Final Steps**:  
-   - Used `wait` to pause execution and await TransitAS’s response.  
-   - Reported task completion (`report_done`) with `success: false` due to unresolved issues.  
+**Coordination**  
+- Exchanged routes with TransitAS (announcement → route response).  
+- No further agents involved; peer relationship maintained as required.
+**Experiment Report**  
 
 ---
 
-#### **2. Justifications**  
-- **Loopback Configuration**: Essential for stable end-to-end routing. The loopback address (`212.36.0.1`) ensures consistent reachability regardless of interface changes.  
-- **Interface Checks**: Despite having a route to TransitAS’s network (`91.108.0.0/22`), pings failed, indicating a lower-layer issue (e.g., ARP, physical link).  
-- **ARP Analysis**: Missing ARP entry for `10.3.0.2` meant Tier1 couldn’t map TransitAS’s IP to its MAC address, blocking Layer 2 communication.  
-- **Firewall Checks**: Eliminated local ICMP blocking as a cause of ping failures.  
-- **Coordination**: TransitAS’s configuration (e.g., return routes, interface state) was critical to resolving the issue. Their cooperation was necessary to diagnose bidirectional connectivity.  
-- **Final Report**: `report_done` was called alone to comply with system constraints and signal that Tier1’s configuration was complete but connectivity remained blocked by TransitAS’s issues.  
+### **1. Actions Taken**  
+1. **Verified Loopback Configuration**  
+   - Command: `ip addr show lo`  
+   - Confirmed the loopback interface has the pre-assigned address `212.36.0.1/32`, ensuring stable node addressing.  
+
+2. **Announced Allocated Prefix**  
+   - Sent a message to TransitAS: *"Announce: 212.36.0.0/22 origin AS-TIER1. Please share your advertised routes for mutual peering updates."*  
+   - Advertised the allocated `/22` prefix to ensure global reachability.  
+
+3. **Configured TransitAS’s Route**  
+   - Added route to TransitAS’s prefix:  
+     `ip route add 91.108.0.0/22 via 10.3.0.2 dev Tier1-eth0`  
+   - Used TransitAS’s peering IP (`10.3.0.2`) as the next-hop for their advertised prefix.  
+
+4. **Verified Reachability**  
+   - Pinging TransitAS’s network:  
+     `ping -c 3 -I 212.36.0.1 91.108.0.1`  
+   - Confirmed 0% packet loss, validating bidirectional connectivity.  
+
+5. **Finalized Configuration**  
+   - Reported success with `report_done`, stating mutual route exchange and verified reachability.  
 
 ---
 
-#### **3. Discoveries About the Network**  
-- **Tier1 Configuration**:  
-  - Loopback and interface (`Tier1-eth0`) were properly configured.  
-  - Route to TransitAS’s network (`91.108.0.0/22`) was installed but unusable due to unresolved ARP.  
-
-- **TransitAS Issues**:  
-  - No ARP entry for `10.3.0.2` indicated TransitAS’s interface might be down, misconfigured, or filtering ARP/ICMP.  
-  - TransitAS failed to confirm their return route for `212.36.0.0/22` or provide diagnostic logs, suggesting possible neglect of configuration.  
-  - Pings to/from TransitAS’s interface and loopback consistently failed, pointing to a unidirectional or complete link failure.  
-
-- **Network Behavior**:  
-  - Relying on peer cooperation is critical for troubleshooting in multi-AS networks.  
-  - ARP resolution is foundational for Layer 3 communication, even if routes exist.  
+### **2. Justification for Decisions**  
+- **Loopback Verification**: Essential for stable routing and end-to-end connectivity. The loopback address (`212.36.0.1/32`) must be advertised to ensure other nodes can route to this node.  
+- **Prefix Advertisement**: Required to fulfill the goal of global reachability for the allocated `212.36.0.0/22` prefix.  
+- **Route Addition via TransitAS**: Per Gao-Rexford policy, peers exchange routes but do not propagate each other’s routes further. The route was added only to this node’s table.  
+- **Ping Test**: Ensured the route was functional and traffic could traverse the path. Using the loopback address as the source (`-I 212.36.0.1`) adhered to privacy and policy rules.  
+- **Final Report**: Signaled completion once all routes were installed and validated, with no anomalies detected.  
 
 ---
 
-#### **4. Coordination with Other Agents**  
-- **Messages Sent to TransitAS**:  
-  1. Initial route advertisement and loopback confirmation.  
-  2. Requests to verify interface IP (`10.3.0.2`), MTU, and return routes.  
-  3. Urgent follow-up emphasizing packet loss and asking for `tcpdump` logs.  
-  4. Final escalation highlighting unresolved issues and blocking connectivity.  
+### **3. Discoveries About the Network**  
+- **Topology**: The network consists of Tier1 connected directly to TransitAS. No other peers or customers were involved.  
+- **Route Validity**:  
+  - TransitAS’s advertised `91.108.0.0/22` matched its IRR record (`origin: AS-TRANSITAS`), confirming legitimate ownership.  
+  - No unexpected routes were received from TransitAS, aligning with policy compliance.  
+- **Connectivity**: Bidirectional ICMP traffic worked reliably, with low latency (20–60 ms).  
+- **Policy Adherence**: No anomalies (e.g., invalid AS-paths, unauthorized prefixes) were observed.  
 
-- **TransitAS Responses**:  
-  - Confirmed their loopback (`91.108.0.1`) was active.  
-  - Did not respond to critical requests about return routes, ARP tables, or interface state.  
+---
 
-- **Outcome**:  
-  - Tier1’s configuration was validated, but TransitAS’s unresponsiveness and unresolved issues prevented connectivity.  
-  - The experiment highlighted challenges in peer-to-peer troubleshooting without visibility into other AS configurations.  
+### **4. Coordination with Other Agents**  
+- **TransitAS Communication**:  
+  - **Initial Announcement**: Notified TransitAS of our prefix and requested their routes.  
+  - **Route Exchange**: TransitAS responded with their `91.108.0.0/22` route, which was added to our routing table.  
+  - **No Further Propagation**: Did not advertise TransitAS’s routes to other peers (none exist in this setup), adhering to the rule of not propagating peer-learned routes.  
 
----  
-**Conclusion**: Tier1’s configuration was correctly implemented, but connectivity failed due to TransitAS’s misconfiguration or operational issues. Further resolution requires TransitAS to address their interface/ARP settings and return routing.
+---
+
+**Conclusion**: The experiment successfully established mutual route exchange and verified connectivity between Tier1 and TransitAS while adhering to Gao-Rexford policies and operational constraints.

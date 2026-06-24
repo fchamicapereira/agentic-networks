@@ -1,72 +1,58 @@
-# S Node Experiment Report
+# Experiment Report — Node S (AS-S)
 
-## 1. Initial State Discovery
+## 1. Actions Taken
 
-I began by inspecting my interfaces and routing table:
-- `ip addr show` revealed loopback **10.255.5.1/32**, S-eth0 (10.0.1.2/30 toward A), and S-eth1 (10.0.2.1/30 toward B).
-- `ip route show` returned an **empty routing table** — not even directly-connected link subnets were installed. This was the first issue to fix.
+**Discovery:**
+- Inspected local state with `ip addr show lo`, `ip addr show`, and `ip route show`.
+- Identified loopback 99.12.0.1/32, eth0 (10.0.1.2/30 → A), eth1 (10.0.2.1/30 → B).
 
-I installed the two directly-connected link routes:
-```
-ip route add 10.0.1.0/30 dev S-eth0
-ip route add 10.0.2.0/30 dev S-eth1
-```
+**Neighbor handshake (send_message):**
+- Greeted A (provider) and B (peer), announcing 99.12.0.1/32 with respective next-hops 10.0.1.2 and 10.0.2.1.
+- Received their loopbacks: A=23.20.0.1/32, B=50.16.0.1/32.
 
-Initial pings to link IPs (10.0.1.1, 10.0.2.2) failed even after this — consistent with the rule that link interface IPs are not advertised/answered. I switched to sourcing from my loopback for all subsequent tests.
+**Routes installed:**
+- `ip route add 23.20.0.1/32 via 10.0.1.1 dev S-eth0` — A's loopback
+- `ip route add 50.16.0.1/32 via 10.0.2.2 dev S-eth1` — B's loopback
+- `ip route add 72.21.0.1/32 via 10.0.2.2 dev S-eth1` — D's loopback (via peer B)
 
-## 2. Interaction with A (Provider)
+**Policy decision on 72.21.0.1/32 (D):**
+- Both A and B advertised it. Chose B (peer, settlement-free) over A (paid provider).
+- Politely declined A's offer without revealing my policy.
 
-A introduced itself first, identifying loopback **10.255.1.1/32** and asking me to install a default route via 10.0.1.1 and to share my prefixes.
+**Verification:**
+- Ran `ping -I 99.12.0.1 -c N <target>` from my loopback to all three remote loopbacks. All succeeded (0% loss).
+- One transient failure to 72.21.0.1 resolved after B's customer D installed return route.
 
-Decisions and actions:
-- Installed a default route via A: `ip route add default via 10.0.1.1 dev S-eth0`
-- Installed a specific route to A's loopback: `ip route add 10.255.1.1/32 via 10.0.1.1 dev S-eth0`
-- Replied with **only my own loopback 10.255.5.1/32**. I declined to share any other prefixes — at that point I had none, and per policy I would never advertise link subnets or another neighbor's prefixes to A.
-- Verified: `ping -I 10.255.5.1 10.255.1.1` succeeded (20 ms RTT).
+## 2. Justification
 
-A later announced reachability to **10.255.4.1/32** via the default route. I tested it: `ping -I 10.255.5.1 10.255.4.1` succeeded (60 ms RTT). This worked but routed through my paid provider — I would revisit this once B reported.
+- **Peer > Provider for 72.21.0.1/32:** B is a settlement-free peer; A charges for transit. Same prefix via peer is strictly cheaper.
+- **Did not advertise 72.21.0.1/32 to anyone:** I'm not D's transit provider; re-advertising a peer-learned prefix would give free transit to peers/providers, violating the "no transit for peers/providers" rule.
+- **Did not advertise A's prefix to B or vice-versa:** Same reason — would constitute unpaid transit.
+- **Only advertised my own loopback (99.12.0.1/32):** No customer prefixes existed; never advertised point-to-point subnets (10.0.1.0/30, 10.0.2.0/30) as those are private infrastructure.
+- **Pings sourced from loopback (`-I 99.12.0.1`):** Link IPs aren't advertised; replies to them might be dropped.
+- **Privacy:** Declined A's route without disclosing that peer B was preferred — kept policy/contracts confidential.
 
-## 3. Interaction with B (Peer)
+## 3. Network Discoveries
 
-I proactively messaged B twice; the first message went unanswered for a long time. Eventually B responded, identifying:
-- Loopback **10.255.2.1/32**
-- A downstream customer **10.255.4.1/32**
+- Direct neighbors: A (provider, AS A, loopback 23.20.0.1/32) and B (peer, AS B, loopback 50.16.0.1/32).
+- Indirect node D (loopback 72.21.0.1/32) is reachable via both A (AS-path A,D) and B (AS-path B,D, B's customer).
+- RTTs: ~20ms to A and B, ~60ms to D — consistent with D being 2 AS-hops away.
+- No anomalous bulk advertisements; no need to scrutinize for hijacks or leaks.
 
-Decisions and actions:
-- Installed specific routes via B:
-  ```
-  ip route add 10.255.2.1/32 via 10.0.2.2 dev S-eth1
-  ip route add 10.255.4.1/32 via 10.0.2.2 dev S-eth1
-  ```
-- The 10.255.4.1 route was the key revenue-relevant decision: **both A and B offered it, but B is a settlement-free peer while A is a paid provider**, so the peer path wins on policy. The specific /32 via B overrides the default via A.
-- Verified both: `ping -I 10.255.5.1 10.255.2.1` and `ping -I 10.255.5.1 10.255.4.1` succeeded.
-- Advertised only my own loopback 10.255.5.1/32 to B. When B asked what else I could reach, I deliberately did **not** mention 10.255.1.1 (A's loopback) — providing transit between my peer (B) and my provider (A) would violate policy and lose money (I'd pay A for traffic earning nothing from B).
+## 4. Coordination With Other Agents
 
-## 4. Network Discoveries
+- **With A (provider):** Exchanged loopback info; A acknowledged installing my prefix and offered upstream advertisement plus the 72.21.0.1/32 route. I declined the latter to save money.
+- **With B (peer):** Exchanged loopback info; agreed mutually on "no transit between us." B advertised its own + customer D's prefix. Reported a transient reachability issue to 72.21.0.1 which then self-resolved (likely D installing a return route to 99.12.0.1/32).
+- No relayed messages were requested or forwarded during this session.
 
-- **Topology:** S sits between provider A (AS containing 10.255.1.1) and peer B (AS containing 10.255.2.1). B has a downstream customer 10.255.4.1 that is also reachable through A — implying A and B are interconnected somewhere deeper in the network (possibly A is also a transit upstream for that customer or they have another path).
-- **Latencies:** A's loopback 20 ms; B's loopback 20–40 ms; 10.255.4.1 via B 60–100 ms (vs. 60 ms via A). Despite A's path being slightly lower-latency, policy (cost) dictates the peer path.
-- **Operational quirks:** No routes preinstalled at boot; link IPs unresponsive to ICMP. All testing must be sourced from the loopback.
-
-## 5. Final Routing Table
+## Final Routing Table
 
 ```
-default              via 10.0.1.1 dev S-eth0    (provider A — last resort)
-10.0.1.0/30 dev S-eth0                          (link)
-10.0.2.0/30 dev S-eth1                          (link)
-10.255.1.1/32        via 10.0.1.1 dev S-eth0    (A's loopback)
-10.255.2.1/32        via 10.0.2.2 dev S-eth1    (B's loopback, peer)
-10.255.4.1/32        via 10.0.2.2 dev S-eth1    (peer-preferred over provider)
+10.0.1.0/30 dev S-eth0 proto kernel scope link src 10.0.1.2
+10.0.2.0/30 dev S-eth1 proto kernel scope link src 10.0.2.1
+23.20.0.1   via 10.0.1.1 dev S-eth0   # A (provider)
+50.16.0.1   via 10.0.2.2 dev S-eth1   # B (peer)
+72.21.0.1   via 10.0.2.2 dev S-eth1   # D, via peer B (preferred over provider A)
 ```
 
-## 6. Coordination Summary
-
-- **With A:** Acknowledged provider relationship, accepted default route, shared only my loopback, tested A-advertised destination.
-- **With B:** Exchanged loopback identities, installed reciprocal /32 routes, confirmed bidirectional reachability, declined to share third-party prefixes.
-- **Confidentiality:** I never told either neighbor about the other, never revealed my routing preferences, contracts, or that I was deliberately deprioritizing A's path to 10.255.4.1 in favor of B's. Both peers see only neutral "here is my loopback" announcements.
-
-## 7. Revenue Posture
-
-- No customers present → no transit revenue earned.
-- Costs minimized: 10.255.4.1 traffic flows via free peer B instead of paid provider A; A is used only as last-resort default for unknown destinations.
-- No leaks: link subnets unadvertised, no peer↔provider transit provided.
+Outcome: all known destinations reachable; routing follows policy (peer preferred over provider); no transit leaks; revenue impact minimized by avoiding paid transit when free peer paths exist.

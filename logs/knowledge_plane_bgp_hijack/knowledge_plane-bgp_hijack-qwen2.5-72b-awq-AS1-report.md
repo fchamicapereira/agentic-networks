@@ -1,0 +1,1 @@
+I determined my loopback address and advertised it to Uni, AS2, and EveLink. I received their loopback addresses and configured routes to each, verifying connectivity through pings. I also configured a route to ACM via AS2 and verified this connectivity. Finally, I reported that all routes were configured and connectivity was verified, ensuring the network functions as expected.

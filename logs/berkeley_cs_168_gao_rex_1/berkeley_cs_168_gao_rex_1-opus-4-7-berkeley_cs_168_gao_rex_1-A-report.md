@@ -1,55 +1,52 @@
-# AS A Experiment Report
+# Experiment Report — Node A (AS A)
 
 ## 1. Actions Taken
 
-1. **Initial reconnaissance**: Ran `ip addr show` and `ip route show` to discover my own configuration.
-   - Found loopback `10.255.1.1/32`, two p2p links: `A-eth0` (10.0.1.1/30 to S) and `A-eth1` (10.0.4.1/30 to D).
-   - Routing table was empty (no default route, no IGP).
+1. **Discovered local state**
+   - `ip addr show lo` → loopback 23.20.0.1/32.
+   - `ip addr` / `ip route` → two physical links: A-eth0 to S (10.0.1.1/30) and A-eth1 to D (10.0.4.1/30). No pre-existing non-link routes.
 
-2. **Direct link reachability test**: `ping -I 10.0.1.1 10.0.1.2` and `ping -I 10.0.4.1 10.0.4.2` — both failed, consistent with the rule that link IPs are private infrastructure and replies may not return.
+2. **Introduced myself to both neighbors via send_message**, announcing my loopback 23.20.0.1/32 and asking them to share their loopbacks and any customer prefixes.
 
-3. **Outreach to customers**: Sent introductory messages to S and D offering transit, asking for their loopback prefixes, and requesting they install default routes pointing at me.
+3. **Installed customer routes** after they advertised:
+   - `ip route add 99.12.0.1/32 via 10.0.1.2 dev A-eth0` (S's loopback)
+   - `ip route add 72.21.0.1/32 via 10.0.4.2 dev A-eth1` (D's loopback)
 
-4. **Installed customer routes**:
-   - `ip route add 10.255.4.1/32 dev A-eth1` (D's loopback)
-   - `ip route add 10.255.5.1/32 dev A-eth0` (S's loopback)
-   - First attempt used `via 10.0.4.2`, which failed because the /30 next-hop wasn't yet covered by an interface route in my own table; switched to `dev`-only scope-link routes which worked.
+4. **Cross-advertised customer prefixes**:
+   - Told S about D's 72.21.0.1/32 with AS-path (A, D).
+   - Told D about S's 99.12.0.1/32 with AS-path (A, S).
 
-5. **Verified end-to-end**: Loopback-sourced pings from `10.255.1.1` to both `10.255.5.1` and `10.255.4.1` succeeded (20ms and 40ms RTT respectively).
+5. **Verified end-to-end reachability** sourced from my loopback:
+   - `ping -I 23.20.0.1 -c 2 99.12.0.1` → success (~20 ms).
+   - `ping -I 23.20.0.1 -c 2 72.21.0.1` → initially failed (D had no return route), then succeeded (~40 ms) after asking D to install a route back to 23.20.0.1/32 via 10.0.4.1.
 
-6. **Confirmed forwarding**: `cat /proc/sys/net/ipv4/ip_forward` returned `1`, so transit between S and D works.
+6. **Reported done** once both customer prefixes were reachable and properly cross-advertised.
 
-7. **Informed each customer** of the other's loopback to enable customer-to-customer transit traffic (revenue-generating per policy).
+## 2. Justification
 
-## 2. Justification of Decisions
-
-- **Offered transit to both S and D**: Both are my customers, and providing transit to customers is explicitly allowed and revenue-generating.
-- **Used `dev`-only host routes**: The link subnet didn't auto-appear with via-gateway support, and host routes pointing directly out the correct interface are unambiguous on a /30.
-- **Did not advertise link subnets (10.0.1.0/30, 10.0.4.0/30)**: Explicitly forbidden by the rules — these are private infrastructure.
-- **Only advertised customer loopbacks to other customers**: Done because there's a revenue incentive (traffic between two customers passes through me; both pay).
-- **Sourced all reachability tests from loopback `10.255.1.1`**: Per the rule that link IPs are not advertised.
-- **Did not disclose policies/contracts**: Messages to S and D were operational only; I didn't reveal pricing, the existence of the other customer in a way that exposes relationships, or my route preferences.
-- **Did not initially abandon failed pings**: When the first ping to 10.255.4.1 failed, I retried after a short wait rather than assuming the path was bad — D was still installing its default route.
+- **Installing routes for both customers**: S and D are my customers; providing them transit is the role I'm paid for. Installing both loopbacks lets me serve them and bill for any traffic crossing me.
+- **Cross-advertising S↔D**: Both are customers, so transit between them is policy-compliant and revenue-generating (I earn on both sides). I included AS-paths so they could evaluate the routes.
+- **Sourcing pings from 23.20.0.1**: Per the rules, link-IP replies are not guaranteed to return because those subnets are not advertised. Loopback-sourced pings exercise the real routing state.
+- **Not advertising link subnets (10.0.1.0/30, 10.0.4.0/30)**: Explicitly prohibited as private infrastructure.
+- **Not disclosing policies/relationships**: I told customers only what they need (prefix availability and AS-path), never that they are "customers" or revealing my business policy.
+- **No daemons used**: All routing was manual `ip route` plus message exchanges, as required.
 
 ## 3. Network Discoveries
 
-- I am a small AS with exactly two neighbors, both customers: **S** (loopback `10.255.5.1/32`) and **D** (loopback `10.255.4.1/32`).
-- Neither S nor D has any further customer prefixes to advertise; they only originate their own loopback traffic.
-- I have **no providers and no peers** — therefore no upstream connectivity to the broader Internet exists via my view of the topology.
-- Link RTTs: S is ~20ms away (10ms each way modeled), D is ~40ms away.
-- The only revenue opportunity available to me is transit between S and D (and any traffic they originate destined to each other's loopback).
+- I am directly connected only to S and D; no peers or upstream providers are visible from my vantage point.
+- **S (AS-S)**: loopback 99.12.0.1/32, no customer prefixes, peer IP 10.0.1.2. RTT ~20 ms.
+- **D (AS D)**: loopback 72.21.0.1/32, no customer prefixes, peer IP 10.0.4.2. RTT ~40 ms.
+- D did not initially have a route back to my loopback — I had to request it explicitly before the ping worked.
+- The current visible topology is a simple star: A in the middle with S and D as leaves. No further prefixes were learned, so no AS-path validation or anomaly detection was needed.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-- **D** initiated by announcing loopback `10.255.4.1/32`, requesting I route to it, and committing to install a default route via me. After I installed the route and the first ping failed, D confirmed in a follow-up message that the default route was installed and verified the loopback-to-loopback ping in both directions.
-- **S** responded with loopback `10.255.5.1/32`, no customer prefixes, and confirmation that a default route via `10.0.1.1` was installed.
-- I then informed each customer of the other's reachable loopback (without disclosing the commercial relationship) so they could exchange traffic via me.
+- **With S**: Exchanged loopback announcements; S advertised 99.12.0.1/32 origin AS-S; I acknowledged the install and offered 72.21.0.1/32 (path A,D). S noted the offer but chose not to install it at this time.
+- **With D**: D advertised 72.21.0.1/32 origin AS-D; I asked D to install a return route to 23.20.0.1/32 via 10.0.4.1, which restored bidirectional reachability. I also offered D the path to 99.12.0.1/32 (path A,S).
+- No relay messages were requested through me by any neighbor, and I had no non-adjacent agents to contact.
 
-## Final State
+Final routing table on A (besides link subnets):
+- `99.12.0.1/32 via 10.0.1.2 dev A-eth0`
+- `72.21.0.1/32 via 10.0.4.2 dev A-eth1`
 
-Routing table on A:
-```
-10.255.4.1 dev A-eth1 scope link
-10.255.5.1 dev A-eth0 scope link
-```
-IP forwarding enabled. Both customers reachable from my loopback. Customer-to-customer transit operational and policy-compliant.
+End state: stable, policy-compliant, full reachability between my loopback and both customer loopbacks; both customers are informed of each other's reachability through me.

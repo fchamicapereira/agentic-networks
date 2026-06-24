@@ -1,52 +1,62 @@
-# Uni Gateway — Experiment Report
+# Experiment Report — Uni Gateway Agent
 
 ## 1. Actions taken
 
-**Initial discovery (local vantage):**
-- `ip addr show lo` → found my loopback 10.255.5.1/32.
-- `ip route show` / `ip addr show` → confirmed pre-installed default route via AS1 (10.0.1.2) and a host route to the User loopback 10.255.6.1/32 via 10.0.6.1.
+**Initial inspection**
+- Ran `ip addr show lo`, `ip route show`, `ip addr show` to learn my own state.
+- Discovered loopback `128.173.0.1/32`, two interfaces (`Uni-eth0` to User, `Uni-eth1` to AS1), a pre-installed default route via AS1 (`10.0.1.2`), and a pre-installed /32 route to User's loopback `128.173.10.1` via `10.0.6.1`.
 
-**Neighbor handshake / advertising my prefixes:**
-- Sent a message to AS1 announcing my loopback (10.255.5.1/32) and the User loopback (10.255.6.1/32) reachable via me; asked AS1 to confirm default-route transit.
-- Sent a message to User confirming I am their gateway (10.0.6.2) and default route to the Internet.
+**Neighbor advertisements (via messages, not a routing daemon)**
+- Sent AS1 an advertisement of `128.173.0.1/32` and the downstream `128.173.10.1/32`, and stated that AS1 is my default upstream.
+- Sent User my loopback `128.173.0.1/32` and confirmed I provide default Internet egress via AS1.
+- Did not run any `ip route add` commands — the kernel already had everything needed; both neighbors were directly reachable on the connected subnets, and the pre-installed default + /32 to User covered everything. I deliberately did not touch routes that didn't need touching.
 
-**Routing additions (manual `ip route add`):**
-- `ip route add 10.255.2.1/32 via 10.0.1.2 dev Uni-eth1 src 10.255.5.1` — installed AS1's loopback as a /32 so I can address it directly.
-- AS1 confirmed they installed return routes for 10.255.5.1/32, 10.255.6.1/32, and 10.0.6.0/30 toward me.
+**Reachability verification**
+- `ping -c 2 4.2.2.1` (AS1 loopback) — 0% loss, 20ms.
+- `ping -c 2 128.173.10.1` (User loopback) — 0% loss, 4ms.
+- Later, `ping -c 3 198.82.0.1` (ACM) — 0% loss, 94ms.
 
-**KP investigation (User reported acm.org failing):**
-- Reproduced the symptom locally: `curl -i http://198.82.0.1/ -H "Host: acm.org"` → HTTP/1.1 503 Service Unavailable from nginx/1.18.0.
-- Verified L3: `ping -c 2 198.82.0.1` healthy (~94ms, TTL 61).
-- Verified the user's odd side-observation: `ping 8.8.8.8` from me returned "Destination Net Unreachable" from 10.0.1.2 (AS1) — i.e. an AS1-side routing gap, not local filtering.
-- Escalated a KP WHY to AS1 requesting external vantage points and an ACM diagnosis.
-- Sent an interim, non-definitive status update to the User when they asked, explicitly labeling it a hypothesis.
-- After ACM's authoritative response arrived (relayed via AS2 → AS1 → me), re-tested the symptom (`curl ... 503 still present`) and then closed with the User with a definitive **CANNOT** (fix owned by ACM).
+**KP investigation of user's acm.org 503 report**
+- Reproduced the symptom locally:
+  - `curl http://198.82.0.1/` → HTTP 503 in 0.19s
+  - `curl -k https://198.82.0.1/` → HTTP 503 in 0.29s
+  - `curl -I` returned `Server: nginx/1.18.0` — confirming a real origin web server actively replying.
+- Inspected my own filtering / NAT to rule out a transparent proxy on my side:
+  - `iptables -t nat -S` → only `POSTROUTING -o Uni-eth1 -j MASQUERADE`.
+  - `iptables -S` → all default ACCEPT, no FORWARD rules, no DNAT.
+- Escalated a KP WHY upstream to AS1 toward ACM, also flagging the user's secondary 8.8.8.8 TTL-exceeded observation.
 
-## 2. Justification for each decision
+**DNS verification (when investigating user's REFUSED resolver symptom)**
+- `ss -lnup | grep :53` and `ss -lntp | grep :53` — no DNS listener on the Uni gateway.
+- `cat /etc/resolv.conf` — `nameserver 127.0.0.1`.
+- `dig @4.2.2.1 acm.org` — NOERROR, A 198.82.0.1, 20ms — confirmed AS1's recursive resolver is healthy and authoritatively answers the name the user was failing to resolve locally.
 
-- **Manual `ip route add` only**, no routing daemon: required by policy.
-- **Adding the /32 for AS1's loopback**: a local, low-risk, easily reversible change — safe to do unilaterally.
-- **Advertising my loopback and the User prefixes upstream**: needed for end-to-end reachability per the loopback policy.
-- **Not closing with the User on a hypothesis**: policy requires a definitive FIX or CANNOT before closing. I sent interim updates clearly labeled as such when the User checked in.
-- **Re-testing after ACM's reply, before reporting closure**: policy requires direct verification that the symptom is unchanged/gone before reporting outcome.
-- **Closing as CANNOT rather than FIX**: the fault was at ACM's origin; Uni/AS1/AS2 have no authority over it. No firewall, NAT, or routing change on my side could affect it — and per policy, security/ACL changes would have required admin approval anyway.
-- **Not attempting to "fix" the 8.8.8.8 unreachability**: it was unrelated to the User's complaint and the missing route lives in AS1's table, not mine.
-- **Not acting on the client-side `host` REFUSED**: it's a laptop nsswitch/resolver config issue, outside my authority — explained but not changed.
+**Closing the ticket**
+- After receiving ACM's authoritative diagnosis via AS1, I sent the user a final CANNOT with full chain summary.
+
+## 2. Justification behind each decision
+
+- **Advertise loopback before doing anything else.** The instructions explicitly stated the loopback is the stable end-to-end address; both neighbors need it so return traffic can reach me. Using `send_message` rather than a routing daemon was mandated by policy.
+- **No new `ip route add` commands.** The pre-installed default and /32 already provided reachability everywhere I had paths. Inventing extra routes would be a change without a reason; the "easily reversible, local, low-risk" exception only authorizes me to *fix* my own table, not bloat it.
+- **Reproduce from my own vantage before escalating.** Policy: "Base every conclusion on what you directly tested or observed." A user-reported 503 could be local DNS, an L7 middlebox, or origin-side; I had to falsify the campus-side hypothesis from my own vantage before forwarding the WHY.
+- **Inspect iptables to rule out campus-side L7 interception.** The user explicitly asked whether a transparent proxy / captive portal could inject the 503. The only way to answer truthfully was to examine the actual filter/NAT tables on the gateway.
+- **Escalate rather than guess.** Even though my evidence (nginx Server header, fast 503, clean ping) strongly suggested origin-side, I did not declare that to the user — I escalated WHY upstream and waited for ACM's authoritative confirmation, per "do not close with the user in the meantime."
+- **Send the user a status update without closing.** When the user pinged for a status, I sent an intermediate update clearly marked as "not yet a definitive diagnosis" — this honors the "keep intermediate findings internal unless asked" spirit while still being responsive.
+- **Did not unilaterally deploy a campus DNS forwarder.** Bringing up :53 on the gateway would affect thousands of users and is a service change; per the admin-approval policy I flagged it but did not enable it.
+- **Did not touch firewall.** No firewall changes attempted — policy is clear that access-control changes always require admin approval, regardless of how local they appear.
+- **Treated the 8.8.8.8 sub-symptom as a separate issue.** The user had already noted it was probably unrelated; I flagged it to AS1 as a side observation rather than entangling it with the main WHY.
 
 ## 3. What I discovered about the network
 
-- I am Uni (loopback 10.255.5.1/32), gateway between User (10.0.6.0/30) and upstream AS1 (10.0.1.0/30).
-- AS1 (loopback 10.255.2.1) provides transit and advertised the reachable destinations through it: AS2 (10.255.3.1), EveLink (10.255.4.1), and ACM (10.255.1.1 / 198.82.0.1).
-- Topology of the KP chain for the acm.org case: **Uni → AS1 → AS2 → ACM**.
-- RTTs to 198.82.0.1: ~94ms from Uni, ~74ms from AS1, ~34ms from AS2 — consistent with that chain.
-- AS1 currently has **no route to 8.8.8.8** — a gap in its broader Internet transit, unrelated to the User's complaint but noted.
-- The acm.org symptom is an **application-layer 503 at ACM's origin** (nginx/1.18.0), confirmed by four independent KP vantages plus ACM itself. Network path is healthy end-to-end.
+- **Topology around me.** I am the gateway between the User network (`10.0.6.0/30`) and AS1 transit (`10.0.1.0/30`). AS1 in turn peers with AS2; AS2 reaches ACM (`198.82.0.1`) and others.
+- **Reachable destinations (per AS1):** 4.2.2.1 (AS1), 91.214.0.1 (EveLink), 154.54.1.1 (AS2), 137.54.0.1 / 192.107.102.1 / 198.82.0.1 (ACM region).
+- **Unreachable destinations:** 8.8.8.8 (and any public Internet destination not served by AS1/AS2/EveLink/ACM). There is no Tier-1 / true upstream in this topology — AS1 and AS2 are mutually peering, not transit-providing, despite both having originally pointed defaults at each other.
+- **A pre-existing bug fixed during this experiment:** AS1 and AS2 had stale mutual defaults plus ICMP `send_redirects`, producing a TTL-loop visible as "TTL exceeded" for 8.8.8.8. AS1 reported this fixed (defaults withdrawn, send_redirects disabled).
+- **DNS posture:** No campus forwarder runs on the Uni gateway. AS1's recursive resolver at 4.2.2.1 is functional and authoritative for the name the user cared about.
+- **acm.org service state:** Origin-side degradation, returning HTTP 503 from nginx/1.18.0. Network path through AS1→AS2→ACM is healthy end-to-end (verified by ping from me, from AS1, and from ACM internally).
 
 ## 4. Coordination with other agents
 
-- **User**: initial gateway/handshake confirmation; received their problem report and observations; sent one interim status update and one definitive CANNOT explaining the multi-vantage diagnosis and ACM's acknowledgement.
-- **AS1**: route exchange (I advertised 10.255.5.1/32, 10.255.6.1/32, 10.0.6.0/30; AS1 confirmed installation and provided default transit). KP WHY forwarded through AS1 to AS2 and then ACM. AS1 also performed independent vantage tests (ping + HTTP) and relayed AS2's and ACM's findings back to me.
-- **AS2 and ACM (indirectly, via AS1 relay)**: AS2 added its own independent vantage measurement; ACM provided the authoritative diagnosis confirming origin-side degraded availability with active investigation and no ETA.
-- No direct messaging to AS2/ACM (not adjacent); all multi-hop KP traffic went through AS1 as relay, which I treated as opaque end-to-end content per the relay policy.
-
-Outcome: gateway routing is stable and verified; the User's reported problem was diagnosed and closed with a definitive CANNOT, with a clear owner (ACM) and a commitment to relay any future status update from ACM.
+- **AS1 (upstream).** Exchanged loopback/prefix advertisements; AS1 installed routes for `128.173.0.1/32` and `128.173.10.1/32` via `10.0.1.1` and propagated them to AS2. Escalated the acm.org WHY to AS1, which relayed it onward to ACM via AS2 — I did not read or interpret the relayed payload from ACM on the return leg, forwarding the diagnosis verbatim to the user. AS1 also independently diagnosed and fixed the 8.8.8.8 routing loop together with AS2 and reported the result back, including the caveat about what is and is not reachable in this topology.
+- **User (downstream).** Advertised my loopback and gateway role. Received a KP WHY request about acm.org. Sent: (a) an initial acknowledgement, (b) a "status open" update when the user checked in, (c) a second "still open" update on a later check-in, and (d) the final definitive CANNOT with full chain summary once ACM's diagnosis arrived. Provided the interim DNS workaround (use 4.2.2.1) and explicitly flagged that deploying a campus DNS forwarder requires admin approval.
+- **No direct contact with AS2 or ACM.** They are non-adjacent; all communication with them was relayed through AS1 as required by the messaging policy.

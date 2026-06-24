@@ -1,0 +1,3 @@
+1. **Observed**: Initial routing table, messages from B about D's traceroute, and B's request to add a route to 88.99.0.1 via 10.0.12.1.
+2. **Decided**: Added the route as requested, verified reachability with a ping test, and reported the 100% packet loss to B.
+3. **Why**: To ensure the routing table was up-to-date, coordinate with B to resolve the reachability issue, and provide feedback for further investigation.

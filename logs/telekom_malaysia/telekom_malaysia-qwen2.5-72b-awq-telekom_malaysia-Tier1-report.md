@@ -1,0 +1,1 @@
+I observed reachability issues to 103.34.192.0/24 and 117.20.0.1/32, confirmed by failed ping tests and messages from Relay1. I decided to coordinate with Level3 to investigate the missing route for 117.20.0.1/32 and to check the status of the interface connected to Relay1. This was necessary to isolate the problem and ensure that the correct parties were informed to take action.

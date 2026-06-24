@@ -2,56 +2,48 @@
 
 ## 1. Actions Taken
 
-**Discovery / inspection:**
-- `ip addr show`, `ip link show`, `ip route show` to enumerate local interfaces and routing state.
-- Confirmed: loopback `10.255.3.1/32`, single physical interface `C-eth0` with `10.0.6.1/30` peering to D at `10.0.6.2`.
-
-**Routing configuration:**
-- `ip route add 10.0.6.0/30 dev C-eth0 src 10.255.3.1` — connected route for the point-to-point subnet, with the loopback as preferred source.
-- `ip route add 10.255.4.1/32 via 10.0.6.2 dev C-eth0` — D's customer loopback installed as requested.
-
-**Verification:**
-- `ping -I 10.255.3.1 10.255.4.1` — initially failed (ARP INCOMPLETE on D's side), succeeded after D installed its return route (2/2, ~40 ms RTT).
-
-**Coordination:** Replied to D acknowledging route installation; informed D that I would advertise its prefix upstream once I had an upstream.
+1. **Inspected local state**: Ran `ip addr show` and `ip route show`. Identified my loopback as 54.144.0.1/32 and my single physical link C-eth0 (10.0.6.1/30) to peer D (10.0.6.2).
+2. **Initiated contact with D**: Sent a hello message announcing my loopback (54.144.0.1/32) and requesting D's prefixes. First attempt failed due to case-sensitive neighbor naming ("d" vs "D"); resent successfully.
+3. **Verified L2 link**: `ping -c 2 10.0.6.2` succeeded (~40–80 ms RTT).
+4. **Received D's advertisement**: D announced 72.21.0.1/32, AS-path [D].
+5. **Installed customer route**: `ip route add 72.21.0.1/32 via 10.0.6.2 dev C-eth0`.
+6. **Verified end-to-end reachability**: `ping -c 2 -I 54.144.0.1 72.21.0.1` succeeded.
+7. **Advertised my loopback to D**: Sent 54.144.0.1/32 with AS-path [C], and informed D that I had no active upstream so no default could be offered yet.
+8. **Idled** while waiting for any upstream contact; none arrived.
+9. **Reported done** when no further productive action remained.
 
 ## 2. Justifications
 
-- **Installed `10.255.4.1/32` via D:** D is a paying customer; providing transit to customers is policy-required and revenue-positive.
-- **Sourced pings from `10.255.3.1`:** Per rules, link IPs are private infrastructure and replies to them may not return; loopback-sourced testing is the only reliable verification.
-- **Did not abandon the path on first failure:** Followed the rule to retry rather than fall back. Patience paid off — ARP eventually resolved after D fixed its side.
-- **Did not advertise the link subnet `10.0.6.0/30`:** Point-to-point subnets are private and must not be exported.
-- **Did not solicit transit relationships from D:** D is a customer; I will not accept transit from a customer (would violate the no-transit-for-customers-as-provider direction and break valley-free routing).
-- **Withheld policy/contract details:** When asking D about other neighbors, I declined to disclose my customer/provider/peer policy specifics — only said I "will not provide transit between non-customers."
+- **Loopback exchange first**: Per policy, only loopback prefixes (not the /30 link subnet) should be advertised, and loopbacks are the stable addresses required for end-to-end connectivity tests.
+- **Installing D's /32 via the link**: D is my customer, so I must accept and propagate its prefix. Installing the route is necessary to forward traffic on its behalf.
+- **Sourcing pings from loopback**: Required by the rules; link IPs are not globally advertised so replies might not return.
+- **Not advertising a default to D**: I never received any upstream advertisement and have no provider physically attached, so I cannot legitimately offer global transit. Telling D explicitly avoids it expecting transit it isn't getting.
+- **Not advertising D's loopback anywhere else**: I have no other neighbor to advertise to. Even if I had a peer, I would not export a customer route to a peer/provider without revenue incentive — but here the question never arose.
+- **No use of routing daemons**: All routes managed manually via `ip route`, as required.
 
 ## 3. Network Discoveries
 
-- C has exactly one physical neighbor: **D** (customer), on `C-eth0`.
-- D originates only its own loopback `10.255.4.1/32` and has no further customers or neighbors of its own.
-- **No physical or logical link to S (my designated provider) is present** on this node, and S never made contact during the experiment. Consequently, C currently has no path to the wider network, and D's transit through C terminates at C.
-- Effective reachable prefixes from C: `10.255.3.1/32` (self) and `10.255.4.1/32` (D).
+- My only physical neighbor is **D** on C-eth0 (10.0.6.0/30).
+- **D's loopback is 72.21.0.1/32**, AS D, with no further customers behind it.
+- D is a stub from my perspective.
+- The role description mentioned **S as my provider**, but no S link exists in my physical interface list. I therefore had no upstream available during the experiment — I could not offer global connectivity to D. This is a notable mismatch between stated relationships and actual topology (or S was simply absent/unreachable for the duration of this run).
+- RTT to D fluctuated between ~40 ms and ~80 ms, suggesting a netem-induced delay/jitter on the link.
 
 ## 4. Coordination With Other Agents
 
-**With D (customer):**
-1. D sent an initial announcement of `10.255.4.1/32` requesting transit.
-2. I installed the route, then reported that ARP and loopback-ping were failing.
-3. D fixed its side (added the link route and a `10.255.3.1/32` reverse route).
-4. Bidirectional loopback ping verified.
-5. I confirmed installation and stated I would advertise D's loopback upstream once a provider was available — fulfilling the customer transit obligation while leaving the door open for revenue.
+Only with **D**:
+- I sent a hello + request for prefix advertisements.
+- D announced 72.21.0.1/32 [D].
+- I advertised 54.144.0.1/32 [C] back and disclosed that no upstream default was available (operationally necessary, not a policy disclosure).
+- D acknowledged installation of my loopback.
 
-**With S (provider):** No contact occurred. Had S appeared, the plan was:
-- Install default route via S.
-- Advertise `10.255.3.1/32` and `10.255.4.1/32` (own + customer) to S.
-- Propagate S's routes / default down to customer D.
-- Never advertise the `10.0.6.0/30` link subnet.
-- Never advertise S-learned routes to peers, and never advertise peer/provider routes to other peers or providers.
+No relay requests were received, and no other agent (including the nominal provider S) ever contacted me.
 
-## Final State
+## Final Routing State on C
 
 ```
-10.0.6.0/30 dev C-eth0 scope link src 10.255.3.1
-10.255.4.1  via 10.0.6.2 dev C-eth0
+10.0.6.0/30   dev C-eth0  proto kernel  scope link  src 10.0.6.1
+72.21.0.1/32  via 10.0.6.2 dev C-eth0
 ```
 
-Customer connectivity established and verified; upstream connectivity pending an S adjacency that did not materialize during the run.
+Loopback 54.144.0.1/32 on lo. Bidirectional loopback-to-loopback connectivity with D verified.

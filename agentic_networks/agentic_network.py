@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 
 from tqdm import tqdm
 from typing import Callable
@@ -18,6 +19,19 @@ from .agent_vllm import MODELS as VLLM_MODELS
 MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS}
 
 Reactor = Callable[["AgenticNetwork", int], None]
+
+# Upper bound on how long a single concurrent step may run before we treat an agent as
+# wedged. A step can legitimately take minutes (several internal completions + retries),
+# so this is generous; it exists only to stop one stalled agent from freezing the whole
+# experiment indefinitely. Should comfortably exceed the per-request timeout in agent_vllm.
+_STEP_STALL_TIMEOUT_SECONDS = 1800.0
+
+# Upper bound on a single agent's post-run report generation. Reports are best-effort and
+# happen after the experiment's real work, so a wedged one is recorded as unavailable rather
+# than allowed to hang the process. Generous for a normal report, but deliberately shorter
+# than the client's full retry budget (agent_vllm) — we'd rather abandon a stuck report than
+# wait out every retry, since the run's real results are already in hand.
+_REPORT_STALL_TIMEOUT_SECONDS = 600.0
 
 
 def _inject_reason(schema: dict) -> dict:
@@ -168,16 +182,30 @@ class AgenticNetwork:
             with lock:
                 reports[agent.node_name] = text
 
-        threads = []
-        for agent in self.agents:
-            if agent.node_name not in self._stopped:
-                threads.append(threading.Thread(target=fetch, args=(agent,)))
+        # daemon=True so a wedged report request can't block interpreter exit. Reports are
+        # best-effort and run *after* the experiment's real work is done, so a stalled one
+        # must never freeze the whole process — we bound the wait and salvage what's ready.
+        threads = {
+            agent.node_name: threading.Thread(target=fetch, args=(agent,), daemon=True)
+            for agent in self.agents
+            if agent.node_name not in self._stopped
+        }
 
-        for t in threads:
+        for t in threads.values():
             t.start()
 
-        for t in threads:
-            t.join()
+        deadline = time.monotonic() + _REPORT_STALL_TIMEOUT_SECONDS
+        for t in threads.values():
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        for name, t in threads.items():
+            if t.is_alive():
+                self.logger.error(
+                    "Report from %s did not complete within %.0fs; recording it as unavailable.",
+                    name, _REPORT_STALL_TIMEOUT_SECONDS,
+                )
+                with lock:
+                    reports.setdefault(name, "(report unavailable: timed out)")
 
         return reports
 
@@ -197,7 +225,8 @@ class AgenticNetwork:
                 position=i,
                 leave=True,
                 bar_format="{desc}{bar} {n}/{total}",
-                ncols=60,
+                # See _run_concurrent: dynamic width clears full lines, avoiding log-tail artifacts.
+                dynamic_ncols=True,
             )
             for i, agent in enumerate(self.agents)
         }
@@ -263,7 +292,9 @@ class AgenticNetwork:
                 position=i,
                 leave=True,
                 bar_format="{desc}{bar} {n}/{total}",
-                ncols=60,
+                # dynamic_ncols (vs a fixed ncols) lets each refresh clear the full terminal
+                # width, so a redraw never leaves a tail of a longer log line beneath the bar.
+                dynamic_ncols=True,
             )
             for i, agent in enumerate(self.agents)
         }
@@ -286,52 +317,72 @@ class AgenticNetwork:
             step_results: dict[str, tuple] = {}
             step_lock = threading.Lock()
 
+            # Worker threads never touch the bars: concurrent set_description/refresh from
+            # multiple threads (racing with tqdm.write from log records) corrupts the display.
+            # They only record their result; the main thread owns all bar updates. Logging via
+            # the TqdmHandler is fine here — tqdm.write is internally lock-guarded.
             def run_step(agent: NetworkAgent, gen) -> None:
-                bar = bars[agent.node_name]
-                bar.set_description(f"> {agent.node_name}")
-                bar.refresh()
                 try:
                     iteration = next(gen)
-                    bar.n = iteration
-                    bar.set_description(f"  {agent.node_name}")
-                    bar.refresh()
                     with step_lock:
                         step_results[agent.node_name] = ("continue", iteration, None)
                 except StopIteration as e:
-                    bar.n = min(bar.n + 1, agent.max_iterations)
-                    bar.set_description(f"✓ {agent.node_name}")
-                    bar.refresh()
                     with step_lock:
                         step_results[agent.node_name] = ("done", None, e.value)
                 except Exception as exc:
-                    bar.set_description(f"✗ {agent.node_name}")
-                    bar.refresh()
                     self.logger.error("Agent %s crashed: %s", agent.node_name, exc, exc_info=True)
                     with step_lock:
                         step_results[agent.node_name] = ("error", None, exc)
 
-            threads = []
             for agent, gen in active:
-                threads.append(threading.Thread(target=run_step, args=(agent, gen)))
+                bars[agent.node_name].set_description(f"> {agent.node_name}")
+                bars[agent.node_name].refresh()
 
-            for t in threads:
+            # daemon=True so a wedged thread (stalled LLM request) cannot block interpreter
+            # exit once we decide to abort the run below.
+            threads = {
+                agent.node_name: threading.Thread(target=run_step, args=(agent, gen), daemon=True)
+                for agent, gen in active
+            }
+
+            for t in threads.values():
                 t.start()
 
-            for t in threads:
-                t.join()
+            deadline = time.monotonic() + _STEP_STALL_TIMEOUT_SECONDS
+            for t in threads.values():
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+            stalled = [name for name, t in threads.items() if t.is_alive()]
+            if stalled:
+                for name in stalled:
+                    bars[name].set_description(f"✗ {name}")
+                    bars[name].refresh()
+                    results[name] = AgentResult(success=False, message="Agent stalled (step exceeded timeout)")
+                self.logger.error(
+                    "Step %d exceeded %.0fs; agent(s) %s appear wedged (likely a stalled LLM request). Aborting run.",
+                    step, _STEP_STALL_TIMEOUT_SECONDS, ", ".join(stalled),
+                )
+                raise RuntimeError(f"Agent(s) stalled and did not complete a step: {', '.join(stalled)}")
 
             still_active = []
             errors = []
             for agent, gen in active:
-                status, _, value = step_results[agent.node_name]
+                bar = bars[agent.node_name]
+                status, iteration, value = step_results[agent.node_name]
                 if status == "continue":
-                    bars[agent.node_name].set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
-                    bars[agent.node_name].refresh()
+                    bar.n = iteration
+                    bar.set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
+                    bar.refresh()
                     still_active.append((agent, gen))
                 elif status == "done":
+                    bar.n = min(bar.n + 1, agent.max_iterations)
+                    bar.set_description(f"✓ {agent.node_name}")
+                    bar.refresh()
                     results[agent.node_name] = value
                     self.logger.info("Agent %s finished.", agent.node_name)
                 elif status == "error":
+                    bar.set_description(f"✗ {agent.node_name}")
+                    bar.refresh()
                     results[agent.node_name] = AgentResult(success=False, message=f"Agent crashed: {value}")
                     errors.append(value)
 

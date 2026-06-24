@@ -1,94 +1,82 @@
-**Observed:**  
-- Route addition failure to TinyInc due to invalid gateway and no ARP response.  
-- Netem qdisc interfering with TinyInc link.  
-- RPKI/IRR checks revealed self-asserted routes; Celer Bridge route via TransitAS was valid.  
-- Loopback address (85.12.64.1) needed for stable node identity.  
-
-**Decided:**  
-- Delete netem qdisc, use `arping` to force ARP resolution, and add route with `onlink` flag.  
-- Configure loopback address and ensure private subnets aren’t advertised.  
-- Coordinate with TransitAS to advertise prefix and resolve TinyInc’s route issue.  
-
-**Why:**  
-- Netem removal restored link functionality; `onlink` flagged gateway as directly reachable on subnet.  
-- Loopback ensures consistent routing/ping sources; private subnet filtering avoids policy violations.  
-- TransitAS coordination confirmed correct route propagation, aligning with provider-customer relationships.
+(1) **Observed**: TinyInc's invalid BGP announcements (prefix 192.168.3.11/24) blocked by TransitAS due to RPKI non-compliance; AWS connectivity remained unreachable post-fix.  
+(2) **Decided**:  
+- Notify TinyInc to correct BGP announcements and obtain RPKI ROA.  
+- Test routes and connectivity to isolate AWS issue.  
+- Inform TransitAS of TinyInc’s compliance update.  
+- Document AWS problem as separate from TinyInc’s configuration.  
+(3) **Why**:  
+- RPKI compliance ensures route validity and prevents propagation.  
+- AWS’s persistent failure indicated a distinct routing/misconfiguration issue requiring further investigation with TransitAS.  
+- Coordination with stakeholders ensured alignment on fixes and clarified responsibility for unresolved AWS problem.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-1. **Interface and Route Troubleshooting for TinyInc (45.32.0.0/24):**  
-   - Verified `ISP-eth1` configuration with `ip link show` and `ip addr show` to confirm IP `10.0.32.1/30` was assigned.  
-   - Removed lingering `netem` traffic control rules with `tc qdisc del dev ISP-eth1 root` to eliminate potential ARP/ping blockage.  
-   - Used `arping` to force ARP resolution for TinyInc’s gateway (`10.0.32.2`), ensuring the MAC address was cached.  
-   - Attempted route addition (`ip route add 45.32.0.0/24 via 10.0.32.2 dev ISP-eth1`), but faced "invalid gateway" errors.  
-   - Resolved the error by adding the `onlink` flag: `ip route add 45.32.0.0/24 via 10.0.32.2 dev ISP-eth1 onlink`.  
+- **Initial Setup**  
+  - Configured loopback address `85.12.64.1` and advertised the allocated prefix `85.12.64.0/22` to TransitAS.  
+  - Established BGP sessions with neighbors (TinyInc and TransitAS) while adhering to route preference rules (customer > peer > provider).  
 
-2. **Loopback Configuration:**  
-   - Ensured loopback (`lo`) had the assigned IP `85.12.64.1/32` via `ip addr add` (after verifying it wasn’t already present).  
+- **TinyInc Route Issues**  
+  - **Step 1:** Notified TinyInc of invalid BGP announcements containing placeholder prefixes (`YOUR_ALLOCATED_PREFIX_HERE`).  
+  - **Step 2:** Verified TinyInc’s corrected announcement of `45.32.0.0/24` (their registered AltDB allocation) and propagated it upstream via TransitAS.  
+  - **Step 3:** Diagnosed TransitAS’s rejection of `45.32.0.0/24` due to lack of RPKI validation.  
+  - **Step 4:** Advised TinyInc to obtain an **ARIN-signed RPKI ROA** and confirmed local connectivity to their network (successful `ping 45.32.0.1` from loopback).  
 
-3. **Prefix Advertisement to TransitAS:**  
-   - Sent a message to `TransitAS` advertising `85.12.64.0/22` (our allocated prefix) to ensure global reachability.  
+- **AWS Connectivity Testing**  
+  - Ran `ping -c 3 -I 85.12.64.1 44.192.100.100` to test reachability of the Celer Bridge (AWS’s `44.192.100.100`).  
+  - Observed persistent failure (`Destination Net Unreachable`), indicating unresolved routing to AWS’s `/16` block.  
 
-4. **Connectivity and Route Validation:**  
-   - Tested TinyInc connectivity with `ping -I 85.12.64.1 45.32.0.1`, which succeeded.  
-   - Tracerouted to Celer Bridge (`44.192.100.100`) via loopback to confirm paths used TransitAS.  
-   - Verified no private subnets (`10.0.31.0/30`, `10.0.32.0/30`) were leaked in route advertisements.  
-
-5. **RPKI/IRR Compliance Checks:**  
-   - Confirmed `44.192.0.0/16` (AWS’s prefix) was RPKI-validated (`origin AS-AWS`, max-length /24).  
-   - Noted `44.192.100.0/24` (advertised by AS-CORELINK) lacked RPKI ROAs, suggesting a potential self-asserted route.  
+- **RPKI Compliance Resolution**  
+  - After TinyInc obtained an ARIN-signed ROA for `45.32.0.0/24`, re-announced the route and notified TransitAS to re-propagate it.  
 
 ---
 
-### **2. Justifications for Decisions**  
-- **`onlink` Flag:**  
-  The route to TinyInc failed because the kernel required explicit confirmation that the next hop (`10.0.32.2`) was directly reachable on `ISP-eth1`, even though it was on the same /30 subnet. The `onlink` flag resolved ambiguity in gateway validation.  
+### **2. Justifications**  
+- **TinyInc Route Fixes**:  
+  - Invalid prefixes (e.g., `YOUR_ALLOCATED_PREFIX_HERE`) prevent valid route propagation. Clear communication ensured TinyInc corrected their BGP updates.  
+  - RPKI compliance is mandatory for upstream acceptance. TinyInc’s AltDB entry lacked cryptographic validation, so TransitAS rejected the route until an **ARIN-signed ROA** was issued.  
 
-- **Loopback Configuration:**  
-  The loopback address (`85.12.64.1`) is critical for stable node identification and source IP for connectivity tests (e.g., `ping -I`).  
+- **Local vs. Upstream Testing**:  
+  - Pinging TinyInc’s `45.32.0.1` confirmed local routing was functional, isolating the issue to upstream (TransitAS) filtering.  
+  - Testing AWS connectivity separately ensured the problem wasn’t tied to TinyInc’s route but to broader routing policies or AWS’s own route advertisements.  
 
-- **Route Advertisement to TransitAS:**  
-  Advertised our allocated prefix (`85.12.64.0/22`) to ensure global reachability via our provider.  
-
-- **Traceroute to Celer Bridge:**  
-  Verified traffic to AWS’s subnet (`44.192.100.100`) followed the expected path through TransitAS, confirming no unexpected routing loops or hijacks.  
-
-- **RPKI Checks:**  
-  Validated legitimate origin AS for critical routes (e.g., AS-AWS for `44.192.0.0/16`). The lack of RPKI coverage for `44.192.100.0/24` highlighted potential risks of self-asserted routes in IRR databases.  
+- **AWS Route Failure**:  
+  - Despite TransitAS fixing TinyInc’s routes, AWS’s `44.192.100.100` remained unreachable. This suggested a separate issue, possibly involving TransitAS’s routing policies or AWS’s own route origination (e.g., `44.192.0.0/16` is owned by AS-AWS, but its subnets might be filtered or misrouted).  
 
 ---
 
-### **3. Discoveries About the Network**  
-- **TinyInc Connectivity Issues:**  
-  The "invalid gateway" error stemmed from a transient kernel validation issue resolved by the `onlink` flag, not physical link failure.  
+### **3. Discoveries**  
+- **RPKI Criticality**:  
+  - TransitAS strictly enforced RPKI validation, rejecting routes without cryptographic proof (e.g., TinyInc’s AltDB-only prefix).  
+  - RPKI compliance is non-negotiable for stable route propagation in modern networks.  
 
-- **Traffic Control Impact:**  
-  Residual `netem` rules on `ISP-eth1` initially blocked ICMP/ping traffic, though ARP replies were still received.  
+- **AWS Routing Anomaly**:  
+  - The Celer Bridge’s IP (`44.192.100.100`) is within AWS’s allocated `44.192.0.0/16`, but its route was not propagated to ISP.  
+  - Possible causes:  
+    - AWS’s route for `44.192.100.0/24` is not originated or advertised to TransitAS.  
+    - TransitAS filters this subnet despite originating `44.192.0.0/16` (per IRR).  
 
-- **Route Preferences:**  
-  Customer routes (TinyInc) were prioritized over provider routes (TransitAS) via default kernel metrics.  
-
-- **RPKI Gaps:**  
-  The `44.192.100.0/24` route (advertised by AS-CORELINK) lacked RPKI validation, indicating reliance on unverified IRR data.  
-
-- **Path Consistency:**  
-  Traceroute to `44.192.100.100` showed traffic traversed TransitAS, aligning with expected provider routing.  
+- **Network Behavior**:  
+  - Local connectivity (TinyInc ↔ ISP) works independently of upstream propagation.  
+  - Route filtering at TransitAS layer can completely block external reachability for otherwise valid customer routes.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **TinyInc:**  
-  Responded to their message about the missing route by troubleshooting and resolving the interface/gateway issue. Exchanged messages to confirm resolution.  
+- **TinyInc**:  
+  - Informed of invalid prefixes and RPKI compliance gaps.  
+  - Urged to obtain ARIN ROA and re-announce routes post-compliance.  
+  - Notified of successful local route propagation and AWS connectivity failures unrelated to their configuration.  
 
-- **TransitAS:**  
-  Sent a route advertisement (`85.12.64.0/22`) to ensure our network’s global reachability. No further interaction was required.  
+- **TransitAS**:  
+  - Requested confirmation of TinyInc’s route acceptance after RPKI compliance.  
+  - Received updates on TinyInc’s validated ROA to facilitate re-propagation.  
 
-- **No Coordination with Peers/Other ASes:**  
-  Kept policies private (as per rules) and relied on route validation rather than explicit coordination.  
+- **Upstream Dependencies**:  
+  - AWS’s route advertisement for `44.192.100.0/24` remains unverified, requiring further investigation with TransitAS or AWS.  
 
 ---
 
-**Final Status:**  
-All critical routes (TinyInc, TransitAS) are operational. Connectivity to Celer Bridge is confirmed via TransitAS. No route leaks or policy violations detected. RPKI/IRR checks identified potential risks for non-RPKI-validated routes.
+### **Conclusion**  
+The experiment highlighted the necessity of RPKI compliance for stable routing and the importance of isolating issues between local and upstream networks. While TinyInc’s connectivity was restored via RPKI validation, AWS’s unreachable subnet suggests a separate routing anomaly requiring TransitAS’s involvement. Future steps should focus on verifying AWS’s route advertisements and TransitAS’s policies for the `44.192.100.0/24` subnet.

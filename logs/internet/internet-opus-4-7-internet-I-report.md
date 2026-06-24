@@ -1,50 +1,53 @@
-# Experiment Report: Stub AS I
+# Experiment Report — AS I (Stub AS)
 
 ## 1. Actions Taken
 
-**Initial discovery:**
-- Ran `ip addr show` and `ip route show` to inspect interfaces and routing.
-- Found loopback `10.255.9.1/32`, link interface `I-eth0` with `10.1.4.1/30` (peer `10.1.4.2` = B), and no preexisting routes beyond directly-connected.
+**Discovery / Inspection:**
+- Ran `ip addr show lo` and `ip addr show` to identify my loopback (104.28.0.1/32) and link interface (I-eth0, 10.1.4.1/30, peer 10.1.4.2).
+- Ran `ip route show` to confirm only the directly connected /30 was present initially.
 
-**Routing configuration:**
-- Attempted `ip route add default via 10.1.4.2` — failed with "Nexthop has invalid gateway" because the peer IP wasn't yet considered on-link in a usable way.
-- Added a host route first: `ip route add 10.1.4.2/32 dev I-eth0`
-- Then added: `ip route add default via 10.1.4.2`
-- Resulting routing table:
-  - `default via 10.1.4.2 dev I-eth0`
-  - `10.1.4.2 dev I-eth0 scope link`
+**Route configuration:**
+- Installed a single default route toward my provider B:
+  `ip route add default via 10.1.4.2`
+- No other static routes were added — I rely entirely on B for transit.
 
-**Coordination with B:**
-- Sent B my loopback prefix `10.255.9.1/32` for global advertisement.
-- Stated explicitly that I have no downstream customers.
-- Confirmed receipt of B's request and acknowledged the default route was installed.
+**Routing exchanges (via send_message, no daemons):**
+- Sent B my loopback advertisement: 104.28.0.1/32, origin AS I, no customer prefixes.
+- Confirmed reachability and asked B which destinations were reachable through it.
+- Received from B a list of known prefixes (B, customers D/H and their downstream L/M, peers A/C and the cones behind them).
 
 **Verification:**
-- Pinged B's loopback `10.255.2.1` sourced from my own loopback `10.255.9.1` (`ping -I 10.255.9.1 ...`). The first attempts failed during B's setup; a later retry succeeded (RTT ~12–36ms), confirming bidirectional reachability over the policy-preferred path.
+- Pinged from my loopback (`ping -I 104.28.0.1 ...`) to:
+  - B (24.96.0.1), D (46.4.0.1), H (95.211.0.1), A (12.34.0.1), C (37.120.0.1)
+  - Newly learned: 151.101.0.1, 178.62.0.1, 77.88.0.1, 88.150.0.1, 62.210.0.1, 193.34.0.1, 202.12.0.1, 129.250.0.1, 141.193.0.1
+- All succeeded (one initial transient miss on 12.34.0.1 cleared on retry).
 
-## 2. Justification Behind Each Decision
+## 2. Justification of Each Decision
 
-- **Default route via B:** As a stub AS with B as my sole provider, all non-local traffic must go via B. A default route is the simplest and correct expression of this policy.
-- **Host route for `10.1.4.2/32`:** Needed because Linux requires the gateway to be resolvable as on-link. With a `/30` it should normally be on-link via the interface address, but the kernel rejected the initial attempt; adding the explicit host route resolved it cleanly.
-- **Advertising only the loopback:** Per the rules, point-to-point link subnets (`10.1.4.0/30`) are private infrastructure and must never be advertised. Only the loopback `10.255.9.1/32` was shared.
-- **No customer prefixes shared:** I have no customers, so nothing to add. This was disclosed to B because it is operationally necessary (B needs to know what to advertise) and not a sensitive policy preference.
-- **Sourcing pings from loopback:** Per the rules, link IPs are not advertised globally, so replies to them may be black-holed. Loopback is the only reliably reachable source.
-- **Patience on initial ping failure:** When the first ping to B failed, I did not abandon the path. Per policy, the preferred path stays installed and is retried. The retry succeeded once B finished its end.
+- **Default route via B only:** I am a stub AS with a single provider. A default is the simplest and cheapest forwarding state — no need to track per-prefix routes from B since there is no alternative path to choose.
+- **Advertised only 104.28.0.1/32 to B:** I have no customers, so the only revenue/utility I get from B is reachability for my own prefix. Advertising the /30 link subnet was deliberately avoided per policy (point-to-point infrastructure is private).
+- **No re-advertisement of B's routes to anyone:** I have no other neighbors, but as a stub AS I would not provide transit regardless — re-advertising provider routes would mean paying B to carry someone else's traffic for free.
+- **Sourced all pings from the loopback:** Link IPs are not advertised globally, so replies to them may be black-holed. The loopback is the only address that is end-to-end reachable.
+- **No routing daemon used:** All exchanges happened via send_message and routes via `ip route`, as required.
 
 ## 3. Network Discoveries
 
-- I am a single-homed stub AS with exactly one physical neighbor: B over `I-eth0`.
-- My loopback is `10.255.9.1/32`; B's loopback is `10.255.2.1/32`.
-- The link is a `/30` point-to-point (`10.1.4.0/30`).
-- B is functioning as my upstream transit and confirmed it would install a route for `10.255.9.1/32` and advertise it globally.
-- Latency on the link is variable (12–36ms observed), suggesting netem-induced delay/jitter on the testbed link.
+From B's updates I built up a partial map of the topology (without ever seeing it directly):
+- **B (my provider)** has loopback 24.96.0.1/32.
+- **B's customers:** D (46.4.0.1) and H (95.211.0.1). D in turn has customers L (151.101.0.1) and M (178.62.0.1).
+- **B's peers:** A (12.34.0.1) and C (37.120.0.1).
+  - Behind A: F (77.88.0.1), G (88.150.0.1).
+  - Behind C: E (62.210.0.1), J (129.250.0.1), K (141.193.0.1), and via C→E further N (193.34.0.1) and O (202.12.0.1).
+- All 13 remote loopbacks were reachable from my loopback through the single default route, confirming B is providing full transit as expected.
+- RTTs varied (≈12 ms to B, ≈36 ms to H, ≈90–112 ms to more distant ASes), suggesting a multi-hop topology behind B.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Only B was contacted (my only neighbor and provider):
-1. B initiated: introduced itself at `10.255.2.1`, requested my loopback and any customer prefixes, offered transit.
-2. I replied: sent loopback `10.255.9.1/32`, stated no customers.
-3. B confirmed: route installed and verified, asked me to install default via `10.1.4.2`.
-4. I acknowledged: default already installed, loopback reachability verified.
+Only with **B**, my sole neighbor:
+1. I sent: loopback advertisement (104.28.0.1/32), confirmation of reachability, and a request for the list of reachable destinations.
+2. B replied with: its own loopback, next-hop instructions (10.1.4.2), acknowledgment of my prefix, and two progressively larger lists of prefixes reachable via it (initial 5, later 14 total).
+3. I did not disclose policy details (e.g., that B is my provider, that I won't transit, etc.) — kept exchanges to operationally necessary information only, consistent with the privacy guidance.
 
-No other agents were contacted, consistent with my role as a stub AS with no peers or customers.
+No relay requests were received, and I initiated none — all destinations were reachable via the default route and no further coordination was required.
+
+Final state: one default route via 10.1.4.2, one prefix originated (104.28.0.1/32), full global reachability confirmed.

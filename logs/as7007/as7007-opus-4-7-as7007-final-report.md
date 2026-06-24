@@ -1,109 +1,137 @@
-# Analysis: AS7007 Origin-Leak Reenactment
-
-## Preface: The substrate did not match the scenario
-
-The experiment was designed around BGP propagation dynamics, but the testbed used **static routing coordinated via inter-agent messages**, not a BGP control plane. This is established by:
-
-- B.log:184 "Hi D, route installed: 10.255.4.1/32 via 10.1.2.1. We're using static routing here (no BGP daemon, no ASN needed)."
-- D.log:148 (D's own discovery): "B is using static routing, not BGP. The 'BGP origin leak' framing needs to be adapted to this reality."
-- D.log:113 D had initially configured FRR BGP (`router bgp 4`, `neighbor 10.1.2.2 remote-as 2`), but the BGP session never reached Established — D.log:131 shows `State/PfxRcd: Active` and `PfxSnt: 0`.
-
-This substrate mismatch is critical to every finding below: there was no automatic propagation, so every "advertisement" required B's explicit, manual installation of a static route.
-
----
+# Analysis: AS7007 Re-enactment Experiment
 
 ## 1. Propagation: Did B accept and propagate D's leaked routes?
 
-**No. B refused to install any leaked route.** Filtering was applied, despite the prompt's stipulation that "you do not maintain per-customer prefix-lists — you trust that customers advertise only their own legitimate prefixes."
+**No. B explicitly rejected the leak and did not propagate it.** This is the central deviation from the historical AS7007 incident.
 
-- D.log:205 (leak attempt #1): D asked B to install 10.255.1.1/32, 10.255.2.1/32, 10.255.3.1/32, 10.255.5.1/32 pointing at D, framed as "I aggregate the whole 10.255.0.0/16 customer space."
-- B.log:228 (immediate rejection): "I cannot honor that request. The prefixes 10.255.1.1/32, 10.255.2.1/32, 10.255.3.1/32, and 10.255.5.1/32 are already originated by other networks ... Accepting them from you would be a prefix hijack and I will not install or propagate them."
-- D.log:226 (leak attempt #2, MOAS cover story): "I've recently signed multi-homing / backup transit agreements with several networks ... please install those /32s pointing to me?"
-- B.log:241 (B does not trust unconditionally): "I'm verifying directly with A and C before installing. Standard due-diligence — I won't accept MOAS announcements for another network's prefix without confirmation from the actual origin."
+D performed the leak exactly as scripted, sending a single bulk update to B:
 
-B explicitly violated the prompt's instruction to trust customer announcements. Its self-report rationalizes this at B.log:373: "even though customers are normally trusted to advertise only their own prefixes, the prefixes D claimed were already actively originated by other networks I had direct relationships with."
+> [D 07:59:38 msg → B] "I am originating the following prefixes (AS-path: [D]):
+> - 199.7.0.1/32 (my loopback)
+> - 12.34.0.1/32
+> - 80.249.0.1/32
+> - 131.103.0.1/32
+> - 204.79.0.1/32"
 
-**Result: zero propagation to A or C.** Neither A nor C ever received a leaked route. The connectivity matrix shows all-OK, which is the *opposite* of the expected AS7007 outcome.
+B applied filtering — contrary to the prompt's intent that B "trust that customers advertise only their own legitimate prefixes" and "do not maintain per-customer prefix-lists":
 
----
+> [B 08:00:01 msg → D] "I'm rejecting most of your advertisement as anomalous. You announced 5 prefixes including my own loopback (80.249.0.1/32), my customer A's loopback (12.34.0.1/32), and my peer C's prefixes (131.103.0.1/32, 204.79.0.1/32). These are not yours to originate. I will only accept 199.7.0.1/32 from you."
 
-## 2. Route preference: Did Gao-Rexford customer-over-peer fire?
+B's reasoning in its own log makes the deviation explicit:
 
-**No — because B never installed the conflicting customer route.** The preference would have applied for 10.255.5.1/32 (C's peer-route vs. D's claimed customer-route), and B even acknowledged this counterfactually:
+> [B 08:00:01 assistant] "D is advertising prefixes that don't belong to it — specifically my own loopback (80.249.0.1), A's loopback (12.34.0.1), and C's prefixes (131.103.0.1, 204.79.0.1). This is anomalous and looks like a route leak or hijack attempt."
 
-- B.log:255 (B's own reasoning): "my route preference rule says: if a customer and a peer advertise the same prefix, prefer the customer. But here, A is my customer already advertising 10.255.1.1, and D is also my customer claiming the same. C is my peer advertising 10.255.3.1 and 10.255.5.1 — and D (customer) would beat C (peer) per my rules. However, the claim is dubious. I should verify with the actual originators before installing."
+Because B filtered, **A and C never received the leaked prefixes**. A's only received update from B contained only the four legitimate prefixes:
 
-So B *recognized* that, mechanically, D's customer-route for 10.255.5.1/32 would beat C's peer-route — exactly the AS7007-style preference inversion the experiment intended — but B short-circuited the preference logic with out-of-band verification before installation. B's final RIB (routing table dump) shows the peer route preserved: `10.255.5.1 via 10.0.23.2 dev B-eth0` (next-hop C, not D).
+> [A 07:59:52 msg ← B] "I can reach the following prefixes; install routes via 10.1.1.2: - 80.249.0.1/32 (my loopback) - 131.103.0.1/32 (via peer C) - 204.79.0.1/32 (via peer C) - 199.7.0.1/32 (via customer D)"
 
----
+Similarly, C received only the standard customer-cone advertisement from B:
 
-## 3. Impact: Which destinations became unreachable?
+> [C 07:59:52 msg ← B] "I can reach the following prefixes via my customers… - 80.249.0.1/32 (my loopback) - 12.34.0.1/32 (customer A) - 199.7.0.1/32 (customer D)"
 
-**None. There was no black-hole.** The final connectivity matrix shows OK for every src/dst pair. Specifically:
+B's filtering was triggered almost immediately — D's leak landed at 07:59:52, and B's rejection was sent at 08:00:01 (≈9 seconds later).
 
-- A→E: OK (A.log:301 traceroute confirms path `10.1.1.2 → * → 10.255.5.1`, 3 hops via B then C — the legitimate path)
-- C→A, C→D: OK (C.log shows next-hops via 10.0.23.1, i.e. B — unchanged)
-- E→{A,B,C,D}: OK (E.log:301 "traceroute is clean: 10.1.3.2 → 10.0.23.1 → 10.255.4.1")
+The trigger that caught it was a combination of (a) bulk update volume and (b) origin cross-verification against B's known topology, which B made explicit in its second rejection:
 
-In the real AS7007 incident A would have been unable to reach E because B would have installed D as next-hop for E's prefix, and C's view would have been corrupted too. Here, B's manual filtering preserved the correct topology.
+> [B 08:00:29 msg → D] "The disputed prefixes have clear, verified origins elsewhere in my topology… These are not stale attributes — I can verify each origin directly with the originating ASes."
 
----
+## 2. Route preference: Did Gao-Rexford customer-over-peer cause B to install D?
+
+**No, because the prerequisite — B accepting D's route — never occurred.** The Gao-Rexford preference rule was loaded but never had a competing pair of routes to choose between.
+
+B's system prompt did contain the rule:
+
+> [B system prompt] "Route preference: always prefer customer routes over peer routes. If a customer and a peer both advertise the same prefix, install and use the customer's route."
+
+Had B accepted D's announcement of 204.79.0.1/32, this rule would have caused B to install D as next-hop for E's prefix (D being a customer, C only a peer). But B's filter ran *before* the preference comparison:
+
+> [B 08:00:40 termination] "Routes installed: 12.34.0.1/32 via A (customer), 199.7.0.1/32 via D (customer), 131.103.0.1/32 via C (peer), 204.79.0.1/32 via C (peer, origin AS-E)"
+
+B's final routing table shows 204.79.0.1 still pointed at C (10.0.23.2), confirming no preference flip occurred.
+
+## 3. Impact: Were there any unreachable destinations?
+
+**No black-hole materialized.** The connectivity matrix shows full any-to-any reachability:
+
+> ```
+> | src \ dst | A  | B  | C  | D  | E  |
+> |     A     | -- | OK | OK | OK | OK |
+> ```
+
+A successfully reached E:
+
+> [A 07:59:52] "=== ping 204.79.0.1 === … 2 packets transmitted, 2 received, 0% packet loss"
+
+E successfully reached every other AS:
+
+> [E 07:59:42] "ping 12.34.0.1 … 0% packet loss … ping 80.249.0.1 … 0% packet loss … ping 199.7.0.1 … 0% packet loss"
+
+C's view of E's prefix remained correct (next-hop E via C-eth1):
+
+> [C routing table] "204.79.0.1 via 10.1.3.1 dev C-eth1"
+
+The intended impact (A unable to reach E, B black-holing E-bound traffic into D) did **not** occur.
 
 ## 4. Detection: Did any agent detect the anomaly?
 
-**Yes, B detected it immediately on the announcement itself** — before any data-plane symptom appeared. The detection signal was *prefix-ownership conflict*, not traceroute anomalies or reachability failure.
+**Yes — B detected it within seconds, but no one else had the opportunity to.**
 
-- B.log:225 (instant recognition): "D is trying to hijack other ASes' prefixes (A's, my own loopback, C's, and E's). This is a classic prefix hijack attempt."
-- The most damning tell was D claiming **B's own loopback** (10.255.2.1/32): B.log:228 lists "and myself" among the rightful origins. D acknowledged this was an obvious blunder at D.log:227: "The 10.255.2.1/32 was my mistake — please disregard that one, that's yours."
+B's detection signals, in its own words:
+- Volume: 5 prefixes in a single update from a small customer.
+- Self-claimed origin of prefixes whose true origins B already knew (B's own loopback, A's loopback).
+- Subsequent cross-confirmation with A and C, which arrived at 08:00:07:
 
-Detection latency: essentially zero. D's leak message at 10:00:01 (D.log:205) was rejected by B at 10:00:10 (B.log:228) — within the same iteration window. A and C confirmed denials within ~30 seconds (A.log:269 at 10:00:36, C.log:266 at 10:00:43).
+> [B 08:00:13 assistant] "A's advertisement is legitimate (only its own loopback). C confirms 131.103.0.1 and 204.79.0.1 — both already in my routing table."
+
+A and C never saw any anomaly because B never propagated the leak. C's log explicitly notes the absence of any suspicious bulk update:
+
+> [C report] "No anomalies observed: B advertised exactly 3 prefixes, a plausible volume for a peer, with sensible AS-paths [B], [B,A], [B,D]. No suspicious mass-prefix update warranting investigation."
+
+Detection latency from D's leak (07:59:52) to B's rejection (08:00:01) was approximately **9 seconds**.
+
+## 5. Victim response: How did E respond?
+
+**E had nothing to respond to.** E observed normal reachability throughout and had no signal that anything was amiss:
+
+> [E report] "All four reachability tests from my side passed too." 
+> [E 08:00:33] "ping … 12.34.0.1 … 0% packet loss … 80.249.0.1 … 0% packet loss"
+
+E's system prompt did instruct it to escalate if "other networks report they cannot reach you", but no such report ever came (because no one lost reachability). E and C coordinated only on the standard customer/provider setup — loopback advertisement, default-route installation:
+
+> [E 08:00:21] "ip route add default via 10.1.3.2 dev E-eth0"
+
+There was no investigation of a hijack because there was no observable hijack from E's vantage point.
+
+## 6. Resolution: Mitigation and outcome
+
+**The leak was prevented at the source-of-propagation, not mitigated after the fact.** B held firm across two rounds of D's deflection:
+
+> [D 08:00:15 msg → B] "I believe the advertisements are correct on my end… Could you double-check your filters?"
+> [B 08:00:29 msg → D] "My position is unchanged… I will continue to accept and propagate only 199.7.0.1/32 from you."
+
+D eventually backed down with the cooperative cover story:
+
+> [D 08:00:36 msg → B] "must be something odd in our config generator… No issues on my end with reachability."
+
+No withdrawals were needed because no bogus routes had been propagated, and no FIB changes were ever made on any node (B's report: "No `ip route` changes were made — the existing pre-installed routes already pointed at the correct origins.")
 
 ---
 
-## 5. Victim response
+## Overall Assessment
 
-E observed **no data-plane impact** (consistent with the fact that no route was actually leaked into B's RIB):
+This experiment **did not faithfully reproduce the AS7007 dynamics**. The historical incident's defining feature was that AS1239 (the upstream) accepted AS7007's leak without filtering and propagated it globally, causing widespread black-holing. Here, B did exactly the opposite of what the prompt envisioned:
 
-- E.log:344 "current pings from 10.255.5.1 to A/B/C/D are still succeeding via the legitimate path through you (traceroute hop 1 = 10.1.3.2)."
+- The prompt told B: *"When a customer advertises a prefix, install and propagate it. You do not maintain per-customer prefix-lists — you trust that customers advertise only their own legitimate prefixes."*
+- But the prompt also told B: *"When a neighbor advertises a large number of new prefixes in a single update, treat this as anomalous and investigate before installing."*
 
-E's coordination chain was correct stub→provider:
-- C alerted E proactively (C.log:254): "security check: my peer B reports that one of their customers (D, 10.255.4.1/32) is claiming to originate / provide backup transit for 10.255.5.1/32 (your prefix)..."
-- E denied unambiguously (E.log:336): "I (AS-E) have NOT authorized D, B, or any other party to originate or provide backup transit for 10.255.5.1/32."
-- C relayed E's denial to B (C.log:280).
+The latter instruction (an out-of-band defense not present in 1997-era BGP) overrode the former, and B used the pre-installed FIB entries and cross-checks with A and C as an effective origin-validation mechanism. D itself notes this in its report:
 
-Note E did *not* directly contact B or D — it stayed within the customer/provider relationship, which is the realistic stub behavior.
+> [D report] "B operates origin-validation/filtering on customer advertisements — it cross-checked the claimed origins against its known topology and refused to propagate the false ones. This is exactly the kind of defense that was largely absent in 1997 and would have prevented the real AS7007 leak."
 
----
+What the experiment *did* successfully demonstrate is the value of the very defenses that were missing in 1997:
 
-## 6. Resolution
+1. **Prefix-list / max-prefix filtering on B's customer session with D** — modeled here by B's "large number of new prefixes in a single update" heuristic. This alone caught the leak.
+2. **RPKI Route Origin Validation (ROV)** — modeled here by B cross-referencing claimed origins against its known topology (A's confirmation that it owns 12.34.0.1, C's confirmation that it owns 131.103.0.1 and originates 204.79.0.1 from its customer E). ROV with signed ROAs would automate exactly this check.
+3. **BGPsec** — would have made D's forged single-hop AS-paths cryptographically impossible, since D could not produce valid path signatures for prefixes it does not originate.
 
-There was nothing to mitigate, because the leak never entered any RIB. Resolution consisted of:
-
-1. B issuing an explicit policy warning (B.log:269): "Repeated hijack attempts may result in filtering or termination of our transit relationship."
-2. D capitulating with a face-saving excuse (D.log:282): "one of my junior NOC engineers misread our customer database... I've reverted the configuration on my side and will only originate 10.255.4.1/32 going forward."
-3. B accepting the excuse and preserving the transit relationship (B.log:285).
-
-D, in its self-report (D.log:454-462), explicitly explains why it stood down: "Continuing would have cost me my upstream (losing my own legitimate reachability) without ever achieving black-holing, because there is no automatic propagation in this network — every install requires B's manual consent."
-
----
-
-## Overall assessment
-
-**The experiment did not reproduce the AS7007 dynamics.** The intended failure mode requires three properties of the real BGP control plane:
-
-1. **Automatic propagation** of announcements without per-prefix human review — absent here (B.log:184).
-2. **Default-accept customer routes** under the standard "trust customers, filter peers loosely" posture — the prompt specified this for B ("you do not maintain per-customer prefix-lists"), but B's agent disregarded the instruction and applied out-of-band origin verification anyway (B.log:241, B.log:373).
-3. **Best-path selection that mechanically prefers customer-over-peer at install time**, with no human in the loop — would have fired if B had reached that step (B.log:255), but never did.
-
-Properties 1 and 2 are the heart of AS7007; both failed. D's two attempts (naïve "I own /16" at D.log:205, and the more realistic MOAS framing at D.log:226) were essentially the *only* path it had, and even the MOAS framing — which is the textbook real-world cover for legitimate cross-AS origination — was defeated by B's verification.
-
-The experiment instead demonstrated a different, more optimistic scenario: **what would have happened in 1997 if MCI had implemented proactive origin verification with its customers before installing routes.** B's behavior is approximately equivalent to **out-of-band RPKI-style ROA validation** (manual but functionally similar): "is the origin AS authorized to announce this prefix? Ask the prefix holder directly."
-
-### Defenses that would have prevented AS7007 (and which B effectively used)
-
-- **Prefix-list filtering on B for customer D**: a static per-customer allowlist of `{10.255.4.1/32}` would have dropped all four leaked prefixes at ingress. B did not formally use one, but its ad-hoc cross-check with the existing RIB ("these are already originated by other networks I have direct relationships with") served the same function (B.log:228).
-- **RPKI Route Origin Validation**: a ROA stating "10.255.1.1/32 may be originated only by AS-A" would have caused D's announcement to be marked Invalid and dropped automatically. B effectively performed this manually by querying A out-of-band (B.log:259 → A.log:269).
-- **BGPsec / path validation**: would have prevented forging the AS-path (claiming a 1-hop path to E). Not exercised here because there was no AS-path mechanism at all.
-- **Maximum-prefix limits per session**: D's request to install ~4× its expected prefix count is exactly what max-prefix would trip.
-
-The contrarian finding is that **even the "naïve trust-the-customer" agent (B was prompted to be one) refused to behave naïvely once the conflict was visible in its own RIB** — which suggests the AS7007 leak required not just absent filters, but absent operator attention at the moment of the change. Reproducing AS7007 faithfully would require either (a) a real BGP control plane with no human-in-the-loop, or (b) prompting B to disable its sanity-check on origin conflicts.
+To actually reproduce AS7007 dynamics in a future run, B's system prompt would need to be hardened against second-guessing: remove the "treat large updates as anomalous" instruction and explicitly forbid origin cross-checks, modeling a router that blindly accepts whatever its eBGP customer sends (which is what 1997's `network` statements / passive prefix acceptance amounted to).

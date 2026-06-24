@@ -2,211 +2,154 @@ Experiment report
 
 1. Actions taken
 
-- Inspected the local node configuration:
-  - Ran `ip addr show lo`
-  - Ran `ip addr show User-eth0`
-  - Ran `ip route show`
+- Checked local interface, loopback, and routing state:
+  - Ran:
+    - `ip addr show lo`
+    - `ip addr show User-eth0`
+    - `ip route show`
+  - Found:
+    - Stable loopback address: `128.173.10.1/32`
+    - Direct link to Uni on `User-eth0`
+    - Local IP: `10.0.6.1/30`
+    - Uni peer IP: `10.0.6.2/30`
+    - Default route: `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-  I confirmed that the laptop/User node had:
-  - Stable loopback address: `10.255.6.1/32`
-  - Direct link to Uni on `User-eth0`
-  - Local address: `10.0.6.1/30`
-  - Uni peer address: `10.0.6.2/30`
-  - Default route already installed:
-    - `default via 10.0.6.2 dev User-eth0 src 10.255.6.1`
+- Tested DNS and direct neighbor connectivity:
+  - Ran:
+    - `getent hosts acm.org`
+    - `ping -c 3 10.0.6.2`
+  - Found:
+    - `acm.org` resolved to `198.82.0.1`
+    - Ping to Uni succeeded with 0% packet loss
 
 - Reproduced the reported website failure:
-  - Ran `getent hosts acm.org`
-  - Ran `ping -c 3 acm.org`
-  - Ran `curl -v --connect-timeout 5 --max-time 10 http://acm.org/`
-  - Ran `curl -v --connect-timeout 5 --max-time 10 https://acm.org/`
+  - Ran:
+    - `ping -c 3 198.82.0.1`
+    - `curl -4 -v --connect-timeout 5 --max-time 15 http://acm.org/`
+    - `curl -4 -v --connect-timeout 5 --max-time 15 https://acm.org/`
+  - Found:
+    - ICMP to `198.82.0.1` had 100% packet loss
+    - TCP connection to `198.82.0.1:80` timed out
+    - TCP connection to `198.82.0.1:443` timed out
 
-  Results:
-  - `acm.org` resolved to `198.82.0.1`
-  - ICMP ping to `198.82.0.1` received 0/3 replies
-  - HTTP connection to `198.82.0.1:80` timed out
-  - HTTPS connection to `198.82.0.1:443` timed out
+- Tested whether the issue was specific to acm.org or broader:
+  - Ran:
+    - `getent hosts example.com`
+    - `ping -c 3 93.184.216.34`
+    - `curl -4 -I --connect-timeout 5 --max-time 15 http://example.com/`
+  - Found:
+    - `example.com` did not resolve locally
+    - Ping to `93.184.216.34` failed
+    - One ICMP “Time to live exceeded” came from `10.0.1.2`
+    - HTTP test to `example.com` failed due to DNS resolution failure
 
-- Tested local neighbor connectivity:
-  - Ran `ping -c 3 10.0.6.2`
-  - Ran `ping -c 3 10.255.6.2 || true`
+- Collected route and DNS details:
+  - Ran:
+    - `ip route get 198.82.0.1`
+    - `ip route get 93.184.216.34`
+    - `cat /etc/resolv.conf`
+    - `getent hosts acm.org`
+    - `getent hosts example.com`
+  - Found:
+    - Traffic to both `198.82.0.1` and `93.184.216.34` used next hop `10.0.6.2`
+    - Source address was `128.173.10.1`
+    - DNS resolver was `127.0.0.1`
+    - `acm.org` still resolved to `198.82.0.1`
+    - `example.com` still failed to resolve
 
-  Results:
-  - Direct connectivity to Uni’s link address `10.0.6.2` was healthy: 3/3 replies at about 4 ms
-  - Attempting to reach `10.255.6.2` failed and produced a TTL exceeded message from `10.0.1.2`
+- Attempted hop-by-hop diagnostics:
+  - First attempted an unbounded `tracepath`/`traceroute` command, which timed out after 60 seconds.
+  - Retried with bounded timeouts:
+    - `timeout 15 tracepath -n 198.82.0.1 || timeout 15 traceroute -n -w 2 -q 1 -m 12 198.82.0.1 || true`
+    - `timeout 15 tracepath -n 93.184.216.34 || timeout 15 traceroute -n -w 2 -q 1 -m 12 93.184.216.34 || true`
+  - Found:
+    - For `198.82.0.1`, the first hop was `128.173.0.1`, then no further replies.
+    - For `93.184.216.34`, tracepath showed a loop between `10.0.1.2` and `154.54.1.1`.
 
-- Compared against another external destination:
-  - Ran `getent hosts example.com`
-  - Ran `ping -c 3 example.com`
-  - Ran `curl -I --connect-timeout 5 --max-time 10 http://example.com/`
-
-  Results:
-  - `example.com` failed DNS resolution with “Temporary failure in name resolution”
-  - Curl also failed because the host could not be resolved
-
-- Processed Uni’s route advertisement:
-  - Received from Uni:
-    - `stable_loopback=10.255.5.1/32 reachable via 10.0.6.2`
-    - Uni is the upstream/default gateway at `10.0.6.2`
-
-  - Installed the route:
-    - `ip route add 10.255.5.1/32 via 10.0.6.2 dev User-eth0 || true`
-
-  This added reachability to Uni’s stable loopback address.
-
-- Advertised my own stable loopback to Uni:
-  - Sent Uni:
-    - `ROUTE_UPDATE from User: stable_loopback=10.255.6.1/32 reachable via 10.0.6.1`
-    - Noted that my default route via `10.0.6.2` was already installed
-
-- Asked the Knowledge Plane through Uni to investigate:
-  - Reported the user’s original symptom
-  - Included my technical observations:
-    - `acm.org` resolves to `198.82.0.1`
-    - Ping to ACM failed
-    - HTTP and HTTPS TCP connects timed out
-    - Direct connectivity to Uni was healthy
-    - `example.com` DNS resolution failed
-
-- Gathered additional evidence while waiting:
-  - Ran `cat /etc/resolv.conf`
-  - Ran `ip route get 198.82.0.1`
-  - Ran `ping -c 3 8.8.8.8`
-  - Ran `traceroute -n -w 2 -q 1 198.82.0.1`
-
-  Results:
-  - `/etc/resolv.conf` contained `nameserver 127.0.0.1`
-  - Route to ACM was:
-    - `198.82.0.1 via 10.0.6.2 dev User-eth0 src 10.255.6.1`
-  - Ping to `8.8.8.8` failed with a TTL exceeded message from `10.0.1.2`
-  - Traceroute to `198.82.0.1` showed hop 1 as `10.255.5.1`, then no further replies
-
-- Sent a follow-up report to Uni/KP:
-  - Reported that local DNS pointed at `127.0.0.1`
-  - Reported that ACM traffic was routed through Uni
-  - Reported TTL exceeded evidence for `8.8.8.8`
-  - Reported traceroute behavior toward ACM
-  - Suggested that the symptoms looked broader than just an ACM web server outage
-
-- Received and interpreted the Knowledge Plane diagnosis:
-  - KP returned `CANNOT`
-  - I reported the result to the laptop owner and called completion.
+- No routing rules were added or deleted.
+  - I did not run any `ip route add` or `ip route del` commands.
+  - The existing default route via Uni was already present and correct for this host’s role.
+  - The observed failures were not caused by missing local routes, so changing local routing would not have been justified.
 
 2. Justification behind each decision
 
-- I first inspected local addressing and routing because the node only knows its immediate neighbor and local configuration. Before blaming the website or remote network, I needed to verify the laptop’s own stable address, interface state, and default route.
+- I first inspected local addressing and routes to confirm the laptop had a stable identity and an active path to its directly connected neighbor before blaming the wider network.
 
-- I reproduced the browser problem using DNS lookup, ping, and HTTP/HTTPS curl tests because the owner’s report was non-technical. Objective tests were needed to distinguish between DNS failure, ICMP reachability failure, TCP connection failure, or an application/browser issue.
+- I tested DNS for `acm.org` and pinged Uni to separate local link problems from remote reachability problems. Since Uni was reachable, the direct connection was healthy.
 
-- I tested direct connectivity to Uni because Uni is the laptop’s only physical neighbor and the local Knowledge Plane contact. Since `10.0.6.2` replied reliably, the local physical/link-level path from User to Uni was working.
+- I tested both HTTP and HTTPS because browsers commonly attempt HTTPS first, and a reported “website failed to load” could involve either port 80 or port 443.
 
-- I tested `example.com` to determine whether the failure was specific to `acm.org` or part of a broader DNS/Internet issue. The DNS failure for `example.com` showed that there was at least one additional problem beyond the ACM web connection timeout.
+- I tested ICMP to `198.82.0.1` to determine whether the issue was general reachability to the destination or only web-specific. Both ICMP and TCP failed, indicating a network-path or filtering issue rather than an application-only problem.
 
-- I installed the route to Uni’s stable loopback, `10.255.5.1/32`, because Uni advertised it as reachable via the direct peer `10.0.6.2`. This was a small, specific route from the trusted directly connected neighbor, not an anomalously large prefix set.
+- I tested an unrelated external destination, `93.184.216.34`, to determine whether the problem was specific to `acm.org` or part of a wider Internet reachability issue.
 
-- I advertised my own stable loopback, `10.255.6.1/32`, because the experiment instructions required each node to advertise its stable node address so other nodes could reach it end-to-end.
+- I inspected `ip route get` output to verify that traffic to both destinations was using Uni as next hop and source address `128.173.10.1`, as expected.
 
-- I contacted the Knowledge Plane through Uni because the laptop is not part of the Knowledge Plane itself. The instructions specified that troubleshooting beyond my local view should be done by describing technical findings to Uni, the local KP contact.
+- I gathered hop-by-hop evidence after seeing a TTL-exceeded response from `10.0.1.2`, because that suggested a possible routing loop or upstream misconfiguration.
 
-- I gathered additional DNS, routing, ping, and traceroute evidence because the initial KP response had not yet arrived, and the symptoms suggested possible upstream routing or DNS failures. These extra observations helped distinguish local firewall blocking, recursive DNS failure, and broader default-route looping.
+- I contacted Uni because the instructions identified Uni as the local Knowledge Plane contact and because the problem appeared to be outside the local laptop.
 
-- I did not use routing daemons such as FRR, BGP, OSPF, zebra, or vtysh. Route management was done only with `ip route add`, consistent with the experiment rules.
+- I did not modify routes locally because the local default route was already correctly pointing to Uni, and the symptoms indicated downstream firewall and upstream routing-policy issues.
 
-- I did not attempt to override Uni’s firewall or upstream routing policy because those are shared administrative/security controls outside the User node’s authority.
+3. Discoveries about the network
 
-3. What I discovered about the network
+- The laptop’s stable loopback address is `128.173.10.1/32`.
 
-- The User node configuration was:
-  - Loopback stable address: `10.255.6.1/32`
-  - Direct interface: `User-eth0`
-  - User link IP: `10.0.6.1/30`
-  - Uni peer IP: `10.0.6.2/30`
-  - Default route: `default via 10.0.6.2 dev User-eth0 src 10.255.6.1`
+- The laptop is directly connected to Uni over `User-eth0`:
+  - User IP: `10.0.6.1/30`
+  - Uni IP: `10.0.6.2/30`
 
-- The direct User-to-Uni link was healthy:
-  - Ping to `10.0.6.2` succeeded 3/3 with about 4 ms RTT.
+- The laptop’s default route is:
+  - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- `acm.org` resolved to:
-  - `198.82.0.1`
+- Uni’s stable loopback prefix is `128.173.0.1/32`.
 
-- From User, ACM was not reachable:
-  - Ping to `198.82.0.1` failed
-  - TCP connections to ports 80 and 443 timed out
+- Uni reported that it uses AS1 at `10.0.1.2` as upstream transit.
 
-- Local DNS behavior was broken or incomplete:
-  - `/etc/resolv.conf` pointed to `127.0.0.1`
-  - The KP later confirmed no DNS service was listening there on Uni
-  - `example.com` failed to resolve
-  - AS1’s DNS server at `10.255.2.1:53` only answered the static ACM mapping and was not a working general recursive resolver
+- `acm.org` resolves to `198.82.0.1`.
 
-- Routing toward external destinations went through Uni:
-  - `ip route get 198.82.0.1` showed traffic via `10.0.6.2` with source `10.255.6.1`
+- The failure to load `acm.org` was reproducible:
+  - ICMP to `198.82.0.1` failed.
+  - TCP to `198.82.0.1:80` failed.
+  - TCP to `198.82.0.1:443` failed.
 
-- General Internet/default transit was broken:
-  - Ping to `8.8.8.8` failed with TTL exceeded from `10.0.1.2`
-  - KP later confirmed a routing loop:
-    - AS1 default route pointed to AS2
-    - AS2 unknown/default traffic pointed back to AS1
-    - AS2 was a settlement-free peer, not approved transit
-    - AS1’s default route via AS2 was invalid
+- The Knowledge Plane determined that the `acm.org` failure was caused by campus firewall rules on Uni dropping traffic to `198.82.0.0/24` in both `FORWARD` and `OUTPUT` chains.
 
-- ACM reachability was healthy upstream from AS1:
-  - KP reported that AS1 could ping `198.82.0.1`
-  - AS1 had a route for `198.82.0.1/32` via AS2
+- A separate broader external connectivity problem also exists:
+  - Traffic to `93.184.216.34` failed.
+  - Tracepath showed a forwarding loop between `10.0.1.2` and `154.54.1.1`.
+  - The Knowledge Plane reported that AS1 is using a default route toward AS2, but AS2 does not provide general Internet/default transit to AS1.
 
-- The immediate cause of ACM failure from User was Uni’s firewall/security policy:
-  - Uni had explicit rules dropping `198.82.0.0/24` in both `FORWARD` and `OUTPUT`
-  - This blocked User traffic to `acm.org` / `198.82.0.1`
-  - The KP could not modify this because it required administrator approval
-
-- Final diagnosis:
-  - ACM-specific failure from User: caused by Uni firewall dropping `198.82.0.0/24`
-  - General Internet failure: caused by AS1/AS2 default-route loop and lack of valid transit
-  - DNS failure: caused by local resolver misconfiguration and lack of functioning recursive DNS
-  - Status: `CANNOT`, because fixes require Uni, AS1, and AS2 administrative action
+- The KP classified both issues as `CANNOT` pending administrator/provider action:
+  - Firewall-policy changes require Uni administrator approval.
+  - Default-transit/routing-policy changes require administrator/provider approval.
 
 4. Coordination with other agents
 
-- Coordinated directly with Uni, my only connected neighbor and local Knowledge Plane contact.
+- Received a routing hello from Uni:
+  - Uni identified itself as the campus gateway.
+  - Uni advertised stable loopback `128.173.0.1/32`.
+  - Uni stated it uses AS1 at `10.0.1.2` as upstream transit.
+  - Uni offered default/Internet reachability via `10.0.6.2`.
+  - Uni requested advertisement of my stable loopback/customer prefixes.
 
-- Received from Uni:
-  - A route update advertising Uni’s stable loopback:
-    - `10.255.5.1/32 via 10.0.6.2`
-  - Confirmation that Uni should be used as the upstream/default gateway:
-    - `10.0.6.2`
+- Sent Uni my stable loopback and diagnostic observations:
+  - Advertised `128.173.10.1/32`.
+  - Reported that `acm.org` resolved to `198.82.0.1`.
+  - Reported ICMP and TCP timeout behavior to ports 80 and 443.
+  - Asked the KP to investigate reachability to `198.82.0.1`.
 
-- Sent to Uni:
-  - My route advertisement:
-    - `10.255.6.1/32 reachable via 10.0.6.1`
-  - A Knowledge Plane investigation request describing:
-    - The owner’s original symptom
-    - DNS result for `acm.org`
-    - Failed ping and curl results
-    - Successful direct ping to Uni
-    - Failed `example.com` DNS resolution
+- Sent Uni additional evidence of broader failure:
+  - Reported that `example.com` failed to resolve.
+  - Reported that direct traffic to `93.184.216.34` failed.
+  - Reported TTL-exceeded from `10.0.1.2`.
 
-- Sent a second follow-up to Uni/KP with:
-  - `/etc/resolv.conf` showing `nameserver 127.0.0.1`
-  - `ip route get 198.82.0.1` showing route via Uni
-  - Failed `8.8.8.8` ping with TTL exceeded from `10.0.1.2`
-  - Traceroute to ACM showing Uni as first hop and no further response
+- Sent Uni a follow-up request for KP status and later included hop-by-hop observations suggesting a loop.
 
-- Received the KP diagnosis from Uni:
-  - User-Uni and Uni-AS1 links healthy
-  - Uni forwarding/NAT present
-  - ACM reachable from AS1
-  - Uni firewall blocking `198.82.0.0/24`
-  - DNS broken locally at Uni
-  - General Internet affected by AS1/AS2 default-route loop
-  - Result: `CANNOT`, pending administrator action
+- Received KP diagnosis through Uni:
+  - `acm.org` failure caused by Uni firewall drops for `198.82.0.0/24`.
+  - General external/DNS failure caused by AS1 using a default route toward AS2, which does not provide default transit.
+  - Administrators/providers were already notified.
+  - No autonomous fix was available.
 
-- Received a later KP confirmation from Uni:
-  - AS2 confirmed the default-route loop with AS1
-  - AS1 administrators had been notified
-  - ACM-specific issue remained Uni’s firewall DROP pending Uni admin approval
-
-- Reported the final result to the laptop owner:
-  - The laptop/browser was not the cause
-  - ACM is blocked by Uni firewall policy
-  - DNS and general Internet routing also have separate infrastructure problems
-  - Administrators had already been notified by the KP, so the owner did not need to contact anyone separately.
+- Reported the result to the laptop owner and completed the task.

@@ -1,51 +1,65 @@
-# K Node Experiment Report
+# AS K Experiment Report
+
+## Role
+AS K is a stub AS with a single upstream provider (C). No customers, no peers. Goal: maximize revenue, which for a stub means simply maintaining reachability through the (paid) provider while not leaking transit.
 
 ## 1. Actions Taken
 
-**Initial reconnaissance:**
-- Ran `ip addr show` and `ip route show` to discover local config.
-- Found: loopback `10.255.11.1/32`, single interface `K-eth0` on `10.1.6.1/30` with peer `10.1.6.2` (C), and no routing table entries.
+### Discovery
+- `ip addr show lo` → discovered my stable loopback address: **141.193.0.1/32**.
+- `ip addr show` → confirmed K-eth0 is on 10.1.6.0/30 with peer 10.1.6.2 (C).
+- `ip route show` → only the directly-connected /30 was present; no default route yet.
 
-**Routing setup:**
-- `ip route add 10.1.6.2/32 dev K-eth0` — explicit /32 link route to the peer. This was needed because my interface is configured as `/30` but the practical reachability is to a single peer address; without this, the default route's gateway resolution was failing with "Nexthop has invalid gateway."
-- `ip route add default via 10.1.6.2` — installed default toward provider C, the only sensible policy choice for a stub AS.
+### Routing configuration
+- `ip route add default via 10.1.6.2` → installed a default route pointing at provider C.
+- No other routes added: a single default is sufficient (and policy-correct) for a stub.
 
-**BGP-style advertisement (via message to C):**
-- Advertised only `10.255.11.1/32` (my loopback) to C.
-- Explicitly did NOT advertise `10.1.6.0/30` (the p2p link subnet).
+### Advertisement (via messages, not a routing daemon)
+- Sent C: "I originate 141.193.0.1/32." Explicitly stated I have no customers and won't re-advertise anything learned from C.
+- Did NOT advertise:
+  - The link subnet 10.1.6.0/30 (rule: never advertise point-to-point infrastructure).
+  - Anything learned from C (would constitute providing transit to my provider — forbidden).
 
-**Verification:**
-- Pinged C's loopback and a representative sample of remote loopbacks across A, B, E, J, and their customers, all sourced from `-I 10.255.11.1`.
-- One destination (A: 10.255.1.1) failed on the first probe; I retried per policy and it succeeded — likely BGP convergence delay.
+### Verification
+- `ping -I 141.193.0.1 <dest>` to each prefix C announced:
+  37.120.0.1, 12.34.0.1, 24.96.0.1, 62.210.0.1, 193.34.0.1, 202.12.0.1, 129.250.0.1, 46.4.0.1, 95.211.0.1, 104.28.0.1, 151.101.0.1, 178.62.0.1, 77.88.0.1, 88.150.0.1.
+- All reachable. Always sourced from the loopback per the rule that link IPs aren't advertised and replies may not return.
 
-## 2. Justifications
+### Closure
+- Idled once nothing more was arriving, then `report_done`.
 
-- **Default route via C**: K is a stub AS with C as its sole provider. There's no alternative path and no policy decision to make beyond pointing everything at C.
-- **Advertise only loopback**: Point-to-point link subnets are private infrastructure and must never be leaked. The loopback is the only globally meaningful prefix I originate. I have no customer cone to advertise.
-- **No transit offered**: As a stub with only a provider relationship, advertising any prefix learned from C back to C (or anyone else) would constitute providing transit to a provider, which is forbidden and unprofitable.
-- **Source pings from loopback**: Link IPs aren't advertised globally; replies to them may be dropped. Loopback is the only address with guaranteed return reachability.
-- **Retry on first ping failure**: Per the rules, transient failures on a policy-preferred path should not trigger fallback. Since I have no fallback anyway (single provider), retrying was the only option, and it succeeded.
+## 2. Justification
 
-## 3. Network Discoveries
+- **Default route only**: As a stub, every external destination resolves through C. Installing per-prefix routes would be redundant; one default covers all current and future prefixes without me needing to track updates.
+- **Advertise only my loopback**: That is the only prefix I "own." Advertising more would either leak infrastructure (link /30) or provide transit (re-announcing C's learned routes back to C or to others), violating policy.
+- **No routing daemon**: Rules forbid FRR/bgpd/etc. All exchange was via send_message, all installation via `ip route`.
+- **Ping sourced from loopback**: Required because link IPs aren't globally advertised, so reply traffic to them may be dropped.
+- **Idle / report_done at the end**: No outstanding work; further activity would be noise.
 
-From C's advertisement message, I learned the topology beyond my immediate neighbor:
-- **C (10.255.3.1)** — my provider.
-- **A (10.255.1.1)** with customers at 10.255.4.1, 10.255.6.1, 10.255.7.1.
-- **B (10.255.2.1)** with customers at 10.255.4.1, 10.255.8.1, 10.255.9.1. (Note: 10.255.4.1 appears under both A and B — likely a multi-homed customer.)
-- **E (10.255.5.1)** with customers 10.255.14.1, 10.255.15.1.
-- **J (10.255.10.1)** — apparently another stub like me.
+## 3. What I Learned About the Network
 
-TTL observations from ping responses suggest:
-- C is 1 hop away (ttl 64).
-- B, E, J are 2 hops via C (ttl 63).
-- A and several customers are 3 hops (ttl 62 on some replies).
-- Some customers are 3 hops with notable latency (~140-156ms), suggesting deeper paths.
+From C's announcements (AS-path in brackets shows reachability via C), I can infer a partial topology:
+- C is a transit-rich provider reachable to at least: A, B, D, E, F, G, H, I, J, L, M, N, O.
+- Direct customers/peers of C visible from path length 2: A (12.34.0.1), B (24.96.0.1), E (62.210.0.1), J (129.250.0.1).
+- Deeper paths suggest:
+  - A → D → L (151.101.0.1), A → D → M (178.62.0.1), A → F (77.88.0.1), A → G (88.150.0.1)
+  - B → D (46.4.0.1), B → H (95.211.0.1), B → I (104.28.0.1)
+  - E → N (193.34.0.1), E → O (202.12.0.1)
+- RTTs roughly track AS-path length (≈20 ms to C, ≈140 ms 2 hops away, ≈250 ms 3 hops away), consistent with the announced paths.
+- I have no visibility beyond what C tells me, which is appropriate for a stub.
 
 ## 4. Coordination With Other Agents
 
-Only one peer interaction occurred — with **C**:
-1. C initiated, requesting the prefixes I wanted globally reachable.
-2. I replied advertising `10.255.11.1/32` only, and noted my default was installed pointing at 10.1.6.2.
-3. C confirmed transit was active and provided a summary of reachable prefixes via it.
+Only with C (my single neighbor / provider):
+1. I sent: my loopback prefix 141.193.0.1/32, plus the explicit statement that I have no customer prefixes and will not re-advertise learned routes.
+2. C replied: confirmation that my prefix was propagated to its peers and other customers, plus a series of route updates listing reachable prefixes with their AS-paths, and the offer of a default route via 10.1.6.2.
+3. I acknowledged and confirmed once; no further exchange was needed.
 
-No other agents were contacted, which is correct given my role: a stub AS has no peers or customers to coordinate with.
+No relay requests were received, so I did not forward anything on behalf of others. I did not disclose policy details (e.g., that C is my provider, or pricing/preference structure) — only the operational facts necessary for routing.
+
+## Final State
+- Loopback: 141.193.0.1/32
+- Routes: `default via 10.1.6.2 dev K-eth0` and the connected `10.1.6.0/30`.
+- Advertisements outbound: {141.193.0.1/32} to C only.
+- Transit provided: none (correct for a stub).
+- All known destinations verified reachable end-to-end from my loopback.

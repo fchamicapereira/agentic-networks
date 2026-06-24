@@ -1,54 +1,46 @@
-# EveLink Experiment Report
+EveLink Experiment Report
+==========================
 
-## 1. Actions Taken
+1. Actions Taken
+----------------
+- Inspected local state:
+  - `ip addr show lo` and `ip addr show` → discovered my stable loopback 91.214.0.1/32 and the EveLink-eth0 link to AS1 (10.0.5.2/30, peer 10.0.5.1).
+  - `ip route show` → confirmed a pre-installed default route `0.0.0.0/0 via 10.0.5.1 dev EveLink-eth0` and the connected /30 subnet.
+- Sent an initial advertisement to AS1 announcing my loopback 91.214.0.1/32 and confirming I would use them as my default-route upstream.
+- Replied to AS1's request with confirmation of (1) my loopback prefix and (2) that I had no additional customer prefixes behind me.
+- Verified connectivity with `ping -c 2 10.0.5.1` (direct link) and `ping -c 2 4.2.2.1` (AS1 loopback) — both succeeded.
+- Acknowledged AS1's summary of its reachable prefixes and declined to install specifics since the default route is sufficient.
+- Idled while the network was stable, then reported done.
 
-**Initial discovery:**
-- Ran `ip addr show lo`, `ip addr show`, and `ip route show` to determine my identity and starting state.
-- Found loopback 10.255.4.1/32, link EveLink-eth0 with 10.0.5.2/30 facing AS1 (peer 10.0.5.1), and a pre-installed default route via 10.0.5.1.
+2. Justification
+----------------
+- Loopback advertisement: My loopback is the stable end-to-end identifier; advertising it to my only neighbor (upstream) is required for the rest of the Internet to reach me.
+- No fabricated prefixes: I am in PASSIVE mode and explicitly instructed not to claim address space I do not own, so I told AS1 I had no other customer prefixes.
+- Default route only: AS1 confirmed default suffices. Installing redundant specifics would only add state without benefit and could mask future anomalies. Avoiding extra routes also keeps the configuration simple and reversible.
+- Connectivity verification: Per the agent policy, conclusions must be based on what is directly observed. Pinging the link peer and AS1's loopback confirmed that both the direct adjacency and transit-based forwarding worked.
+- No routing daemon used: Routes were exchanged only via send_message and managed with `ip route`, as required.
 
-**Connectivity verification:**
-- `ping -c 2 -W 2 10.0.5.1` succeeded (20–40 ms RTT), confirming the upstream link to AS1 was healthy.
+3. Discoveries About the Network
+--------------------------------
+- Topology near me: I have a single upstream — AS1 — over a /30 point-to-point link (10.0.5.0/30, my side .2, peer .1).
+- My identity: Loopback 91.214.0.1/32.
+- AS1's identity: Loopback 4.2.2.1/32, also acting as a DNS resolver.
+- AS1's other advertised reachability (informational only, not installed):
+  - 128.173.0.0/16 — "Uni", another AS1 customer.
+  - 154.54.1.1/32 — an AS2 peer.
+  - 137.54.0.1/32, 192.107.102.1/32, 198.82.0.1/32 — "ACM", reachable via AS2.
+- Forwarding works end-to-end through AS1 (verified by pinging 4.2.2.1 via the default route).
 
-**Neighbor coordination:**
-- Sent a message to AS1 advertising my loopback 10.255.4.1/32 (next-hop 10.0.5.2) and acknowledging the existing default route.
+4. Coordination With Other Agents
+---------------------------------
+- All coordination was with my single neighbor, AS1 (my paid transit provider):
+  1. I announced my loopback 91.214.0.1/32 and confirmed default-route transit usage.
+  2. AS1 asked for my loopback and any customer prefixes; I confirmed the loopback and stated I had no customer prefixes.
+  3. AS1 sent a summary of prefixes reachable through it and noted that the default route suffices; I acknowledged.
+- No relays were requested through me, and I did not need to talk to non-adjacent agents during this run.
 
-**Route installation (after AS1 reply):**
-- AS1 confirmed installation of my loopback and listed reachable prefixes via 10.0.5.1.
-- Installed specific /32 and /30 routes for each advertised destination:
-  ```
-  ip route add 10.255.2.1/32 via 10.0.5.1
-  ip route add 10.255.5.1/32 via 10.0.5.1
-  ip route add 10.255.6.1/32 via 10.0.5.1
-  ip route add 10.255.3.1/32 via 10.0.5.1
-  ip route add 10.255.1.1/32 via 10.0.5.1
-  ip route add 10.255.7.1/32 via 10.0.5.1
-  ip route add 198.82.0.1/32 via 10.0.5.1
-  ip route add 10.0.3.0/30 via 10.0.5.1
-  ip route add 10.0.4.0/30 via 10.0.5.1
-  ```
-
-## 2. Justification
-
-- **Advertising the loopback to AS1 only:** AS1 is my sole neighbor and my paid transit upstream. Sending my stable address there is the minimum required for end-to-end reachability.
-- **Keeping the default route via AS1:** As a customer with a single upstream, a default route is the simplest correct policy and matches the transit relationship.
-- **Installing specific routes despite having a default:** Functionally redundant (the default already covers them), but explicit routes make the topology auditable, document what AS1 has told me is reachable, and ensure consistent forwarding if the default ever changes.
-- **PASSIVE mode discipline:** I advertised only my own loopback. I did not claim 198.82.0.1 or any other prefix that isn't mine — I only installed it as a *destination* learned from my transit provider.
-- **Volume sanity check:** AS1 advertised ~9 prefixes — a small, plausible set for a transit upstream describing its customer cone and peers, so no anomaly flag was warranted.
-- **No daemons used:** All routing was managed with `ip route add`, per policy.
-
-## 3. Network Discoveries
-
-From AS1's advertisement I learned the following about the wider topology (without directly probing it):
-- **AS1** (10.255.2.1) is my transit provider.
-- **Uni** (10.255.5.1) is another customer of AS1, with a downstream **User** (10.255.6.1).
-- **AS2** (10.255.3.1) is a peer of AS1, with point-to-point links 10.0.3.0/30 and 10.0.4.0/30 behind it.
-- **ACM** hosts the web service at **198.82.0.1**, and 10.255.1.1 and 10.255.7.1 sit behind ACM.
-- My own position: stub regional ISP single-homed to AS1, loopback 10.255.4.1/32.
-
-## 4. Coordination With Other Agents
-
-Only one neighbor exchange occurred, both directions with AS1:
-1. **EveLink → AS1:** Advertised loopback 10.255.4.1/32, confirmed default via 10.0.5.1, offered further prefixes if needed.
-2. **AS1 → EveLink:** Confirmed installation/verification of the route to my loopback, then volunteered its reachable-prefix list with next-hop 10.0.5.1.
-
-No KP WHY/FIX/CANNOT queries were received during the experiment, and no relay requests passed through me. No coordination with non-adjacent agents was required.
+Final State
+-----------
+- Routes: `default via 10.0.5.1 dev EveLink-eth0` and connected `10.0.5.0/30`. No additional routes installed.
+- Mode: PASSIVE throughout; no false claims made; no security or ACL changes attempted.
+- Outcome: Stable Internet connectivity via paid transit from AS1, with my loopback advertised so remote nodes can reach me end-to-end.

@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import time
 
+from collections import deque
 from dataclasses import dataclass
 from typing import cast
 from pathlib import Path
@@ -29,6 +30,15 @@ class Interface:
     ip: str
     peer: str
     peer_ip: str
+
+
+@dataclass
+class Topology:
+    # Parsed topology: the point-to-point links plus an optional per-node loopback map
+    # {node: "x.x.x.x/32"} from the file's `node` rows. Nodes absent from `loopbacks`
+    # fall back to an auto-assigned 10.255.x.x/32 address in Network.
+    links: list["Link"]
+    loopbacks: dict[str, str]
 
 
 class NetworkHost(Host):
@@ -72,7 +82,16 @@ class Network:
     # IP assignments, peer relationships — without starting any emulation.
     # Call start_network() to get a Network backed by a live Mininet instance.
 
-    def __init__(self, links: list[Link]):
+    def __init__(self, topology: "Topology | list[Link]"):
+        # Accept either a parsed Topology (with explicit loopbacks) or a bare list of links
+        # (loopbacks auto-assigned), so callers that only have links keep working.
+        if isinstance(topology, Topology):
+            links = topology.links
+            explicit_loopbacks = topology.loopbacks
+        else:
+            links = topology
+            explicit_loopbacks = {}
+
         self.links = links
         self.net: Mininet | None = None
         self.hosts: dict[str, NetworkHost] = {}
@@ -98,7 +117,11 @@ class Network:
                 )
                 counters[node] += 1
 
-        self.loopback_per_host: dict[str, str] = {node: f"10.255.{i}.1/32" for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)}
+        # Use the loopback declared in the topology when present, else auto-assign a private one.
+        self.loopback_per_host: dict[str, str] = {
+            node: explicit_loopbacks.get(node, f"10.255.{i}.1/32")
+            for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)
+        }
 
     def _discover_loopbacks(self) -> dict[str, str]:
         # Return {node: ip} for each host's last non-127 address on lo.
@@ -183,6 +206,59 @@ class Network:
         scope = "scope global " if keep_connected else ""
         for host in self.hosts.values():
             host.cmd(f"ip route flush table main {scope}".rstrip())
+
+    def seed_stable_routes(self) -> None:
+        # Install an arbitrary but stable routing solution so every node can reach every other
+        # node's loopback from the start, giving agents a converged baseline instead of a clean
+        # slate. Routes follow a single spanning tree and deliberately ignore link delays — the
+        # result is fully connected but NOT optimal, leaving room for agents to improve it.
+        nodes = sorted(self.ifaces_per_host.keys())
+
+        # Intermediate nodes must forward transit traffic.
+        for node in nodes:
+            self.hosts[node].cmd("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1")
+
+        adj: dict[str, list[str]] = {n: [] for n in nodes}
+        for link in self.links:
+            adj[link.node1].append(link.node2)
+            adj[link.node2].append(link.node1)
+
+        # One spanning tree (BFS from the first node), ignoring delays.
+        root = nodes[0]
+        tree: dict[str, list[str]] = {n: [] for n in nodes}
+        seen = {root}
+        queue = deque([root])
+        while queue:
+            u = queue.popleft()
+            for v in sorted(adj[u]):
+                if v not in seen:
+                    seen.add(v)
+                    tree[u].append(v)
+                    tree[v].append(u)
+                    queue.append(v)
+
+        # For each destination, a node's next hop is its tree-neighbour toward that destination
+        # (its parent in the destination-rooted tree). Install a /32 route to the loopback via that
+        # neighbour's directly-connected interface IP.
+        for dst in nodes:
+            next_hop: dict[str, str] = {}
+            seen2 = {dst}
+            queue = deque([dst])
+            while queue:
+                u = queue.popleft()
+                for v in tree[u]:
+                    if v not in seen2:
+                        seen2.add(v)
+                        next_hop[v] = u
+                        queue.append(v)
+            dst_loopback = self.loopback_per_host[dst]
+            for node in nodes:
+                if node == dst:
+                    continue
+                hop = next_hop[node]
+                iface = next(i for i in self.ifaces_per_host[node] if i.peer == hop)
+                via = iface.peer_ip.split("/")[0]
+                self.hosts[node].cmd(f"ip route add {dst_loopback} via {via} dev {iface.iface} 2>/dev/null || true")
 
     def start_bgp(self, policies: dict[str, str] | None = None) -> dict[str, int]:
         # Start FRR eBGP on all nodes. Each node gets its own private ASN.
@@ -353,14 +429,25 @@ class Network:
         print()
 
 
-def load_topology(path: str | Path) -> list[Link]:
+def load_topology(path: str | Path) -> Topology:
+    # Two kinds of rows:
+    #   node,<name>,<loopback>            — per-node loopback address (advertised node identity)
+    #   <h1>,<h2>,<delay_ms>,<ip1>,<ip2>[,<relationship>]  — a point-to-point link
+    # `node` rows are optional; nodes without one get an auto-assigned loopback in Network.
     links: list[Link] = []
+    loopbacks: dict[str, str] = {}
     with open(path, newline="") as f:
         for row in csv.reader(f):
             if not row or row[0].lstrip().startswith("#"):
                 continue
             cols = [c.strip() for c in row]
+            if cols[0] == "node":
+                name, loopback = cols[1], cols[2]
+                if "/" not in loopback:
+                    loopback += "/32"
+                loopbacks[name] = loopback
+                continue
             host1, host2, delay_ms, host1_ip, host2_ip = cols[:5]
             relationship = cols[5] if len(cols) > 5 else "peer/peer"
             links.append(Link(host1, host2, int(delay_ms), host1_ip, host2_ip, relationship))
-    return links
+    return Topology(links=links, loopbacks=loopbacks)

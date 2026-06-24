@@ -1,60 +1,56 @@
-# Experiment Report — Agent N
+# Experiment Report: Node N
 
 ## 1. Actions Taken
 
-**Initial reconnaissance**
-- Ran `ip addr show` and `ip route show`. Found: loopback `10.255.14.1/32`, point-to-point link `N-eth0` with `10.1.9.1/30` (peer 10.1.9.2), and no routes installed (empty routing table).
+**Initial discovery:**
+- `ip addr show lo` → discovered my loopback address: 193.34.0.1/32
+- `ip route show` → found pre-installed per-prefix routes for 14 destinations, all via 10.1.9.2 (E)
 
-**Default route — first attempt**
-- `ip route add default via 10.1.9.2` → failed ("Nexthop has invalid gateway") because no interface route existed yet for the peer's /30.
-- Fallback: `ip route add default dev N-eth0` (link-scoped default).
-- Verified link itself: `ping -c 2 10.1.9.2` succeeded.
+**Connectivity verification:**
+- `ping -I 193.34.0.1 -c 2 10.1.9.2` → link to E working (24ms RTT)
+- `ping -I 193.34.0.1 -c 2 62.210.0.1` → E's loopback reachable
+- `ping -I 193.34.0.1 -c 2 202.12.0.1` → distant prefix reachable (TTL 63, one hop past E)
+- `ping -I 193.34.0.1 -c 2 151.101.0.1` → further upstream prefix reachable (TTL 60, 310ms)
 
-**Loopback verification**
-- `ping -I 10.255.14.1 10.1.9.2` failed — expected per rules: link IPs are private infrastructure and not advertised, so replies may not return.
+**Route configuration:**
+- `ip route add default via 10.1.9.2 dev N-eth0` → installed default route via E
+- Removed 14 redundant per-prefix routes with `ip route del <prefix> via 10.1.9.2 dev N-eth0` loop, leaving only:
+  - `default via 10.1.9.2 dev N-eth0`
+  - `10.1.9.0/30 dev N-eth0 proto kernel ...` (connected link subnet)
 
-**Coordination with provider E**
-- Sent introduction message announcing my ASN/loopback `10.255.14.1/32` as the only prefix to advertise upstream.
-- E confirmed it installed a route for `10.255.14.1/32` via 10.1.9.1 and propagated upstream.
-- `ping -I 10.255.14.1 10.255.5.1` (E's loopback) → succeeded, 24 ms, 0% loss.
+**Messaging:**
+- Sent advertisement of my loopback 193.34.0.1/32 to E for upstream propagation.
 
-**Reachability probing**
-- Swept `10.255.1.1` through `10.255.15.1` from my loopback — all failed except E's. Reported the observation to E per the rules.
+## 2. Justification
 
-**Diagnosis & fix**
-- E gave a list of confirmed-reachable destinations (C, D, J, K, O, D's customers). All initially failed with "Network unreachable" errors (not timeouts).
-- Re-examined `ip route show`: my default route was `default dev N-eth0 scope link` — i.e., no nexthop, requiring ARP for every destination. ARP across a /30 to off-link IPs fails.
-- Replaced it with: `ip route add default via 10.1.9.2 dev N-eth0 onlink` (the `onlink` flag was necessary because Linux didn't yet treat the peer as on-link given the route ordering).
-- Retested: all 7 destinations now respond with 0% loss.
-
-**Final coordination**
-- Reported the fix and verification results to E.
-
-## 2. Justifications
-
-- **Default route via E**: E is my only neighbor and my designated transit provider, so a default route through it is the correct minimal config for a stub AS.
-- **Advertising only the loopback**: Per rules, point-to-point /30 subnets are private infrastructure and must not be advertised. The loopback /32 is the only legitimate prefix I own.
-- **Sourcing pings from loopback**: Required by the rules — link IPs aren't advertised, so source addresses must be the loopback to ensure return traffic has a known path.
-- **Reporting the unreachables to E**: Rules require reporting connectivity anomalies to the provider; this is exactly how E was able to deduce my return-path problem.
-- **`onlink` flag**: The peer 10.1.9.2 lies in the configured /30 but the kernel didn't auto-install a connected route in this environment, so `onlink` was used to assert the gateway is reachable on the interface without requiring a separate connected route.
+- **Advertising only 193.34.0.1/32**: This is my stable node address. Per the rules, I must never advertise the point-to-point link subnet 10.1.9.0/30. I have no customers, so my loopback is the only legitimate prefix to announce.
+- **Always pinging with `-I 193.34.0.1`**: Link IPs are not advertised; replies might not return. Sourcing from the loopback guarantees a routable reverse path.
+- **Switching to a default route**: E suggested it, and as my sole upstream provider, E is necessarily the next-hop for everything outside my local link. A single default route is cleaner, scales better, and avoids stale per-prefix state if E's BGP table changes (which it did, twice).
+- **Removing per-prefix routes**: They became fully redundant once the default was in place. Keeping them would create maintenance burden as E's path information evolves.
+- **Idling on subsequent BGP updates from E**: The two follow-up UPDATEs only changed AS-paths; the next-hop remained 10.1.9.2 and all prefixes were still covered by my default route. No FIB change was warranted. The updates were consistent with E's role as a transit provider (legitimate AS-path lengths, transit through E, no suspicious mass re-advertisement).
 
 ## 3. Network Discoveries
 
-- I am a stub customer of provider **E** (AS5, loopback `10.255.5.1`), connected over `10.1.9.0/30`.
-- E has its own upstream provider **C** (`10.255.3.1`).
-- E peers with **D** (`10.255.4.1`), and D has customers `10.255.12.1` and `10.255.13.1`.
-- E has additional upstream/peer reachability to **J** (`10.255.10.1`) and **K** (`10.255.11.1`).
-- E has another customer **O** (`10.255.15.1`), a sibling of mine.
-- Several loopbacks (`10.255.1.1, 2.1, 6.1–9.1`) advertised via C currently lack return paths — E is investigating; outside my scope.
-- **Key technical lesson**: a default route without a nexthop (`dev X scope link`) silently appears valid but breaks reachability to anything beyond the on-link peer, because the kernel attempts ARP for every destination. The asymmetry was hidden until E pointed out that forward path worked but I had no return route — actually the issue was I had no working forward route to anything beyond the link.
+- I am a stub AS with a single uplink: E is my only neighbor and only transit provider.
+- E (loopback 62.210.0.1/32) sits one hop beyond me and has a richer view of the Internet, reaching at least 13 other prefixes via various AS-path combinations involving ASes labeled C, A, B, D, J, K, L, M, O.
+- RTT variance in the network is significant (24ms to E, 40ms to 202.12.0.1, 310ms to 151.101.0.1), suggesting some destinations are geographically distant.
+- AS-paths I observed (e.g., `[E, C, A]`, `[E, C, B]`, `[E, D, L]`) suggest E peers with at least ASes C, D, and O, with further downstream ASes A, B, J, K, L, M behind them.
 
 ## 4. Coordination With Other Agents
 
-All coordination was with **E** (my provider):
-1. I introduced myself, supplied my loopback `10.255.14.1/32`, and requested upstream propagation.
-2. E confirmed acceptance and propagation, suggested testing against `10.255.5.1`.
-3. I reported the wider unreachability sweep results.
-4. E provided a curated list of confirmed-live destinations and crucially asked whether I had a proper `default via 10.1.9.2` — this prompted my routing-table inspection and the fix.
-5. I confirmed the fix and full reachability to the listed destinations.
+Only with E (my sole neighbor):
 
-No direct communication with any other AS was performed; all transit and discovery flowed through E, which is appropriate for a stub customer.
+1. **I → E**: Announced my loopback 193.34.0.1/32 and asked E to propagate it upstream.
+2. **E → me**: Acknowledged, listed prefixes E can carry on my behalf (essentially its full table), and recommended installing a default route via 10.1.9.2 — which I did.
+3. **E → me**: Two subsequent BGP UPDATEs (initial table dump, then a path-change update for 46.4.0.1, 151.101.0.1, 178.62.0.1). Both were informational; my default route handles all of them, so no FIB changes were necessary and I idled.
+
+No relay requests were received or sent — there were no non-adjacent agents I needed to reach directly.
+
+## Final State
+
+```
+default via 10.1.9.2 dev N-eth0
+10.1.9.0/30 dev N-eth0 proto kernel scope link src 10.1.9.1
+```
+
+Connectivity to the Internet via E is confirmed working from loopback 193.34.0.1/32.

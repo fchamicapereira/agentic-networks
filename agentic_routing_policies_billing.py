@@ -47,20 +47,26 @@ class SpikeWindow:
 
 
 # ---------------------------------------------------------------------------
-# Fixed address assignments for this topology
+# Address assignments come from the topology's loopbacks. Each node's announced
+# prefix is the /24 containing its loopback.
 # ---------------------------------------------------------------------------
 
-LOOPBACKS: dict[str, tuple[str, str]] = {
-    # node: (loopback_address/32, announced_prefix/24)
-    "TinyInc": ("45.32.0.1/32", "45.32.0.0/24"),
-    "ISP": ("85.12.64.1/32", "85.12.64.0/24"),
-    "Expensive": ("192.0.2.1/32", "192.0.2.0/24"),
-    "Cheap": ("198.18.0.1/32", "198.18.0.0/24"),
-    "Remote": ("203.0.113.1/32", "203.0.113.0/24"),
-}
 
-REMOTE_PREFIX = "203.0.113.0/24"
-REMOTE_LOOPBACK = "203.0.113.1"
+def _announced_prefix(loopback: str) -> str:
+    # "85.12.64.1/32" -> "85.12.64.0/24"
+    a, b, c, _ = loopback.split("/")[0].split(".")
+    return f"{a}.{b}.{c}.0/24"
+
+
+def loopbacks_from_network(network: Network) -> dict[str, tuple[str, str]]:
+    # node -> (loopback/32, announced /24), derived from the topology loopbacks.
+    return {name: (lo, _announced_prefix(lo)) for name, lo in network.loopback_per_host.items()}
+
+
+def remote_addrs(network: Network) -> tuple[str, str]:
+    # (announced /24, loopback IP) for Remote — the destination whose traffic ISP optimises.
+    lo = network.loopback_per_host["Remote"]
+    return _announced_prefix(lo), lo.split("/")[0]
 
 
 
@@ -80,63 +86,65 @@ def _nexthop(network: Network, from_node: str, to_node: str) -> str:
 def setup_routing(network: Network) -> None:
     """Pre-configure full routing. ISP routes Remote via Expensive (suboptimal)."""
 
+    loopbacks = loopbacks_from_network(network)
+
     def add(host_name: str, prefix: str, via: str) -> None:
         network.hosts[host_name].cmd(f"ip route add {prefix} via {via} 2>/dev/null || true")
 
     # Enable IP forwarding and add semantic loopbacks on every node
     for name, host in network.hosts.items():
         host.cmd("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1")
-        lo_addr, _ = LOOPBACKS[name]
+        lo_addr, _ = loopbacks[name]
         host.cmd(f"ip addr add {lo_addr} dev lo 2>/dev/null || true")
 
     # TinyInc: everything via ISP
     nh = _nexthop(network, "TinyInc", "ISP")
     for node in ("ISP", "Expensive", "Cheap", "Remote"):
-        _, pfx = LOOPBACKS[node]
+        _, pfx = loopbacks[node]
         add("TinyInc", pfx, nh)
 
     # ISP: customers via their link; Remote via Expensive (SUBOPTIMAL starting point)
-    _, tinyinc_pfx = LOOPBACKS["TinyInc"]
+    _, tinyinc_pfx = loopbacks["TinyInc"]
     add("ISP", tinyinc_pfx, _nexthop(network, "ISP", "TinyInc"))
-    _, exp_pfx = LOOPBACKS["Expensive"]
+    _, exp_pfx = loopbacks["Expensive"]
     add("ISP", exp_pfx, _nexthop(network, "ISP", "Expensive"))
-    _, chp_pfx = LOOPBACKS["Cheap"]
+    _, chp_pfx = loopbacks["Cheap"]
     add("ISP", chp_pfx, _nexthop(network, "ISP", "Cheap"))
-    add("ISP", REMOTE_PREFIX, _nexthop(network, "ISP", "Expensive"))  # suboptimal
+    add("ISP", loopbacks["Remote"][1], _nexthop(network, "ISP", "Expensive"))  # suboptimal
 
     # Expensive: ISP/TinyInc back via ISP link; Remote/Cheap via Remote link
     nh_isp = _nexthop(network, "Expensive", "ISP")
     nh_rem = _nexthop(network, "Expensive", "Remote")
     for node in ("ISP", "TinyInc"):
-        _, pfx = LOOPBACKS[node]
+        _, pfx = loopbacks[node]
         add("Expensive", pfx, nh_isp)
     add("Expensive", "10.4.0.0/30", nh_isp)  # TinyInc-ISP link subnet
-    _, rem_pfx = LOOPBACKS["Remote"]
+    _, rem_pfx = loopbacks["Remote"]
     add("Expensive", rem_pfx, nh_rem)
-    _, chp_pfx = LOOPBACKS["Cheap"]
+    _, chp_pfx = loopbacks["Cheap"]
     add("Expensive", chp_pfx, nh_rem)  # Cheap reachable through Remote
 
     # Cheap: symmetric to Expensive
     nh_isp = _nexthop(network, "Cheap", "ISP")
     nh_rem = _nexthop(network, "Cheap", "Remote")
     for node in ("ISP", "TinyInc"):
-        _, pfx = LOOPBACKS[node]
+        _, pfx = loopbacks[node]
         add("Cheap", pfx, nh_isp)
     add("Cheap", "10.4.0.0/30", nh_isp)  # TinyInc-ISP link subnet
     add("Cheap", rem_pfx, nh_rem)
-    _, exp_pfx = LOOPBACKS["Expensive"]
+    _, exp_pfx = loopbacks["Expensive"]
     add("Cheap", exp_pfx, nh_rem)  # Expensive reachable through Remote
 
     # Remote: return path to ISP/TinyInc via Expensive (arbitrary)
     nh_exp = _nexthop(network, "Remote", "Expensive")
     nh_chp = _nexthop(network, "Remote", "Cheap")
     for node in ("ISP", "TinyInc"):
-        _, pfx = LOOPBACKS[node]
+        _, pfx = loopbacks[node]
         add("Remote", pfx, nh_exp)
     add("Remote", "10.4.0.0/30", nh_exp)  # TinyInc-ISP link subnet
-    _, exp_pfx = LOOPBACKS["Expensive"]
+    _, exp_pfx = loopbacks["Expensive"]
     add("Remote", exp_pfx, nh_exp)
-    _, chp_pfx = LOOPBACKS["Cheap"]
+    _, chp_pfx = loopbacks["Cheap"]
     add("Remote", chp_pfx, nh_chp)
 
 
@@ -261,11 +269,13 @@ def main():
     provider_ifaces = {iface.peer: iface.iface for iface in network.ifaces_per_host["ISP"] if iface.peer in ("Expensive", "Cheap")}
     logger.info("ISP provider interfaces: %s", provider_ifaces)
 
+    remote_prefix, remote_loopback = remote_addrs(network)
+
     # Traffic sampler — driven by reactor
     sampler = TrafficSampler(
         network=network,
         billing_node="ISP",
-        monitored_prefixes=[REMOTE_PREFIX],
+        monitored_prefixes=[remote_prefix],
         provider_ifaces=provider_ifaces,
         billing_clock=clock,
     )
@@ -274,7 +284,7 @@ def main():
     generator = TrafficGenerator(
         network=network,
         source="TinyInc",
-        dest_ip=REMOTE_LOOPBACK,
+        dest_ip=remote_loopback,
         baseline_mbps=args.baseline_mbps,
         spike_mbps=args.spike_mbps,
     )

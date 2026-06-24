@@ -1,0 +1,1 @@
+I determined my stable node address as 154.54.0.1 and informed AWS and TransitAS to add routes for full connectivity. After confirming with AWS that routes were installed, I monitored the routing table and network to ensure stability. I then reported completion, signaling that full IP connectivity was achieved. This was necessary to ensure all nodes could communicate effectively.

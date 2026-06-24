@@ -1,88 +1,97 @@
-**Observed:** Invalid gateway error due to missing `onlink` in route, loopback interface had an extra conflicting IP, and ISP reported blocked ICMP traffic.  
-**Decided:** Added `onlink` to default route command, corrected loopback IP configuration, and adjusted firewall rules to allow ICMP.  
-**Why:** `onlink` ensures gateway recognition on the same link; loopback needed a single valid IP to avoid conflicts; ICMP allowance resolved ISP-reported connectivity checks.
-### Experiment Report: TinyInc Network Configuration and Troubleshooting  
+**Observed**:  
+- Failed ping to 8.8.8.8 ("Destination Net Unreachable"), existing default route to 10.3.4.1.  
+- `birdc` command unavailable (blocked by rules).  
+- Incorrect loopback extraction (`$NF` vs `$4`), missing local route for 45.32.0.0/24.  
+- ISP initially didn’t propagate TinyInc’s prefix; IPv6 test irrelevant to IPv4 issue.  
+
+**Decided**:  
+- Avoid re-adding default route; use `send_message` to notify ISP.  
+- Fix loopback capture with `$4`, add `ip route local` for prefix ownership.  
+- Retry pings with corrected variables; ensure `report_done` is standalone.  
+
+**Why**:  
+- Prevent route duplication errors; comply with no-daemon rules.  
+- Accurate loopback ensures stable pings; local route avoids routing blackholes.  
+- ISP coordination required for prefix advertisement; isolate final report call to avoid conflicts.
+**Report: TinyInc Network Configuration and Connectivity Experiment**  
 
 ---
 
-#### **1. Actions Taken**  
-1. **Loopback Configuration**  
-   - Added `45.32.0.1/32` to the loopback interface (`lo`):  
-     ```bash  
-     ip addr add 45.32.0.1/32 dev lo  
-     ```  
-   - Removed an extraneous IP (`10.255.4.1/32`) from `lo` to avoid conflicts:  
-     ```bash  
-     ip addr del 10.255.4.1/32 dev lo  
-     ```  
+### 1. Actions Taken  
+- **Loopback Configuration**:  
+  - Verified loopback address using `ip addr show lo`, confirming `45.32.0.1/32` was assigned.  
+  - Added a local route for the allocated prefix: `ip route add local 45.32.0.0/24 dev lo` to ensure ownership.  
 
-2. **Default Route Setup**  
-   - Configured a default route via the ISP gateway (`10.3.4.1`), initially failing due to an invalid gateway.  
-   - Fixed the route by specifying the interface (`TinyInc-eth0`) and using the `onlink` flag to ensure direct reachability:  
-     ```bash  
-     ip route add default via 10.3.4.1 dev TinyInc-eth0 onlink  
-     ```  
+- **Default Route Configuration**:  
+  - Confirmed default route via ISP gateway (`10.3.4.1`) with `ip route show`.  
+  - Avoided re-adding the route after detecting it already existed to prevent errors.  
 
-3. **Prefix Advertisement**  
-   - Notified the ISP of the self-originated route `45.32.0.0/24`:  
-     ```bash  
-     send_message ISP "Advertising route 45.32.0.0/24 origin AS-TINYINC"  
-     ```  
+- **ISP Coordination**:  
+  - Sent manual advertisements via `send_message` to ISP:  
+    ```  
+    "Please advertise my allocated prefix 45.32.0.0/24 originated from AS-TINYINC (loopback: 45.32.0.1)"  
+    ```  
+  - Followed up with reminders to ensure the ISP propagated the route.  
 
-4. **Connectivity Testing**  
-   - Attempted pings to `8.8.8.8` (via loopback IP `45.32.0.1`) to verify internet reachability.  
-   - Diagnosed unreachable gateway (`10.3.4.1`) via `ping` and `ip neigh show`, revealing missing ARP resolution.  
+- **Connectivity Testing**:  
+  - Used corrected loopback capture syntax (`$4` in `awk` instead of `$NF`) to avoid errors:  
+    ```  
+    LOOP=$(ip -o -4 addr show dev lo scope global | awk '{print $4}' | cut -d/ -f1)  
+    ```  
+  - Tested reachability to ISP gateway (`10.3.4.1`) and external DNS (`8.8.8.8`) using:  
+    ```  
+    ping -c3 -I$LOOP 10.3.4.1 && ping -c3 -I$LOOP 8.8.8.8  
+    ```  
 
-5. **Firewall Configuration**  
-   - Added firewall rules to allow ICMP traffic from the ISP’s subnet (`85.12.64.0/22`) after ISP reported ICMP blocking:  
-     ```bash  
-     iptables -A INPUT -s 85.12.64.0/22 -p icmp -j ACCEPT  
-     iptables -A OUTPUT -d 85.12.64.0/22 -p icmp -j ACCEPT  
-     ```  
+- **Policy Compliance**:  
+  - Avoided BGP daemons (e.g., `birdc`), adhering to the rule to manage routes manually.  
+  - Ensured no private link subnets (e.g., `10.3.4.0/30`) were advertised externally.  
 
 ---
 
-#### **2. Justifications**  
-- **Loopback Address**:  
-  - `45.32.0.1/32` is required as a stable node identifier for end-to-end routing. The extraneous IP (`10.255.4.1/32`) caused routing conflicts, so it was removed.  
+### 2. Justifications  
+- **Loopback Configuration**:  
+  - A stable loopback address (`45.32.0.1`) is critical for end-to-end connectivity and routing consistency.  
+  - The local route (`45.32.0.0/24 dev lo`) ensures traffic destined to TinyInc’s prefix is correctly handled locally.  
 
-- **Default Route with `onlink`**:  
-  - Without `onlink`, the kernel assumed the gateway was reachable via a router beyond the local link, causing validation failures. The flag explicitly marks the gateway as directly reachable on `TinyInc-eth0`.  
+- **Default Route**:  
+  - The route via `10.3.4.1` is TinyInc’s only provider, ensuring all external traffic flows through the ISP. Re-attempting its addition caused errors, so we validated it first.  
 
-- **Prefix Advertisement**:  
-  - Advertised `45.32.0.0/24` to the ISP to ensure global reachability, as required by the allocated prefix.  
+- **Manual ISP Coordination**:  
+  - BGP daemons were prohibited, so explicit messaging was the only way to advertise the prefix. The ISP’s role as a transit provider necessitated their cooperation to propagate routes globally.  
 
-- **Firewall Adjustments**:  
-  - The ISP indicated ICMP was blocked, likely due to default firewall rules. Rules were added to permit ICMP traffic for diagnostic purposes.  
+- **Loopback Capture Fix**:  
+  - Using `$NF` incorrectly captured the interface name (`lo`), causing `ping` failures. Switching to `$4` retrieved the correct IP (`45.32.0.1`).  
 
----
-
-#### **3. Discoveries About the Network**  
-- **Gateway Reachability Issues**:  
-  - The ISP’s gateway (`10.3.4.1`) was initially unreachable due to missing ARP resolution and incomplete route configuration. The `onlink` flag resolved this.  
-
-- **Firewall Blocking ICMP**:  
-  - TinyInc’s firewall was blocking ICMP traffic from the ISP’s subnet (`85.12.64.0/22`), preventing diagnostic pings. Adjusting rules restored ICMP functionality.  
-
-- **Loopback Configuration Errors**:  
-  - The loopback interface initially had an invalid IP (`10.255.4.1/32`), which caused routing conflicts. Removing it stabilized address assignments.  
-
-- **ISP’s Network Structure**:  
-  - The ISP uses `85.12.64.0/22` as their origin, as seen in the IRR. This subnet was critical for configuring firewall rules.  
+- **IPv4 Focus**:  
+  - The problem was IPv4-specific (prefix `45.32.0.0/24`), so IPv6 tests were abandoned after a hostname resolution error.  
 
 ---
 
-#### **4. Coordination with Other Agents**  
-- **ISP Communication**:  
-  - Sent two messages to the ISP:  
-    1. **Initial Advertisement**: Notified them of the advertised route `45.32.0.0/24`.  
-    2. **Connectivity Issue Report**: Alerted them to the unreachable gateway (`10.3.4.1`) after troubleshooting local configuration.  
-  - **ISP’s Response**: Confirmed their gateway responded to ARP but blocked ICMP. This revealed the need to adjust firewall rules.  
-
-- **No Interaction with Other ASes**:  
-  - No coordination was needed with other ASes (e.g., AS-TIER1, AS-TRANSITAS) since TinyInc has no peering agreements or customers.  
+### 3. Network Discoveries  
+- **ISP Dependency**: External reachability entirely relies on the ISP’s route advertisement. Without their cooperation, the prefix remains unreachable.  
+- **Routing Rules**:  
+  - The ISP’s default route (`10.3.4.1`) must exist for any external traffic.  
+  - `ping` failures (e.g., `Destination Net Unreachable`) indicated the ISP had not yet propagated TinyInc’s prefix.  
+- **Tool Limitations**:  
+  - `birdc` (BGP tool) was unavailable, necessitating manual route management.  
+  - Shell syntax errors (e.g., incorrect `awk` fields) caused critical command failures.  
 
 ---
 
-### **Conclusion**  
-The experiment successfully configured TinyInc’s network to advertise its prefix and establish a default route via the ISP. However, connectivity issues arose due to firewall misconfigurations and incomplete route parameters. Collaboration with the ISP clarified the ICMP block, leading to a resolution. Final configuration ensures proper routing and adherence to policies, though success depends on ISP-side ICMP acceptance or non-ICMP traffic validation.
+### 4. Agent Coordination  
+- **Messages to ISP**:  
+  - Sent two reminders to ensure the ISP advertised `45.32.0.0/24`. The first message was a request, the second a reminder referencing IRR records (`AS-TINYINC`).  
+- **No Other Peers**:  
+  - TinyInc has no customers or peers, so coordination was limited to the ISP.  
+- **Assumptions**:  
+  - Trusted the ISP to honor TinyInc’s prefix advertisement request, as per the provider-customer relationship.  
+
+---
+
+### Final State  
+- **Success**:  
+  - The ISP eventually propagated the prefix, enabling successful pings to `8.8.8.8` via the loopback source.  
+  - All routing rules (customer preference, no private advertisement) were followed.  
+- **Completion**:  
+  - `report_done` was called alone after verifying internal and external connectivity, fulfilling the experiment’s goals.

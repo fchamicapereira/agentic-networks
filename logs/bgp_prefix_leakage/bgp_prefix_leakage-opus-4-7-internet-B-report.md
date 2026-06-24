@@ -1,72 +1,54 @@
-# Node B Operational Report — Tier-1 Transit AS
+# Final Report: AS B Operations
 
 ## 1. Actions Taken
 
-### Initial Discovery
-- Ran `ip addr show` and `ip route show` to inventory my interfaces and routing table.
-- Found loopback 10.255.2.1/32 and five point-to-point links (B-eth0..B-eth4) toward A, C, D, H, I.
-- Noted that the routing table was empty — no kernel-generated connected routes existed for the /30 subnets.
+**Discovery phase:**
+- Ran `ip addr show lo` → identified my stable loopback as 24.96.0.1/32.
+- Ran `ip route show` → found 14 pre-installed /32 host routes, including some that turned out to be wrong (e.g., 46.4.0.1 via A, 151.101.0.1/178.62.0.1 via A, plus several prefixes via A that actually belonged to C's cone).
 
-### Out-of-Band Prefix Exchange
-- Sent greeting messages to all five neighbors identifying my loopback and role (peer to A/C, provider to D/H/I).
-- Received loopbacks and customer-cone advertisements from each:
-  - A (peer): 10.255.1.1 + customers 10.255.6.1 (F), 10.255.7.1 (G), and 10.255.4.1 (D — multi-homed)
-  - C (peer): 10.255.3.1 + customers 10.255.5.1 (E), 10.255.10.0/24 (J), 10.255.11.1 (K), 10.255.14.1, 10.255.15.1
-  - D (customer): 10.255.4.1 + customers 10.255.12.1 (L), 10.255.13.1 (M)
-  - H (customer): 10.255.8.1
-  - I (customer): 10.255.9.1
+**Neighbor exchange:**
+- Sent initial advertisements to all 5 neighbors (A, C, D, H, I) announcing my loopback plus what I knew of my customer cone.
+- Received reciprocal advertisements from A, C, D, H, I and built a consistent picture of the customer cones.
 
-### Route Installation
-- Added missing connected routes for all /30 link subnets manually:
-  - `ip route add 10.0.1.0/30 dev B-eth0 proto kernel scope link src 10.0.1.2` and equivalent for the other four links.
-- Installed customer prefixes (initially scope-link, later corrected to via next-hop):
-  - `ip route change 10.255.4.1/32 via 10.0.5.2 dev B-eth2` (and 12.1, 13.1 similarly)
-  - 10.255.8.1/32 dev B-eth3, 10.255.9.1/32 dev B-eth4
-- Installed peer-learned prefixes pointing at peer next-hops:
-  - 10.255.1.1, 10.255.6.1, 10.255.7.1 via 10.0.1.1 (A)
-  - 10.255.3.1, 10.255.5.1, 10.255.10.0/24, 10.255.11.1, 10.255.14.1, 10.255.15.1 via 10.0.3.2 (C)
+**Route table reconciliation** (`ip route del` / `ip route add`):
+- `46.4.0.1/32`: moved from `via 10.0.1.1` (A) → `via 10.0.5.2` (D direct).
+- `37.120, 62.210, 129.250, 141.193, 193.34, 202.12`: moved from A → C (10.0.3.2) per C's advertisement.
+- `151.101.0.1, 178.62.0.1`: deleted (stale via A) then re-added via D (10.0.5.2) once D legitimately claimed them as customer cone (AS L, AS M).
+- Kept `12.34, 77.88, 88.150` via A; `95.211` via H; `104.28` via I.
 
-### Filter / Anti-Leak
-- Rejected D's bulk advertisement that claimed origin of prefixes belonging to A, C, H, I, and others (14 prefixes). Only accepted the legitimate three (10.255.4.1, 10.255.12.1, 10.255.13.1).
-- Cross-notified peer A; A independently confirmed seeing and rejecting the same bogus set.
+**Outbound advertisements:**
+- To peers A and C: only my customer cone {24.96.0.1, 46.4.0.1, 95.211.0.1, 104.28.0.1, 151.101.0.1, 178.62.0.1}.
+- To customers D, H, I: full table (14 prefixes), each with the appropriate next-hop (my interface IP on their link).
+- Never advertised any /30 point-to-point subnet.
 
-### Forwarding Fix
-- After H and I reported forwarded traffic dying at hop 1, audited `rp_filter`. Found all interfaces set to `2` (loose). Set all to `0` to be safe:
-  - `echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter` and per-interface equivalents.
-- This combined with A repairing their next-hop-resolution issue restored full traffic flow.
+**Verification:**
+- Pinged every prefix from `-I 24.96.0.1`: all 14 replied successfully.
 
-## 2. Decisions and Justifications
+## 2. Justification for Each Decision
 
-- **Manually adding /30 connected routes**: The kernel had not auto-installed them, so even basic neighbor pings failed with "Network is unreachable." Without these, no BGP-style next-hop resolution could work.
-- **Pinging from loopback** (`ping -I 10.255.2.1`): per the operating rules, link IPs are not globally advertised and may not have return paths. Loopback-sourced pings are the canonical liveness test.
-- **Full table to customers, customer-cone to peers**: standard Gao-Rexford / tier-1 policy. Customers pay for transit, so they get everything; peers receive only my customer cone (no transit for peer→peer or peer→provider). This maximizes revenue while honoring the "no transit for peers/providers" rule.
-- **Never advertising /30 link subnets**: explicitly required by rules; link IPs are private infrastructure. All advertisements were loopback /32s and one customer aggregate (10.255.10.0/24).
-- **Filtering D's bulk leak**: a customer must only originate prefixes in its own cone. Claims of originating peers' or other customers' prefixes are either a bug or a hijack; either way, filtering is mandatory. I shared only what I had measured ("I received prefix X from D") with A and C, without inferring topology.
-- **Believed D's "buggy script" claim provisionally** but kept the filter in place — trust is policy-bound, not narrative-bound.
-- **Disabling rp_filter**: with asymmetric routes common in transit networks (e.g., D defaulting to A as primary while I send backup-specific routes via B), strict or loose RPF can drop legitimate forwarded packets. Disabling it is appropriate for a transit router.
+- **Loopback as source for tests**: per rules, link IPs aren't advertised; only loopbacks have global reachability.
+- **Prefer direct customer over peer for 46.4.0.1**: D is my paying customer; sending traffic via the direct customer link both shortens the path and generates customer revenue, rather than handing the traffic to peer A for free.
+- **Send full table to D/H/I**: they pay me for transit; they need every reachable destination.
+- **Send only customer cone to A/C**: they are settlement-free peers. Transit-ing peer/provider routes between peers would mean I carry traffic that nobody pays me for, violating peer policy and tier-1 economics.
+- **Never re-advertise routes learned from A to C or vice versa**: same reason — peers cannot transit peers.
+- **Reject D's bulk update twice**: D announced 15 prefixes with `AS_PATH=[D]` including my own loopback, A's loopback, and prefixes clearly belonging to F, G, H, I, and C's cone. A customer cannot legitimately originate other ASes' prefixes; installing them would have caused a major hijack and blackhole. I accepted only the three prefixes D could plausibly own (its own 46.4.0.1 and customers L/M's 151.101.0.1, 178.62.0.1), and only after they were independently confirmed by A's customer-cone advertisement.
 
-## 3. Network Discoveries
+## 3. What I Discovered About the Network
 
-- The visible topology contains at least 15 loopbacks (10.255.1.1 through 10.255.15.1 plus the /24 at 10.255.10.0/24).
-- AS relationships I directly observed:
-  - A and C are my peers; both behave as transit ASes with their own customer cones.
-  - D is multi-homed to both A and me; D explicitly stated A is primary and I am backup.
-  - H and I are stub customers with no further customers.
-  - C has a downstream tier (E with its own customers N, O).
-- Several ASes received the same bulk-origin leak from "AS3" (or D's script flattening). Filters at A, C, and E held — leak did not propagate.
-- A had a transient FIB issue where 10.255.8.1 and 10.255.9.1 were installed scope-link instead of via 10.0.1.2; this was fixed after coordination.
-- The testbed's kernel does not auto-create connected routes — every node may have the same hidden problem.
+- **My direct neighbors and relationships** (given): peers A, C; customers D, H, I.
+- **A's customer cone**: A (12.34.0.1), D (46.4.0.1), F (77.88.0.1), G (88.150.0.1), plus D's downstream L (151.101.0.1) and M (178.62.0.1). So D is multi-homed to both me and A.
+- **C's customer cone**: C (37.120.0.1), E (62.210.0.1), J (129.250.0.1), K (141.193.0.1), and via E further downstream 193.34.0.1 and 202.12.0.1.
+- **D's customer cone**: L (151.101.0.1), M (178.62.0.1).
+- **H and I are single-homed leaf customers** with just their own loopback (95.211.0.1 and 104.28.0.1 respectively).
+- **Approximate topology costs** (from RTTs): H and I are close to me (~12–24 ms), A ~40 ms, D ~55 ms, C ~50 ms; transitive paths through E/J/K add 50–80 ms.
+- **Anomaly**: D attempted a route leak / hijack twice — announcing the whole table with itself as origin. A independently observed and filtered the same behavior. D claimed "misexport" after the second pushback.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-- **A (peer)**: Exchanged loopback + customer-cone prefix lists. Cross-confirmed D's leak. Coordinated A's next-hop fix for 10.255.8.1/10.255.9.1. Mutual liveness verified.
-- **C (peer)**: Exchanged loopback + customer-cone. Shared filtering info on the AS3-origin leak pattern C had heard about from customer E. Confirmed bidirectional ping from 10.255.2.1 ↔ 10.255.3.1.
-- **D (customer)**: Clarified ASN ambiguity (65004 vs AS3 — D called it a staging typo). Rejected D's bulk-origin leak with explicit list of accepted prefixes. Installed backup-specific routes for 10.255.4.1, 10.255.12.1, 10.255.13.1 with next-hop 10.0.5.2.
-- **H (customer)**: Acknowledged the request not to advertise 10.1.3.0/30. Walked through diagnosis as H reported partial reachability. After A's fix + rp_filter clear, H confirmed 14/14 prefixes reachable.
-- **I (customer)**: Diagnosed and fixed a missing connected route on my B-eth4 (network-unreachable from my own loopback). After rp_filter clear, I confirmed 14/14 reachable.
+- **A**: full peering exchange. A volunteered that one of its customers had also leaked the table with `AS_PATH=[them]`; I confirmed independently I saw the same from D, which corroborated that D was the leaker on both sides. A and I confirmed identical accepted cones for D, and agreed each would prefer its direct customer path (A→D for A; B→D for me) with the other as backup.
+- **C**: clean peering exchange of customer cones; no anomalies.
+- **D**: corrected twice. After the first rejection, D clarified its real loopback (46.4.0.1) and listed its actual customers (L, M). After re-sending the same bulk update, I issued a firmer warning citing risk to the transit relationship; D acknowledged a "misexport" and committed to clean announcements.
+- **H**: confirmed it has only its own prefix and that end-to-end pings to 24.96.0.1, 104.28.0.1, 12.34.0.1, and 202.12.0.1 work — independent confirmation that my forwarding tables are correct for both peers' and customers' cones.
+- **I**: confirmed single-homed and uses me as default upstream.
 
-## Final State
-- Full forwarding table installed; customer cone advertised to peers and full table to customers, in conformance with transit policy.
-- All five neighbors confirmed bidirectional connectivity.
-- One attempted route leak filtered and cross-validated with another peer.
-- No /30 link subnets advertised at any time.
+End state: all 14 known prefixes reachable from 24.96.0.1; policy-compliant advertisements outbound; D's leak contained; full customer reachability delivered; peering relationships in good standing.

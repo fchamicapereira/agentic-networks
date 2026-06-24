@@ -1,68 +1,59 @@
 # AS2 Experiment Report
 
+## Role and Starting State
+I am AS2, a transit ISP and DNS recursive resolver. Loopback 154.54.1.1/32. Direct neighbors: AS1 (peer, via 10.0.2.0/30) and ACM (customer, via 10.0.3.0/30). Initial RIB contained a default via AS1 and pre-seeded /32 routes to several ACM-side addresses.
+
 ## 1. Actions Taken
 
-### Initial discovery
-- `ip addr show lo` → found my loopback 10.255.3.1/32.
-- `ip route show` → inventoried preloaded routes: connected /30s to AS1 (10.0.2.0/30) and ACM (10.0.3.0/30), plus preloaded customer routes via ACM (10.255.1.1, 10.255.7.1, 198.82.0.1, 10.0.4.0/30) and a default via AS1.
+### Discovery
+- `ip addr show lo` / `ip addr show` / `ip route show` to establish loopback identity and starting RIB.
+- Verified L2/L3 reachability with `ping` to 10.0.2.1, 10.0.3.2.
 
-### Neighbor handshake
-- Sent introductory messages to AS1 (peer) and ACM (customer) announcing my loopback and customer cone, asking for their advertised prefixes.
-- Replaced the preloaded default route with explicit /32 routes (peering policy: no default from a peer; only accept what's explicitly advertised).
-  - `ip route del default via 10.0.2.1 dev AS2-eth0`
-  - `ip route add 10.255.2.1/32 via 10.0.2.1 dev AS2-eth0 src 10.255.3.1` (AS1 loopback)
-  - `ip route add 10.255.5.1/32 via 10.0.2.1 …` (Uni)
-  - `ip route add 10.255.4.1/32 via 10.0.2.1 …` (EveLink)
-  - Later added `10.255.6.1/32` (User) and `10.0.6.0/30` (Uni-User link) when AS1 announced them.
+### Neighbor Bring-up (route exchange via send_message; no daemons used)
+- Advertised to AS1: 154.54.1.1/32, 192.107.102.0/24 (ACM), 198.82.0.0/24 (ACM). Only customer cone + self, per peering policy.
+- Advertised to ACM: that I am its default upstream, plus AS1's customer cone (4.2.2.1/32, 128.173.0.0/16, 91.214.0.1/32) as it became available.
 
-### Advertisement policy
-- To AS1 (peer): only my own loopback and customer (ACM) prefixes — 10.255.3.1/32, 10.255.1.1/32, 198.82.0.1/32. Refused to leak AS1's customer prefixes back, and dropped accidentally-announced internal /30s when AS1 pushed back.
-- To ACM (customer): full transit reachable via their existing default to me (10.0.3.1). Provided informational list of peer-side prefixes (10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1).
+### RIB Configuration
+Concrete changes:
+- `ip route del default via 10.0.2.1` — removed inherited default toward a peer (peers must not be defaults).
+- `ip route add 4.2.2.1/32 via 10.0.2.1`
+- `ip route add 91.214.0.1/32 via 10.0.2.1`
+- `ip route add 128.173.0.1/32 via 10.0.2.1` → later replaced by `ip route add 128.173.0.0/16 via 10.0.2.1` when AS1 sent the aggregate (and the /32 was deleted).
+- Cleaned ACM-facing routes: deleted `192.107.102.1/32` and `198.82.0.1/32`, replaced with `192.107.102.0/24 via 10.0.3.2` and `198.82.0.0/24 via 10.0.3.2`.
+- `ip route del 137.54.0.1 via 10.0.3.2` — ACM confirmed this is an internal-only address that must not be external. I had never advertised it; removing avoids accidental leak.
 
-### Verification
-- Pinged all reachable loopbacks from 10.255.3.1: 10.255.1.1, 198.82.0.1, 10.255.2.1, 10.255.4.1, 10.255.5.1, 10.255.6.1 — all 0% loss.
+Final RIB: only globally-routable prefixes plus directly-connected P2P links. No 10.0.0.0/8 was ever advertised to AS1.
 
-### KP WHY investigation (198.82.0.1 unreachable from Uni/User)
-- Forwarded WHY to ACM, requested route/iptables data; sent reminders when ACM was slow to respond.
-- Performed a wire-level test from my own vantage:
-  - `nping --icmp -c 3 -S 10.255.5.1 -e AS2-eth1 198.82.0.1` — injected spoofed-source ICMP toward ACM.
-  - `tcpdump -ni AS2-eth1` confirmed ACM replied 3/3.
-  - `tcpdump -ni AS2-eth0` confirmed AS2 forwarded the replies out toward AS1 3/3.
-- Ran `ip route get 10.255.5.1 / 10.255.6.1 / 198.82.0.1` to confirm symmetric forwarding decisions.
-- Sent a definitive diagnosis to AS1 with this evidence, localizing the drop to "downstream of AS2".
+### KP WHY Investigation (Uni → 198.82.0.1 loss)
+- Verified my routes: `ip route get 128.173.0.1` / `...10.1` → via 10.0.2.1.
+- Pinged 128.173.0.1 and 128.173.10.1 from 154.54.1.1: both 0% loss.
+- Sourced pings to 198.82.0.1 from 154.54.1.1, 10.0.2.2, and 10.0.3.1: all 0% loss — proves return path ACM→AS2→AS1 works for any of my source addresses.
+- Traceroutes: 198.82.0.1 in 2 hops via ACM; 128.173.0.1 in 2 hops via AS1.
+- Relayed WHY to ACM; aggregated ACM's findings (clean RIB, no filters, service healthy) with my own and sent a structured diagnosis to AS1 pointing the issue at Uni's edge.
 
-## 2. Justification
+## 2. Justifications
 
-- **Removed the preloaded default via AS1**: a peer is not a transit provider. Using it as default would cause me to dump traffic for unknown destinations onto AS1 for free, violating the peering relationship and risking unintended transit.
-- **Per-prefix routes for AS1's announcements**: matches valley-free routing — I only forward to AS1 what AS1 tells me it can reach.
-- **Asymmetric advertisement policy**: peer↔peer exchange only own + customer cone; customer gets full reachability via default. This is the standard transit/peer model and directly supports the revenue goal (don't carry free transit for peers).
-- **Dropped internal /30s from my announcement to AS1**: those are diagnostic prefixes, not globally meaningful, and announcing them creates noise and minor leak risk.
-- **Wire-level test before concluding**: the policy requires evidence-based diagnoses, not speculation. Pings from my loopback only test AS2's data plane to each endpoint, not whether AS2 forwards a third-party's traffic correctly. Using `nping` with a spoofed source plus `tcpdump` on the egress interface proved that AS2's forwarding plane handles the exact failing flow correctly, eliminating AS2 as the culprit.
-- **Did not modify any ACL or filter autonomously**: even when root cause was identified at Uni, the policy is clear — ACL changes always require admin approval. Reported CANNOT pending admin action.
+- **Removing default via AS1**: AS1 is a peer, not an upstream. A default route to a peer would offer free transit and violate peering economics/policy.
+- **Advertising only ACM's prefixes + self to AS1**: peering policy — I only export my customer cone. This protects both my revenue (ACM pays for transit; AS1 doesn't) and AS1 from accidental transit.
+- **Pushing aggregates (/24, /16) over /32s**: deaggregation pollutes the global table and isn't what the origin actually announces. When ACM said it originates /24s, I matched.
+- **Refusing 10.0.0.0/8 P2P prefixes**: not globally routable; advertising them would be a bogon leak. I asked AS1 to withdraw them when I noticed it had installed them.
+- **Removing 137.54.0.1/32**: ACM declared it internal-only. Option (a) keep with no-export was available, but option (b) — remove — is strictly safer with no downside since nothing legitimately needs to reach it through me.
+- **In KP diagnosis, challenging AS1's hypothesis**: AS1 claimed echo-requests sourced from 10.0.1.2 were getting "ZERO replies." That source is unrouted P2P space; the test methodology was suspect. I asked AS1 to retest from 128.173.0.1 (a globally-routable source), which is what the symptom report should have been based on.
+- **Not propagating 128.173.0.0/16 down to ACM as a specific**: ACM has a default toward me, so a specific is redundant. I confirmed this empirically by sourcing from 10.0.3.1 to 128.173.0.1 successfully — the return path from ACM via default obviously works.
+- **Closing as CANNOT (pending Uni admin)**: ACL change on Uni's gateway is a security policy decision outside my authority and outside even AS1's authority. Correct KP escalation.
 
-## 3. Network Discoveries
+## 3. Discoveries About the Network
 
-Topology learned through conversation:
-- AS1 (peer, loopback 10.255.2.1) sits between me and two customers: Uni (10.255.5.1) and EveLink (10.255.4.1). Behind Uni is a User node (10.255.6.1) on link 10.0.6.0/30.
-- ACM (my customer, loopback 10.255.1.1) hosts a public web service at 198.82.0.1, reached via internal link 10.0.4.0/30 to another ACM-side host (10.255.7.1).
-- End-to-end pingability is otherwise universal — the only fault was the 198.82.0.1↔Uni-domain asymmetry.
+- Topology: AS2 sits between peer AS1 (which fronts customers Uni 128.173.0.0/16 and EveLink 91.214.0.1/32) and customer ACM (which originates 192.107.102.0/24 and 198.82.0.0/24, including the Digital Library at acm.org/198.82.0.1).
+- ACM uses 192.107.102.1 as its loopback; 198.82.0.1 lives on a separate "Web" host inside ACM, not on the ACM border router (ACM couldn't source pings from it directly).
+- ACM border has no filters; default policy ACCEPT on iptables filter chains.
+- 137.54.0.1 is an ACM-internal address never to be exposed externally.
+- The reported Uni→ACM blackhole was caused entirely by iptables DROP rules on Uni's own gateway against 198.82.0.0/24, not by any inter-AS routing or filtering — packets never left Uni.
 
-Fault discovered:
-- The Uni domain had explicit iptables DROP rules on FORWARD and OUTPUT chains for destination 198.82.0.0/24 (confirmed by Uni with active packet counters of 122 and 34). This is a deliberate egress ACL in Uni's security policy, not a routing fault.
+## 4. Coordination With Other Agents
 
-## 4. Coordination with Other Agents
+- **AS1 (peer)**: bidirectional prefix exchange; corrected AS1's RIB (it had installed bogons and deaggregates from me which I asked it to withdraw); accepted AS1's /16 aggregate and replaced the earlier /32; collaborated on the KP WHY for the Uni→ACM symptom, providing my vantage's pings, traceroutes, sourced tests, and a structured diagnosis with three hypotheses; received and acknowledged AS1's root-cause finding.
+- **ACM (customer)**: established me as ACM's default; confirmed which prefixes ACM legitimately originates; clarified the 137.54.0.1 question; relayed AS1's KP WHY to ACM; aggregated ACM's findings (route table, forward-path tests, filter audit, service health) with my own to produce the joint diagnosis; closed out by relaying AS1's thanks and the final CANNOT classification.
+- All inter-agent routing exchange was conducted via send_message; no routing daemons were used, as required.
 
-**With ACM (customer):**
-- Exchanged prefix announcements and confirmed default-route configuration.
-- During the WHY investigation, requested specific data (ip route, ip route get, iptables, ping outputs). ACM responded with a thorough multi-vantage report showing the asymmetry: src=10.255.1.1 worked everywhere, src=198.82.0.1 failed only to Uni/User.
-
-**With AS1 (peer):**
-- Negotiated peering policy and exchanged advertisements; corrected my initial over-announcement (internal /30s and 10.255.7.1) when AS1 questioned it — good hygiene caught by the peer.
-- Throughout the WHY, AS1 pressed me for a definitive diagnosis. I initially gave a hypothesis (CANNOT, pending ACM), then provided the wire-level proof that pivoted the investigation away from AS2/ACM and toward AS1/Uni.
-- AS1 then drove the final localization at Uni and reported the iptables root cause back to me, closing the loop.
-
-**KP outcome:**
-- Forward path (AS1→AS2→ACM): healthy at every hop.
-- Return path through AS2 from 198.82.0.1 toward 10.255.5.1/10.255.6.1: verified correct on the wire.
-- Drop: confirmed inside Uni's administrative domain, by deliberate policy.
-- Final status: CANNOT (pending Uni admin approval). No changes required or made at AS2.
+Final state: clean RIB with proper aggregates, end-to-end connectivity verified by ping in all directions, peering policy respected, and one cross-AS KP investigation correctly resolved as CANNOT-pending-admin.

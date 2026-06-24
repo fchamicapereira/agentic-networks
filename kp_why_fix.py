@@ -58,19 +58,15 @@ FAULT_DESCRIPTIONS = {
     ),
 }
 
-# Loopbacks assigned alphabetically by network.py: ACM=1, AS1=2, AS2=3,
-# EveLink=4, Uni=5, User=6, Web=7
-# User's loopback (10.255.6.1) and campus link (10.0.6.0/30) are not routed
-# beyond Uni — Uni NATTs all campus traffic via MASQUERADE on Uni-eth1.
-LOOPBACKS = {
-    "ACM": "10.255.1.1",
-    "AS1": "10.255.2.1",
-    "AS2": "10.255.3.1",
-    "EveLink": "10.255.4.1",
-    "Uni": "10.255.5.1",
-    "User": "10.255.6.1",
-    "Web": "10.255.7.1",
-}
+# Node loopbacks come from the topology (topologies/knowledge_plane.csv). User's loopback
+# and campus link (10.0.6.0/30) are not routed beyond Uni — Uni NATs all campus traffic
+# via MASQUERADE on Uni-eth1.
+
+
+def _lo(network: Network, node: str) -> str:
+    """Bare loopback IP (no /32) for a node, taken from the topology."""
+    return network.loopback_per_host[node].split("/")[0]
+
 
 # Link IPs from topology (host1_ip ↔ host2_ip):
 #   User(10.0.6.1)  ↔  Uni(10.0.6.2)
@@ -123,37 +119,37 @@ def setup_routing(network: Network, logger) -> None:
     el = hosts["EveLink"]
 
     # User → default via Uni
-    add(user, "default", "10.0.6.2", src=LOOPBACKS["User"])
+    add(user, "default", "10.0.6.2", src=_lo(network, "User"))
 
     # Uni → User loopback via direct link; default via AS1
-    add(univ, "10.255.6.1/32", "10.0.6.1", src=LOOPBACKS["Uni"])
-    add(univ, "default", "10.0.1.2", src=LOOPBACKS["Uni"])
+    add(univ, f"{_lo(network, 'User')}/32", "10.0.6.1", src=_lo(network, "Uni"))
+    add(univ, "default", "10.0.1.2", src=_lo(network, "Uni"))
 
     # AS1 → Uni loopback via 10.0.1.1; EveLink loopback via 10.0.5.2; default via AS2
-    # User's campus prefixes (10.255.6.1/32, 10.0.6.0/30) are intentionally not routed
+    # User's campus prefixes (User's loopback, 10.0.6.0/30) are intentionally not routed
     # beyond Uni — they are hidden behind Uni's NAT.
-    add(p1, "10.255.5.1/32", "10.0.1.1", src=LOOPBACKS["AS1"])
-    add(p1, "10.255.4.1/32", "10.0.5.2", src=LOOPBACKS["AS1"])
-    add(p1, "10.0.5.0/30", "10.0.5.2", src=LOOPBACKS["AS1"])  # so EveLink link subnet is reachable
-    add(p1, "default", "10.0.2.2", src=LOOPBACKS["AS1"])
+    add(p1, f"{_lo(network, 'Uni')}/32", "10.0.1.1", src=_lo(network, "AS1"))
+    add(p1, f"{_lo(network, 'EveLink')}/32", "10.0.5.2", src=_lo(network, "AS1"))
+    add(p1, "10.0.5.0/30", "10.0.5.2", src=_lo(network, "AS1"))  # so EveLink link subnet is reachable
+    add(p1, "default", "10.0.2.2", src=_lo(network, "AS1"))
 
     # AS2 → customer prefixes (ACM+Web) via 10.0.3.2; default via AS1
-    add(p2, "10.255.1.1/32", "10.0.3.2", src=LOOPBACKS["AS2"])
-    add(p2, "10.255.7.1/32", "10.0.3.2", src=LOOPBACKS["AS2"])
-    add(p2, f"{WEBSERVER_IP}/32", "10.0.3.2", src=LOOPBACKS["AS2"])
-    add(p2, "10.0.4.0/30", "10.0.3.2", src=LOOPBACKS["AS2"])  # so ACM–Web link subnet is reachable
-    add(p2, "default", "10.0.2.1", src=LOOPBACKS["AS2"])
+    add(p2, f"{_lo(network, 'ACM')}/32", "10.0.3.2", src=_lo(network, "AS2"))
+    add(p2, f"{_lo(network, 'Web')}/32", "10.0.3.2", src=_lo(network, "AS2"))
+    add(p2, f"{WEBSERVER_IP}/32", "10.0.3.2", src=_lo(network, "AS2"))
+    add(p2, "10.0.4.0/30", "10.0.3.2", src=_lo(network, "AS2"))  # so ACM–Web link subnet is reachable
+    add(p2, "default", "10.0.2.1", src=_lo(network, "AS2"))
 
     # ACM → Web via direct link; default via AS2
-    add(acm, "10.255.7.1/32", "10.0.4.2", src=LOOPBACKS["ACM"])
-    add(acm, f"{WEBSERVER_IP}/32", "10.0.4.2", src=LOOPBACKS["ACM"])
-    add(acm, "default", "10.0.3.1", src=LOOPBACKS["ACM"])
+    add(acm, f"{_lo(network, 'Web')}/32", "10.0.4.2", src=_lo(network, "ACM"))
+    add(acm, f"{WEBSERVER_IP}/32", "10.0.4.2", src=_lo(network, "ACM"))
+    add(acm, "default", "10.0.3.1", src=_lo(network, "ACM"))
 
     # Web → default via ACM
-    add(ws, "default", "10.0.4.1", src=LOOPBACKS["Web"])
+    add(ws, "default", "10.0.4.1", src=_lo(network, "Web"))
 
     # EveLink → default via AS1
-    add(el, "default", "10.0.5.1", src=LOOPBACKS["EveLink"])
+    add(el, "default", "10.0.5.1", src=_lo(network, "EveLink"))
 
     # NAT: masquerade all campus traffic leaving Uni toward the internet
     logger.info("Setting up NAT on Uni (MASQUERADE on Uni-eth1)...")
@@ -169,13 +165,13 @@ def start_services(network: Network, logger) -> None:
     logger.info("Adding %s to Web loopback...", WEBSERVER_IP)
     webserver.cmd(f"ip addr add {WEBSERVER_IP}/32 dev lo 2>/dev/null || true")
 
-    logger.info("Starting dnsmasq on AS1 (10.255.2.1)...")
+    logger.info("Starting dnsmasq on AS1 (%s)...", _lo(network, "AS1"))
     as1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-    as1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address=10.255.2.1 --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
+    as1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS1')} --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
 
-    logger.info("Starting dnsmasq on AS2 (10.255.3.1)...")
+    logger.info("Starting dnsmasq on AS2 (%s)...", _lo(network, "AS2"))
     as2.cmd("kill $(cat /tmp/dnsmasq-p2.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p2.pid")
-    as2.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address=10.255.3.1 --port=53 " f"--pid-file=/tmp/dnsmasq-p2.pid &")
+    as2.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS2')} --port=53 " f"--pid-file=/tmp/dnsmasq-p2.pid &")
 
     # Per-namespace DNS via the 127.0.0.1 trick:
     # Each network namespace has its own loopback, so 127.0.0.1 is independent in
@@ -205,10 +201,10 @@ def start_services(network: Network, logger) -> None:
         shell=True,
     )
 
-    logger.info("Starting dnsmasq in User namespace (127.0.0.1 → %s)...", LOOPBACKS["AS1"])
+    logger.info("Starting dnsmasq in User namespace (127.0.0.1 → %s)...", _lo(network, "AS1"))
     network.hosts["User"].cmd("kill $(cat /tmp/dnsmasq-user.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-user.pid")
     network.hosts["User"].cmd(
-        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground" f" --server={LOOPBACKS['AS1']} --listen-address=127.0.0.1 --bind-interfaces" f" --pid-file=/tmp/dnsmasq-user.pid &"
+        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground" f" --server={_lo(network, 'AS1')} --listen-address=127.0.0.1 --bind-interfaces" f" --pid-file=/tmp/dnsmasq-user.pid &"
     )
 
     Path("/etc/resolv.conf").write_text("nameserver 127.0.0.1\n")
@@ -246,7 +242,7 @@ def stop_services(network: Network, logger) -> None:
 def phase1_check(network: Network, logger) -> None:
     """Verify baseline: DNS and HTTP must work. Prints live output to stdout."""
     user = network.hosts["User"]
-    loopback = LOOPBACKS["User"]
+    loopback = _lo(network, "User")
 
     logger.info("Phase 1: DNS check (acm.org → %s)...", WEBSERVER_IP)
     dns_out = user.cmd("dig +short acm.org 2>&1").strip()
@@ -266,7 +262,7 @@ def phase1_check(network: Network, logger) -> None:
 
 def phase2_check(network: Network, fault: str, logger) -> None:
     user = network.hosts["User"]
-    loopback = LOOPBACKS["User"]
+    loopback = _lo(network, "User")
 
     if fault == "dns_stale":
         dns_out = user.cmd("dig +short acm.org 2>&1").strip()
@@ -308,9 +304,9 @@ def inject_fault(network: Network, fault: str, logger) -> None:
         p1 = network.hosts["AS1"]
         stale_ip = "10.0.0.99"
         p1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-        p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{stale_ip} " f"--listen-address=10.255.2.1 --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
+        p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{stale_ip} " f"--listen-address={_lo(network, 'AS1')} --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
         time.sleep(0.5)
-        dns_check = network.hosts["User"].cmd(f"dig +short -b {LOOPBACKS['User']} @{LOOPBACKS['AS1']} acm.org 2>&1").strip()
+        dns_check = network.hosts["User"].cmd(f"dig +short -b {_lo(network, 'User')} @{_lo(network, 'AS1')} acm.org 2>&1").strip()
         logger.info("DNS stale: AS1 now returns %r for acm.org", dns_check)
 
     elif fault == "firewall":

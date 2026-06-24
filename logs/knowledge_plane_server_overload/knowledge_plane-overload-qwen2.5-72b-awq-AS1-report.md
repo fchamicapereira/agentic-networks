@@ -1,0 +1,3 @@
+1. **Observed:** Initial monitoring showed no immediate issues; connectivity checks with Uni and EveLink were successful. AS2 reported connectivity issues beyond the first hop.
+2. **Decided:** Informed AS2 that the issue was likely with their upstream provider and suggested they contact their Internet provider. Confirmed the route to EveLink was already set up and ready for communication.
+3. **Why:** To ensure AS2 had the necessary information to diagnose and resolve the issue, and to confirm that my network was functioning correctly.

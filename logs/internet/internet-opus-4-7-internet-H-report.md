@@ -1,49 +1,66 @@
-# H Stub AS — Experiment Report
+# Experiment Report: Node H (Stub AS)
 
 ## 1. Actions Taken
 
-**Discovery**
-- Ran `ip addr show` and `ip route show`. Found loopback 10.255.8.1/32 and eth0 link 10.1.3.1/30 to B (peer 10.1.3.2). No routes installed.
+**Initial discovery:**
+- Ran `ip addr show lo` and `ip addr show` to identify my loopback (95.211.0.1/32) and link configuration (H-eth0: 10.1.3.1/30, peer B at 10.1.3.2).
+- Ran `ip route show` to confirm only the directly connected /30 was present.
 
-**Routing setup**
-- Attempted `ip route add default via 10.1.3.2`, which failed because the gateway was not yet on-link (the /30 was treated correctly, but the kernel rejected the gateway resolution at that moment).
-- Worked around it with:
-  - `ip route add 10.1.3.2/32 dev H-eth0`
-  - `ip route add default via 10.1.3.2`
-- Final route table: default via 10.1.3.2 dev H-eth0; 10.1.3.2 dev H-eth0 scope link.
+**Route configuration:**
+- Installed a default route to my provider B:
+  `ip route add default via 10.1.3.2 dev H-eth0`
 
-**Coordination with B**
-- Sent B my loopback (10.255.8.1/32) and confirmed no downstream customers, asking it to advertise the loopback globally.
-- B confirmed installation and global advertisement, and provided a list of 14 known global prefixes.
+**Advertisement:**
+- Sent B a message advertising my loopback prefix 95.211.0.1/32. Explicitly stated I have no customers and only my own prefix.
 
-**Connectivity verification**
-- Pinged each known global prefix sourced from my loopback: `ping -I 10.255.8.1 -c N <dst>`.
-- Initial sweep: 11/14 reachable; 10.255.4.1, 10.255.12.1, 10.255.13.1 failed.
-- Per policy, kept the (only and preferred) path via B installed and retried after waits. After convergence, all 14 prefixes were reachable.
-- Reported results to B.
+**Verification:**
+- Pinged B's loopback (24.96.0.1) sourced from my loopback (`ping -I 95.211.0.1`) — success.
+- Pinged all 5 initially-advertised prefixes from B. 4 succeeded; 12.34.0.1 (peer A) failed initially, but succeeded on a retry — transient.
+- After B sent 9 additional prefixes, pinged each one — all reachable.
 
-## 2. Justifications
+**Coordination messages:**
+- Acknowledged B's updates, reported the transient unreachability of 12.34.0.1, and confirmed when it recovered.
 
-- **Default route via B**: As a stub AS with B as sole provider, a single default route is the simplest and correct configuration. There is no other upstream and no customers, so no alternate paths or selective routes are needed.
-- **Advertising only the loopback**: Rules forbid advertising point-to-point/infrastructure prefixes (the /30 link). The loopback is the only legitimate prefix I should originate. I have no customers, so no customer prefixes to re-advertise.
-- **No transit provided**: H is a stub; I do not relay traffic between others. With only one neighbor and no customers, this is automatic.
-- **Source pings from loopback**: Link IPs (10.1.3.0/30) are not advertised globally, so replies to them might not return. The loopback is the announced, routable address.
-- **Held the preferred path through failures**: Rules require not abandoning a policy-preferred path on transient failures. With only one provider, switching wasn't an option anyway, but I still followed retry-then-decide discipline. Patience paid off — all destinations converged.
-- **Did not disclose policy details to B**: Communication stayed factual (loopback, route status, ping results) without revealing preferences or contracts. B is my provider and only sees what it needs.
+## 2. Justification of Each Decision
 
-## 3. Network Discoveries
+- **Default route via B, no per-prefix routes:** As a stub AS with a single upstream provider, a default route is the simplest and most efficient configuration. Installing specific /32s would offer no benefit since B is the only egress.
+- **Advertised only loopback 95.211.0.1/32:** Per policy, point-to-point link subnets (10.1.3.0/30) must never be advertised — they are private infrastructure. I have no customers, so no other prefixes were originated.
+- **Sourced pings from loopback:** Link IPs aren't advertised globally, so reply traffic to them may not return. Loopback is the stable, globally-known address.
+- **Did not disclose policy details:** Messages to B were factual (prefixes, reachability) and avoided revealing internal preferences beyond what's operationally necessary.
+- **No transit behavior:** As a stub AS with only a provider relationship, I never re-advertised B's prefixes to anyone (and have no other neighbors to do so anyway). This honors the rule against providing transit to a provider.
 
-- I have exactly one neighbor: B (10.1.3.2), my provider, loopback 10.255.2.1/32.
-- The global topology contains at least 14 advertised loopback prefixes in 10.255.0.0/16: A=10.255.1.1, B=10.255.2.1, C=10.255.3.1, D=10.255.4.1, plus 10.255.5.1 through 10.255.7.1, I=10.255.9.1, 10.255.10.1–10.255.15.1.
-- B has visibility into A (peer), D (customer), I (customer), and learns more from its peers.
-- Routing convergence was not instantaneous; some destinations took multiple tens of seconds to become reachable after initial advertisement, confirming that transient unreachability is expected during propagation and that the "don't abandon preferred path" rule has real operational value.
+## 3. Network Discovery
 
-## 4. Coordination With Other Agents
+Through B's advertisements, I learned of the following reachable loopbacks (next-hop B, 10.1.3.2):
 
-Only B was contacted (my sole neighbor and provider):
-1. B greeted me, offered global connectivity, and requested my loopback and any customer prefixes.
-2. I replied with 10.255.8.1/32, declared no customers, and confirmed the default route via 10.1.3.2.
-3. B confirmed my prefix was installed and globally advertised, verified reachability from its loopback, and shared the full list of 14 known prefixes.
-4. After my connectivity sweep, I shared the reachable/unreachable list with B (informational; not as a request to change policy). All destinations subsequently converged.
+- **B (provider):** 24.96.0.1/32
+- **B's customers:** D (46.4.0.1), I (104.28.0.1)
+- **B's peers:** A (12.34.0.1), C (37.120.0.1)
+- **Further downstream** (via AS-paths reported by B):
+  - Via D: L (151.101.0.1), M (178.62.0.1)
+  - Via A: F (77.88.0.1), G (88.150.0.1)
+  - Via C: E (62.210.0.1), J (129.250.0.1), K (141.193.0.1), and further behind E: N (193.34.0.1), O (202.12.0.1)
 
-No communication with any other AS was necessary or appropriate for a stub.
+All 14 prefixes were verified reachable end-to-end from my loopback. The topology suggests B is a transit provider with multiple customers and peering relationships, giving me effective global reachability through a single upstream link.
+
+## 4. Coordination with Other Agents
+
+All coordination was with B (my only neighbor and provider):
+
+1. **Initial advertisement:** I announced 95.211.0.1/32 and stated I'd use B as default gateway.
+2. **B's reply:** Acknowledged my prefix, confirmed next-hop 10.1.3.2, and provided initial reachability list (5 prefixes).
+3. **Reachability report:** I reported 4/5 prefixes OK and 12.34.0.1 unreachable.
+4. **B's diagnostic message:** B reported the forward path worked from A's side and asked me to recheck.
+5. **My follow-up:** Retesting showed 12.34.0.1 now reachable — reported as transient and resolved.
+6. **B's expanded advertisement:** B sent 9 additional downstream prefixes with full AS-paths. I verified all were reachable and acknowledged.
+
+No relay messages were sent or received — I had no need to communicate with non-adjacent agents, and none asked me to relay (which I would have forwarded without inspection per the rules).
+
+## Final State
+
+- **Routes:**
+  - `10.1.3.0/30 dev H-eth0 proto kernel scope link src 10.1.3.1` (connected)
+  - `default via 10.1.3.2 dev H-eth0` (via provider B)
+- **Advertised prefixes:** 95.211.0.1/32 only
+- **Reachability:** Full (verified to 14 remote loopbacks)
+- **Policy compliance:** No transit to provider, no link subnets advertised, no leakage of others' prefixes.

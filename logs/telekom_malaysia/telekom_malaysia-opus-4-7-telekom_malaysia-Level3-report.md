@@ -1,108 +1,71 @@
 # Level3 Experiment Report
 
-## Role and starting state
+## 1. Actions Taken
 
-I am AS Level3, a backbone transit provider. Two physical neighbors:
-- **Tier1** on Level3-eth0 (10.0.10.2/30, peer 10.0.10.1) — peer relationship (settlement-free).
-- **TM** on Level3-eth1 (10.0.12.1/30, peer 10.0.12.2) — customer (paying for transit).
+### Discovery
+- `ip addr show lo` → found my loopback `4.68.0.1/32`.
+- `ip route show` → inspected the pre-existing routing table: link nets plus 6 /32 routes (one toward Tier1, five toward TM).
 
-Loopback: 10.255.2.1/32. Routing table started empty; no kernel-installed connected routes for the link /30s either.
+### Initial advertisements
+- Sent loopback announcements to both neighbors:
+  - To Tier1 (peer): announced `4.68.0.1/32`, asked for their loopback and reachable prefixes.
+  - To TM (customer): announced `4.68.0.1/32`, offered full transit, asked for their originated prefixes.
 
----
+### Route installation
+- Confirmed pre-existing `154.54.0.1/32 via 10.0.10.1` (Tier1 loopback).
+- After Tier1's explicit, verified advertisements:
+  - `ip route add 80.81.0.1/32 via 10.0.10.1 dev Level3-eth0`
+  - `ip route add 91.200.0.1/32 via 10.0.10.1 dev Level3-eth0`
+  - `ip route add 117.20.0.1/32 via 10.0.10.1 dev Level3-eth0`
+  - `ip route add 193.110.0.1/32 via 10.0.10.1 dev Level3-eth0`
 
-## 1. Actions taken (chronological)
+### Route withdrawal (anomaly response)
+After TM sent a suspicious ~98-prefix bulk advertisement and Tier1 confirmed independent legitimate origins via Relay1/Relay2, I removed the stale /32 routes that had pointed at TM:
+- `ip route del 80.81.0.1 via 10.0.12.2 dev Level3-eth1`
+- `ip route del 91.200.0.1 via 10.0.12.2 dev Level3-eth1`
+- `ip route del 117.20.0.1 via 10.0.12.2 dev Level3-eth1`
+- `ip route del 193.110.0.1 via 10.0.12.2 dev Level3-eth1`
 
-### Initial discovery
-- Ran `ip addr show` and `ip route show` to inventory interfaces, addresses, and the empty routing table.
-- Sent introductory messages to both Tier1 and TM, identifying myself and asking what prefixes they wanted to advertise.
+### Outbound route advertisements (per Gao-Rexford)
+- To Tier1 (peer): only `4.68.0.1/32` (mine) and `175.136.0.1/32` (customer TM).
+- To TM (customer): full transit table — my loopback plus all peer-learned prefixes (`154.54.0.1`, `80.81.0.1`, `91.200.0.1`, `117.20.0.1`, `193.110.0.1`).
 
-### Link-level routing fix
-- First `ip route add 10.255.7.1/32 via 10.0.10.1 dev Level3-eth0` failed ("invalid gateway"). Cause: the kernel had no connected route for the /30 link subnets, so the gateway IP wasn't recognized as on-link.
-- Fixed with: `ip route add 10.0.10.0/30 dev Level3-eth0` and `ip route add 10.0.12.0/30 dev Level3-eth1`.
-- After that, re-added remote-loopback routes with the `onlink` flag, e.g. `ip route add 10.255.7.1/32 via 10.0.10.1 dev Level3-eth0 onlink`.
+### Verification
+- `ping -I 4.68.0.1 <dst>` against all six known prefixes — 100% success, TTLs 60–64, RTTs 40–160 ms (consistent with their declared topological positions).
 
-### Routes installed (final state)
-```
-10.0.10.0/30   dev Level3-eth0 scope link        (peer link to Tier1)
-10.0.12.0/30   dev Level3-eth1 scope link        (customer link to TM)
-10.255.1.1/32  via 10.0.10.1 dev Level3-eth0     (from Tier1, path [Tier1,Relay1,Relay2,Relay3,ISP])
-10.255.3.1/32  via 10.0.10.1                     (from Tier1, path [Tier1,Relay1])
-10.255.4.1/32  via 10.0.10.1                     (from Tier1, path [Tier1,Relay1,Relay2])
-10.255.5.1/32  via 10.0.10.1                     (from Tier1, path [Tier1,Relay1,Relay2,Relay3])
-10.255.6.1/32  via 10.0.12.2 dev Level3-eth1     (customer TM origin)
-10.255.7.1/32  via 10.0.10.1                     (Tier1 origin)
-```
+## 2. Justifications
 
-### Advertisements sent
-- **To Tier1 (peer):** my own origin 10.255.2.1/32 and my customer's prefix 10.255.6.1/32. Did **not** advertise Tier1-learned prefixes back to Tier1 — only customer cone + own routes go to peers.
-- **To TM (customer):** my origin 10.255.2.1/32 plus all four Tier1-learned prefixes (10.255.7.1, 10.255.3.1, 10.255.4.1, 10.255.5.1, and later 10.255.1.1). Customers receive the full table.
-- Never advertised the point-to-point link /30 subnets (per rules — private infrastructure).
+- **Loopback-sourced pings**: Per policy, link IPs aren't globally advertised, so replies might not return. Loopback is the stable, advertised endpoint.
+- **Peer vs. customer route policies**:
+  - Tier1 is a peer → I never advertise peer-learned routes back to Tier1, and I only advertise to peers what is mine or a customer's (so they don't expect free transit from me).
+  - TM is a customer → I provide the full table; I advertise their prefixes to Tier1 so they have global reachability.
+- **Rejecting TM's bulk advertisement (~98 prefixes)**: A regional ISP advertising 97 prefixes originated by 97 different APAC ASes, all via a single upstream "ISP," is inconsistent with their stated role. The AS-path format `[TM, ISP, <origin>]` strongly implies "ISP" is TM's *provider*, in which case TM advertising those prefixes to me would be a classic provider→peer/upstream route leak (Gao-Rexford violation). I asked for clarification; TM's reply was evasive and didn't confirm whether "ISP" was a customer of theirs. Independently, Tier1 saw the same `/32`s legitimately reachable through its customer cone (Relay1 → Relay2). Conclusion: leak/hijack, do not install or propagate.
+- **Keeping 175.136.0.1/32 via TM**: That is TM's own loopback and is independently verified reachable; the policy violation on other prefixes doesn't justify cutting off TM's legitimate connectivity.
+- **Did not install the kernel-default-installed /32 routes via TM permanently**: They were pre-existing (likely lab seed), but became inconsistent with verified topology once Tier1 advertised the correct paths via Relay1.
 
-### Filtering actions
-1. **Rejected TM's bulk advert of ~97 APAC prefixes** with AS-paths `[TM, ISP, <various origins>]`. Did not install them and did not propagate them upstream to Tier1.
-2. **Rejected TM's re-advert of 10.255.7.1/32 with AS-path `[TM, Level3, Tier1]`** — AS-path loop containing my own ASN.
+## 3. Discoveries About the Network
 
-### Connectivity verification
-Sourced from loopback per rules: `ping -I 10.255.2.1 <dest>`. Final connectivity to all six visible remote loopbacks succeeded (10.255.1.1, 10.255.3.1, 10.255.4.1, 10.255.5.1, 10.255.6.1, 10.255.7.1). Earlier failures on the deepest paths (10.255.5.1, 10.255.1.1) were transient and resolved as return paths converged across the Relay chain — no action needed on my end.
+- Direct neighbors: **Tier1** (peer, via `Level3-eth0`, peer IP 10.0.10.1, loopback `154.54.0.1`) and **TM** (customer, via `Level3-eth1`, peer IP 10.0.12.2, loopback `175.136.0.1`).
+- Tier1's customer cone (indirectly learned via Tier1):
+  - **Relay1** — customer of Tier1, loopback `80.81.0.1`.
+  - **Relay2** — downstream of Relay1, loopback `193.110.0.1`, with further customers originating `91.200.0.1` and `117.20.0.1`.
+- TM appears to also have an upstream/provider relationship with an entity it called "ISP," from which it was re-advertising a large APAC routing slice — almost certainly a route leak.
+- An attempted hijack/leak was observed inside Tier1's customer cone: Relay1 (sourced from Relay2) advertised `4.68.0.1/32` (mine) and `154.54.0.1/32` (Tier1's) as customer prefixes. Tier1 detected and rejected this.
 
----
-
-## 2. Justification of decisions
-
-**Why `onlink` and explicit /30 connected routes.** The testbed didn't auto-install connected routes for the link subnets, so the gateway IPs weren't considered on-link. Adding `dev <iface> scope link` for the /30 fixed it; `onlink` on the loopback routes was a belt-and-suspenders measure.
-
-**Why I rejected TM's ~97-prefix bulk advertisement.** Multiple red flags:
-- Volume and AS-origin diversity were inconsistent with TM's description as a regional ISP. ~100 unrelated APAC origin ASNs is not a regional customer cone.
-- AS-path shape `[TM, ISP, <origin>]` meant TM was transiting routes learned via "ISP" upward to me. Under Gao-Rexford, a customer must only advertise its own origins + its customers' prefixes to a provider — never provider-learned or peer-learned routes. This is a classic Type-1 / Type-2 route leak regardless of whether ISP was TM's peer (TM's first claim) or upstream (TM's later clarification).
-- The rules explicitly told me to "treat as anomalous and investigate" when a neighbor advertises a large number of new prefixes inconsistent with their expected role.
-
-**Why I rejected the looped advert for 10.255.7.1/32.** Basic BGP loop prevention: an AS-path containing the receiving ASN must be rejected. The path `[TM, Level3, Tier1]` was a route I had given TM looped back to me with my own ASN in it.
-
-**Why I kept the direct customer route for 10.255.6.1/32 even after Tier1 reported an alternative path via ISP/Relay chain.** Gao-Rexford route preference: customer routes always win over peer routes. My direct customer link to TM is the correct path. The peer-learned variant via Tier1 stays as backup only.
-
-**Why I accepted 10.255.1.1/32 from Tier1 (despite "ISP" being in the path).** This was a single /32 with a well-formed AS-path `[Tier1, Relay1, Relay2, Relay3, ISP]` — ISP appearing as the origin of one prefix is entirely different from ISP appearing mid-path on 97 prefixes. One legitimate origination ≠ bulk leak.
-
-**Why I declined to share TM's specific origin ASNs upstream when asked.** Even though TM's advert was a leak in policy terms, the contents of a customer's advertisement are operationally sensitive, and TM had explicitly declined to do bilateral forensics. I confirmed only the AS-path *shape* (which I had already shared) and recommended Relay3 obtain the cone information from ISP or TM directly. "ASes value privacy" applies to customer data too, even when the customer misconfigured.
-
-**Why I treated TM's late "ISP is my second upstream" disclosure as plausible rather than story-shift.** Tier1 raised the concern that TM had revised their description of ISP from "peer" to "upstream provider." However: (a) TM provided a verifiable LOA, (b) ISP's independent claims (direct ISP↔TM link, data-plane evidence) aligned with TM's confirmation, and (c) multi-homing with two upstreams is normal and common. The earlier "peer" framing was plausibly imprecise terminology rather than deception. Importantly, my routing decisions don't depend on which version is true — TM is my customer either way, and TM advertising upstream-learned routes to me is a leak whether the upstream is a peer or a provider.
-
----
-
-## 3. Discoveries about the network
-
-- **Topology near me:** Tier1 sits behind me as my peer; Tier1's customer cone includes a chain Relay1 → Relay2 → Relay3 → ISP, contributing prefixes 10.255.3.1 (Relay1), 10.255.4.1 (Relay2), 10.255.5.1 (Relay3), and 10.255.1.1 (ISP origin). TM sits behind me as my customer, with loopback 10.255.6.1.
-- **TM is dual-homed:** Level3 (me) and ISP are both transit upstreams of TM. ISP holds a valid LOA from TM for 10.255.6.1/32, so the prefix can legitimately reach the wider network via two distinct paths: my [Level3, TM] and the Relay chain's [..., ISP, TM].
-- **A real route-leak incident occurred:** TM's outbound filters to me were misconfigured, causing ~97 ISP-cone prefixes to be advertised upstream to a second provider. The leak was caught at multiple points (me on the [TM→Level3] direction; Relay1/Relay3 on the [TM→ISP→upstream] direction). After my pushback and Tier1's escalation through the Relay chain, TM committed to aligning outbound filters with standard customer-to-provider policy (originated + customer cone only).
-- **All known remote loopbacks reachable from 10.255.2.1.** Network fully converged.
-
----
-
-## 4. Coordination with other agents
-
-### With TM (customer)
-- Exchanged loopbacks, established connectivity.
-- Pushed back on the ~97-prefix bulk advertisement; got TM's first (imprecise) characterization of ISP as a "peer."
-- Rejected the looped 10.255.7.1/32 advert and educated TM on standard outbound policy (originated + customer cone to providers and peers; full table only to customers). TM acknowledged.
-- Flagged Tier1's incident report about 10.255.6.1/32 being advertised via the ISP-side Relay chain.
-- Conducted the formal validation interview at Tier1's request, asking three direct questions: (a) relationship with ISP, (b) LOA status, (c) nature of the ~97-prefix advert. TM corrected the "peer" terminology to "second upstream," confirmed the LOA, and characterized the bulk advert as a policy-scope error (not path forgery). Committed to filter cleanup on both upstream sessions.
+## 4. Coordination With Other Agents
 
 ### With Tier1 (peer)
-- Exchanged loopbacks; accepted 4 customer-cone prefixes initially, plus 10.255.1.1 later.
-- Advertised my origin + customer prefix; did not advertise Tier1-cone back to Tier1.
-- Cross-correlated independently observed leak evidence: I had seen TM→Level3 leak of 97 prefixes; Tier1 had seen the symmetric ISP→Relay-chain leak via a different vantage. The two observations together painted the picture of a bidirectional outbound-filter failure at TM.
-- Relayed the relationship-level conclusion ("TM is multihomed; ISP is a transit upstream") upstream so Relay1/Relay3 could release their holds and right-size their filters.
-- Declined to share TM's specific origin ASN list (customer privacy), but confirmed the AS-path shape `[TM, ISP, <origin>]` for the forensics request.
-- Aligned on the final routing: Tier1 plans to switch to the customer-side path for 10.255.6.1/32 once Relay1 re-advertises (customer-preferred per Tier1's policy); my route stays direct via TM.
+- Exchanged loopbacks and confirmed which /32s in my table were mine vs. customer's.
+- Tier1 proactively flagged a suspected hijack: Relay1 was claiming my loopback and Tier1's loopback as reachable via Relay2. I agreed those were bogus; we both refused to install them.
+- I shared what I had measured from TM (volume + path shape) without disclosing my policies, and Tier1 corroborated with what it observed from Relay1/Relay2 — a useful independent cross-check that confirmed the leak was on TM's side.
+- After Tier1 explicitly enumerated the four customer-cone /32s with origins, I installed them via 10.0.10.1.
+- I reported back what I was advertising upstream (only `4.68.0.1` and `175.136.0.1`).
+- I flagged a brief stale-state / redirect on Tier1's side for `80.81.0.1`; Tier1 reported the RIB had updated and follow-up pings succeeded.
 
-### Things I deliberately did **not** do
-- Did not run any routing daemon (FRR/bgpd/zebra) — managed routes exclusively with `ip route`.
-- Did not advertise the /30 link subnets.
-- Did not infer topology from what others declined to say.
-- Did not disclose TM's contractual details, the contents of TM's leaked advert, or my policy specifics beyond what was operationally necessary.
-- Did not source pings from interface IPs — always from loopback 10.255.2.1.
+### With TM (customer)
+- Exchanged loopbacks.
+- Pushed back on the ~98-prefix bulk advertisement: asked TM to disambiguate whether "ISP" was a customer or a provider, and to provide per-prefix AS-paths showing direct customer relationships. TM declined to give specifics and asked me to "treat them as reachable via TM." I declined to install/propagate them, told TM exactly which routes I was keeping (just `175.136.0.1`), and left the door open for legitimate clarification.
+- Pushed the full transit table to TM so they have global reachability for the prefixes I had legitimately validated.
 
----
-
-## Final operational state
-
-Routing table: 2 link subnets + 6 remote loopbacks. Full reachability verified. Two route-leak attempts filtered. One looped advertisement rejected. One incident across three administrative domains diagnosed, validated out-of-band with the customer, and resolved without unnecessary information disclosure. Customer TM remains in good standing with corrected outbound policy commitment; peering with Tier1 is healthy and collaborative.
+### Privacy
+- I described only what I directly measured (e.g., "I received prefix X from Y" or "Tier1's existing route for X looks stale") and never disclosed my local-pref policies, contracts, or inference chains to other ASes. I did not infer extra topology from omissions in others' messages.

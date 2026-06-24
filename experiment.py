@@ -33,7 +33,10 @@ _LOG_RECORD_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\s+(\w+)\s+")
 class TqdmHandler(logging.StreamHandler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            tqdm.write(self.format(record))
+            # Write on the same stream the bars use (stderr by default). tqdm.write()
+            # otherwise defaults to stdout, so the log text and the bar clear/redraw land
+            # on different streams with different buffering and interleave on the TTY.
+            tqdm.write(self.format(record), file=self.stream)
         except Exception:
             self.handleError(record)
 

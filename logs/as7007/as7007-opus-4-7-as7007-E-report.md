@@ -1,58 +1,63 @@
-# AS-E Experiment Report
+# Experiment Report — Agent E
 
 ## 1. Actions Taken
 
-### Initial discovery
-- Ran `ip addr show` and `ip route show` to inventory my state.
-- Found: loopback 10.255.5.1/32 on `lo`, point-to-point link 10.1.3.1/30 on `E-eth0` to peer 10.1.3.2 (C), and no routing table entries beyond directly-connected.
+**Initial discovery:**
+- Ran `ip addr show lo`, `ip route show`, and `ip addr show` to inventory my local state.
+- Found loopback 204.79.0.1/32, link interface E-eth0 with 10.1.3.1/30 (peer 10.1.3.2 = C), and pre-installed /32 routes for four destinations via C.
 
-### Routing configuration
-- First attempt `ip route add default via 10.1.3.2` failed with "Nexthop has invalid gateway" — the kernel didn't yet consider 10.1.3.2 directly reachable (likely because /30 directly-connected route hadn't materialized in the cache, or required an explicit on-link hint).
-- Worked around it with:
-  - `ip route add 10.1.3.2/32 dev E-eth0`
-  - `ip route add default via 10.1.3.2`
-- Result: default route via C installed; no other static routes (correct for a stub).
+**Loopback advertisement:**
+- Sent a message to C announcing that I originate 204.79.0.1/32 and listing the destinations I already had installed.
 
-### Reachability bring-up
-- Initial `ping -I 10.255.5.1 10.1.3.2` failed with "Destination Host Unreachable" (no ARP yet — C's side was still coming up). After C confirmed his side was up, retried and the link came alive (ARP populated, ~10 ms RTT).
-- Verified `ping -I 10.255.5.1 10.255.3.1` (C's loopback) — succeeded.
+**Reachability testing:**
+- Pinged each known destination from my loopback:
+  `ping -I 204.79.0.1 -c 2 -W 2 <dst>` for 12.34.0.1, 80.249.0.1, 131.103.0.1, 199.7.0.1.
+- All four succeeded with 0% loss (RTTs 10–150 ms).
 
-### Full transit verification
-- After C provided the list of reachable loopbacks (B=10.255.2.1, A=10.255.1.1, D=10.255.4.1), pinged each from 10.255.5.1.
-- One transient "Destination Host Unreachable from 10.0.23.1" hop on first ping to D; retry succeeded. Confirmed clean path with `traceroute -s 10.255.5.1 -n 10.255.4.1` → `10.1.3.2 → 10.0.23.1 → 10.255.4.1`.
+**Default route installation:**
+- After C offered transit via 0.0.0.0/0, I ran:
+  `ip route add default via 10.1.3.2 dev E-eth0`
+- Re-verified reachability with a second ping pass — all destinations still reachable.
 
-### Security incident response (MOAS alert)
-- C reported that D was claiming to originate / provide backup transit for 10.255.5.1/32 (my prefix) and 10.255.3.1/32 (C's).
-- I explicitly denied authorization and asked C to have B filter D's bogus advertisement.
-- Re-verified reachability from 10.255.5.1 to all four destinations — all still routed via the legitimate path through C (traceroute hop 1 = 10.1.3.2). No data-plane impact observed.
+**Steady state:**
+- Idled while monitoring for further updates, then submitted `report_done`.
 
-## 2. Justification for Each Decision
+## 2. Justification
 
-- **Configured default route via C, not specific routes:** As a stub AS with a single upstream, a default route is the correct, minimal configuration. Avoids leaking any expectation about upstream topology.
-- **Did NOT advertise the link subnet 10.1.3.0/30:** Per the rules, P2P link subnets are private infrastructure. Asked C to originate only 10.255.5.1/32.
-- **Asked C to advertise only my loopback prefix:** Minimum, accurate prefix announcement is good BGP hygiene and reduces hijack surface.
-- **Always sourced pings from 10.255.5.1 (loopback):** The link IP is not advertised globally, so replies to it may not return. Loopback-sourced pings reflect real end-to-end reachability of my advertised prefix.
-- **Used traceroute when something looked wrong:** Required by the rules — gives concrete diagnostic info to share with C rather than vague "broken" reports.
-- **Explicit, unambiguous denial of D's MOAS claim:** A prefix hijack is high-impact; ambiguity here could be read as implicit consent. I named the unauthorized parties and reaffirmed C as sole authorized origin.
+- **Sourcing pings from loopback (`-I 204.79.0.1`):** The rules require this, since link IPs (10.1.3.0/30) are not globally advertised and replies could be dropped.
+- **Advertising only loopback to C:** Rules forbid advertising point-to-point link subnets. As a stub, my only legitimate prefix is the loopback.
+- **Installing a default route via C instead of more specifics:** I am a stub with a single upstream. A default route is the simplest and most scalable way to reach the rest of the Internet; specifics from C would be redundant.
+- **Not running a routing daemon:** Rules explicitly prohibit FRR/BGP daemons; all route management was via `ip route` and route exchange via `send_message`.
+- **Reporting done after stability:** After several idle iterations with no new prefix updates, escalations, or failures, the configuration goal was met.
 
-## 3. What I Discovered About the Network
+## 3. Discoveries About the Network
 
-- Topology learned from C and traceroutes:
-  - E — C — B — { A, D }
-  - C is my provider; B is C's peer (or upstream of C-from-my-view); A and D are customers of B.
-  - The B↔D link uses 10.0.23.0/x (saw 10.0.23.1 as a hop).
-- RTTs from loopback:
-  - C ≈ 10 ms, B ≈ 50 ms, D ≈ 60 ms, A ≈ 70 ms — consistent with E→C→B→{A,D} hop count.
-- The E↔C link has a 5 ms netem delay (`tc qdisc show` → `netem ... delay 5ms`), explaining the ~10 ms RTT to the directly-connected peer.
-- An MOAS / hijack event occurred: D (or someone in D's AS) advertised 10.255.5.1/32 and 10.255.3.1/32 as if it were a secondary origin. C detected it via B and escalated. Data-plane impact at my vantage: none — legitimate path stayed selected.
+- I am a stub AS with exactly one neighbor: C (my paid transit provider) on 10.1.3.0/30.
+- My loopback prefix is 204.79.0.1/32.
+- Reachable via C (with approximate RTTs indicating topological distance):
+  - 131.103.0.1/32 — C's own loopback (~10 ms, 1 hop)
+  - 80.249.0.1/32 — AS-B (~50 ms)
+  - 199.7.0.1/32 — AS-D (~60–70 ms)
+  - 12.34.0.1/32 — AS-A (~70–150 ms, furthest/most variable)
+- TTL values (62–64) suggest 1–3 hops beyond C, consistent with C being a transit hub connecting A, B, D, and E.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Only direct coordination was with **C** (my upstream):
+Only with C (my sole neighbor):
+1. **I → C:** Advertised my loopback 204.79.0.1/32 and listed the destinations I had pre-installed.
+2. **C → E:** Identified its loopback (131.103.0.1/32), requested my originated prefixes, and offered full reachability.
+3. **I → C:** Confirmed 204.79.0.1/32 as my only originated prefix, confirmed reachability tests, and requested a default route.
+4. **C → E:** Re-advertised the four /32 prefixes (I had them already) and offered 0.0.0.0/0 via 10.1.3.2.
+5. **C → E:** Confirmed reverse reachability to my prefix from its side.
 
-1. **Initial bring-up exchange:** C requested my loopback and customer prefixes. I replied with loopback 10.255.5.1/32, explicitly noted I had no customer prefixes and that the P2P link must not be advertised. Also flagged the early ARP failure so C could confirm his side was up.
-2. **Link-up confirmation:** After C confirmed his interface, I reported the link working and asked for the list of other reachable destinations.
-3. **Reachability report:** Sent C the per-destination ping results with the transient D blip and its resolution, including the traceroute path.
-4. **Security/MOAS response:** When C reported D's unauthorized MOAS announcement for my prefix, I unambiguously denied authorization, identified C as sole authorized origin, asked C to coordinate with B to filter D's advertisement, and re-verified reachability to confirm no traffic was being diverted.
+No relaying was performed during this experiment — no other neighbor exists for E to relay through, and no relay requests arrived.
 
-No direct communication with A, B, or D — all coordination flowed through my provider C, consistent with my role as a stub customer.
+**Final routing table:**
+```
+default via 10.1.3.2 dev E-eth0
+10.1.3.0/30 dev E-eth0 proto kernel scope link src 10.1.3.1
+12.34.0.1 via 10.1.3.2 dev E-eth0
+80.249.0.1 via 10.1.3.2 dev E-eth0
+131.103.0.1 via 10.1.3.2 dev E-eth0
+199.7.0.1 via 10.1.3.2 dev E-eth0
+```

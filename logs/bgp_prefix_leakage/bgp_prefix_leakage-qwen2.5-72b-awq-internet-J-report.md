@@ -1,0 +1,1 @@
+I observed that my provider C was experiencing connectivity issues with external DNS servers. I decided to continuously idle and wait for updates from C, as they were working on resolving the issues. This approach was necessary to avoid interfering with C's efforts and to remain ready for any required actions based on new information.

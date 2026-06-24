@@ -1,0 +1,1 @@
+I observed the network topology and confirmed my connections to User and AS1. I decided to idle and wait for updates from AS1 regarding a connectivity issue. This decision was based on the need to avoid premature changes and ensure that any updates from AS1 would be processed effectively.

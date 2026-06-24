@@ -1,51 +1,58 @@
-# Experiment Report: AS F (Stub AS)
+# Experiment Report: Stub AS F
 
 ## 1. Actions Taken
 
-**Initial reconnaissance:**
-- Ran `ip addr show` and `ip route show` to inventory my interfaces and routing state.
-- Discovered loopback 10.255.6.1/32, one physical interface F-eth0 with 10.1.1.1/30 toward A (peer .2), and an empty routing table.
+1. **Inspected local state**
+   - `ip addr show lo` → discovered loopback 77.88.0.1/32.
+   - `ip addr show` → confirmed single physical link F-eth0 (10.1.1.1/30) toward A (peer 10.1.1.2).
+   - `ip route show` → only the connected /30 was present.
 
-**Routing configuration:**
-- Attempted `ip route add default via 10.1.1.2` — failed ("invalid gateway") because 10.1.1.2 was not yet a known on-link host (the /30 mask on the interface was apparently not creating a usable connected route in this environment).
-- Fixed by adding an explicit on-link entry first: `ip route add 10.1.1.2/32 dev F-eth0`.
-- Then installed `ip route add default via 10.1.1.2` successfully.
-- Final routing table:
-  - `default via 10.1.1.2 dev F-eth0`
-  - `10.1.1.2 dev F-eth0 scope link`
+2. **Installed default route via provider**
+   - `ip route add default via 10.1.1.2 dev F-eth0`
 
-**Coordination:**
-- Sent A a message announcing my loopback 10.255.6.1/32 for global advertisement, noting I have no customer prefixes.
-- Did NOT share the link subnet 10.1.1.0/30 for advertisement (private infrastructure per policy).
+3. **Coordinated with provider A**
+   - Sent A an initial hello advertising my loopback 77.88.0.1/32 and indicating I would use A as default gateway.
+   - When A asked for the list of prefixes to transit, replied with only 77.88.0.1/32 (no customers).
 
-**Verification:**
-- Sourced pings from my loopback: `ping -I 10.255.6.1 -c 3 10.255.1.1`.
-- First attempts failed (A had not yet installed its return route).
-- After A confirmed, pings succeeded with 0% loss (~20 ms RTT).
+4. **Verified connectivity**
+   - `ping -I 77.88.0.1 -c 2 12.34.0.1` → A's loopback reachable.
+   - Batch-pinged 46.4.0.1, 151.101.0.1, 95.211.0.1, 202.12.0.1, 141.193.0.1 from my loopback; one transient drop on 95.211.0.1 that succeeded cleanly on retry.
 
-## 2. Justification of Decisions
+5. **Reported done.**
 
-- **Default route via A only:** As a stub AS with a single provider, A is by policy my sole gateway to the rest of the internet. No alternative paths exist, so a static default is sufficient and simple.
-- **Advertise only my loopback:** I have no customers and no peers. The only prefix I have a revenue incentive to expose is my own loopback (so others can reach me via A, whom I pay for transit). The /30 point-to-point link is private infrastructure and must not be leaked.
-- **No transit offered:** As a stub with no customers, I never accept or forward traffic between other ASes. This is structural — I only have one neighbor — but also enforced by not advertising anything other than my own loopback.
-- **Sourcing pings from loopback:** Link interface addresses are not globally advertised; replies could be dropped or returned via unexpected paths. Loopback is the stable, advertised identity.
-- **Patience on initial ping failure:** Per policy, transient unreachability on the preferred (and only) path does not justify abandoning it. I retried and confirmed reachability once A's side converged.
+## 2. Justification for Each Decision
+
+- **Default route via A only**: F is a stub AS with a single provider. There is no benefit to maintaining per-prefix routes when A offers full transit; a single default is the simplest, most robust configuration.
+- **Advertised only 77.88.0.1/32 to A**: Stub-AS policy — advertise only owned/customer prefixes for which there is a revenue incentive. I have no customers, so only my own loopback was announced.
+- **Did NOT advertise the 10.1.1.0/30 point-to-point subnet**: Per the rules, link subnets are private infrastructure and must never be advertised.
+- **Did not request or accept transit roles**: As a stub AS with no customers and no peers, I must not provide transit. Nothing I do exposes A's routes to anyone else (I have no other neighbors anyway).
+- **Sourced pings from loopback (`-I 77.88.0.1`)**: Per the rules — link IPs are not advertised globally, so reply traffic to them may be dropped. Loopback is the stable, advertised address.
+- **Did not disclose policy to A**: Kept messages factual (prefix list, gateway intent) without revealing preferences or contracts.
 
 ## 3. Network Discoveries
 
-- I am a leaf node: a single physical link to A, and A is my upstream transit provider.
-- A's loopback is 10.255.1.1/32, reachable via the default route.
-- Link subnet to A is 10.1.1.0/30. RTT to A's loopback is ~20 ms.
-- I have no visibility into the wider topology beyond A; any global reachability is delegated to A's advertisements on my behalf.
-- The environment required an explicit on-link host route for the gateway before a default could be installed — a quirk worth noting for future configurations.
+- I have exactly one neighbor: A (my transit provider), on 10.1.1.0/30.
+- My stable identity is loopback 77.88.0.1/32.
+- A advertised a list of 14 reachable /32 loopbacks with AS-paths through itself, showing a network with at least the following ASes reachable via A: A, B, C, D, E, G, H, I, J, K, L, M, N, O.
+  - A is multi-homed/upstream-connected: it reaches D, G, B, C directly and farther ASes (E, H, I, J, K, L, M, N, O) through them.
+- End-to-end RTTs varied widely (~20 ms to A, ~124 ms to 95.211.0.1), suggesting a wide-area topology with multi-hop paths.
+- One transient ping loss observed — likely link netem-induced jitter/loss, not a routing issue.
 
 ## 4. Coordination With Other Agents
 
-Only one peer, A (my provider):
-- A initiated by introducing itself (10.255.1.1) and requesting my loopback plus any customer prefixes.
-- I replied with my loopback 10.255.6.1/32 and stated I have no customers.
-- A confirmed it would advertise 10.255.6.1/32 globally and offered itself as my default.
-- I did not disclose policies, preferences, or contract details beyond what was operationally necessary (loopback prefix) — consistent with the privacy norm.
-- Reachability to A's loopback was verified end-to-end after A installed its return route.
+Only with A (my provider):
+- **F → A**: Hello + advertisement of 77.88.0.1/32, declaration of intent to use A as default.
+- **A → F**: Asked for the prefix list F wants transit for.
+- **F → A**: Replied with 77.88.0.1/32 only, noting no customers.
+- **A → F**: Confirmed next-hop 10.1.1.2, listed the 14 prefixes it provides me with their AS-paths, and confirmed installation of 77.88.0.1/32 toward me.
 
-Final state: stub AS F is fully configured with a default route to provider A, loopback announced through A, and verified reachability to A.
+No other agents were contacted directly (none are adjacent), and no relay requests were sent or received during this experiment.
+
+## Final Routing State
+
+```
+default via 10.1.1.2 dev F-eth0
+10.1.1.0/30 dev F-eth0 proto kernel scope link src 10.1.1.1
+```
+
+Loopback 77.88.0.1/32 on `lo`. Globally reachable via A; no transit offered to anyone.

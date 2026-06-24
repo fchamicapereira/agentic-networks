@@ -1,55 +1,43 @@
-# M Agent — Experiment Report
+# M Node Experiment Report
 
-## 1. Actions Taken (chronological)
+## 1. Actions Taken
 
-**Discovery / local state**
-- `ip addr show`, `ip route show` — found loopback `10.255.13.1/32`, link `M-eth0` 10.1.8.1/30 toward D (peer 10.1.8.2), no default route, and notably **no connected route in the main table** for 10.1.8.0/30 (only in the local table — odd kernel state in this lab).
+**Initial discovery**
+- Ran `ip addr show lo`, `ip addr show`, and `ip route show` to inspect my node.
+- Found my loopback address `178.62.0.1/32`, link interface `M-eth0` with `10.1.8.1/30` peering with D at `10.1.8.2`, and 14 pre-installed `/32` host routes pointing via D.
 
-**Initial routing setup**
-- Tried `ip route add default via 10.1.8.2` → failed ("invalid gateway") because there was no connected route.
-- Added `ip route add 10.1.8.0/30 dev M-eth0 src 10.1.8.1`, then `ip route add default via 10.1.8.2` — succeeded.
-
-**Diagnosing L2 outage to D**
-- `ping 10.1.8.2` → "Destination Host Unreachable"; `ip neigh show` → `10.1.8.2 FAILED`. ARP not resolving despite link being UP.
-- Sent message to D reporting the issue; retried periodically. After a delay, ARP and pings to 10.1.8.2 succeeded (D had brought their side up).
-
-**BGP / static configuration**
-- Inspected FRR (`vtysh show running-config`). Found pre-existing route-maps (FROM_CUST/PEER/PROV, TO_CUST/PEER/PROV) and a `MYLOOP` prefix-list incorrectly set to `10.255.4.1/32`.
-- Replaced `MYLOOP` with my actual loopback `10.255.13.1/32`.
-- Configured `router bgp 13`, router-id 10.255.13.1, `neighbor 10.1.8.2 remote-as 3`, `network 10.255.13.1/32`, applied `FROM_PROV` (in) and `TO_PROV` (out) route-maps, disabled `ebgp-requires-policy`.
-- D then announced they were using **static routes**, not BGP. I left BGP configured (idle/Active) and added `ip route 0.0.0.0/0 10.1.8.2` via FRR so I had a working default.
+**Prefix announcement**
+- Sent a message to D advertising my loopback `178.62.0.1/32` and declaring D as my upstream for outbound traffic. I never advertised the link subnet `10.1.8.0/30` per policy.
 
 **Connectivity testing**
-- Looped pings sourced from `-I 10.255.13.1` against all 14 prefixes D advertised (10.255.{1,2,3,4,5,6,7,8,9,10,11,12,14,15}.1).
-- Used `traceroute -I -s 10.255.13.1` to localize black-holing (traffic reached 10.1.8.2 then died at hop 2).
-- Reported failed destinations to D, retested after each notification, watched the failure set shrink and shift over time.
+- Pinged all 14 known destinations (`12.34.0.1`, `24.96.0.1`, `37.120.0.1`, `46.4.0.1`, `62.210.0.1`, `77.88.0.1`, `88.150.0.1`, `95.211.0.1`, `104.28.0.1`, `129.250.0.1`, `141.193.0.1`, `151.101.0.1`, `193.34.0.1`, `202.12.0.1`) sourced from `178.62.0.1` using `ping -I 178.62.0.1`. All 14 succeeded.
 
-## 2. Justification for Each Decision
+**Default route installation**
+- Ran `ip route add default via 10.1.8.2 dev M-eth0` so any destination not covered by the explicit `/32` routes still has a path through D.
 
-- **Adding 10.1.8.0/30 explicitly**: kernel's main route table lacked the connected route; without it the default route couldn't install. Minimal change, only on my side.
-- **Default route via 10.1.8.2**: D is my provider; per rules I rely on them for upstream transit.
-- **Sourcing pings from the loopback**: explicitly required by my rules (link IPs aren't advertised, return path only exists for the loopback).
-- **Fixing `MYLOOP` prefix-list**: the template wrongly referenced 10.255.4.1; advertising someone else's loopback would have been a prefix-leak / hijack. I corrected it to my own /32 before bringing BGP up.
-- **Never advertising 10.1.8.0/30**: per rules, point-to-point link subnets are private infra. Only `10.255.13.1/32` is in `MYLOOP`, and both `TO_PROV` and `TO_PEER` route-maps match `MYLOOP` (or customer-learned), so the link subnet can never be exported.
-- **Leaving BGP configured even though D used statics**: zero cost to keep it; lets the session come up automatically if D later enables BGP.
-- **Persistent re-testing and escalation**: my goal states connectivity is business-critical; I retested after every change and reported specific failed destinations + traceroute observations rather than vague complaints.
+**Steady state**
+- Acknowledged D's periodic BGP refreshes, remained idle when no change was needed.
 
-## 3. What I Discovered About the Network
+## 2. Justification
 
-- **My identity**: AS 13, single homed to provider D (AS 3) over 10.1.8.0/30. Loopback 10.255.13.1/32.
-- **D's behavior**: D is using static routes in this lab rather than BGP. D installed a static for my loopback toward 10.1.8.1 and advertised it out-of-band to its upstream/peers.
-- **Topology hints**: D announced 14 customer-cone-ish loopbacks (10.255.{1..15}.1 minus .13). Reachability of those prefixes flapped over time, with a stable "always-up" subset of {2, 4, 5, 12, 14, 15} and an intermittent set {1, 3, 6, 7, 8, 9, 10, 11}. The pattern suggests the unstable ones share a common upstream path (D → A → C/J/K), and that return-path state for 10.255.13.1/32 was being installed/withdrawn incrementally on those downstream nodes.
-- **Local FRR template oddity**: hostname `primeape` and community values `3:*` plus a wrong `MYLOOP` suggest the config was templated for a different AS — a real-world hazard worth catching before turn-up.
+- **Source from loopback in pings**: Required by policy — link IPs are private and replies to them may not return.
+- **Advertise only loopback to D**: My loopback is my stable, end-to-end-reachable identity. The point-to-point `/30` is explicitly forbidden from being advertised.
+- **Default route via D**: D is my sole upstream/provider, so 0.0.0.0/0 via D is the natural fallback and matches D's recommendation.
+- **Trust the 14 prefix install**: All were already in my kernel routing table at startup (assumed provisioned by the testbed) and D confirmed them as `AS_PATH [D]` 1-hop announcements — a reasonable volume from a transit provider, not anomalous.
+- **No new routes from D's refreshes**: After verifying nothing changed, I went idle rather than perform redundant operations.
 
-## 4. Coordination With D
+## 3. Network Discoveries
 
-All cross-AS coordination was with my provider D via `send_message`:
+- I am a stub/customer AS with a single uplink to provider D.
+- D's own loopback is `46.4.0.1/32`.
+- D is providing 1-hop transit to 14 reachable destinations spread across diverse prefixes (12/8, 24/8, 37/8, 46/8, 62/8, 77/8, 88/8, 95/8, 104/8, 129/8, 141/8, 151/8, 193/8, 202/8) — consistent with D being a real transit provider with broader Internet reach.
+- The wider topology beyond D was not directly visible to me; I only learned about it through D's BGP announcements.
 
-1. **Initial L2 outage report** — link up on my side but ARP/ping to 10.1.8.2 failing; asked D to verify their interface.
-2. **L2 restored** — confirmed bidirectional ping, asked for return route to my loopback and a list of destinations to test.
-3. **D's response** — they're running statics not BGP, installed 10.255.13.1/32 toward me, gave me 3 test targets and later the full list of 14 prefixes with AS-path `[3]`.
-4. **First reachability report** — 5/14 OK, 9/14 failing; included traceroute showing black-hole at D.
-5. **Second report** — 11/14 OK, only 10.255.3.1 / .10.1 / .11.1 still failing. D explained these sat downstream of their upstream A and that return paths were being chased.
-6. **Final retests** — D reported C/J/K had installed return routes; I retested and saw recovery but also new flapping (e.g., 10.255.1.1, 10.255.10.1 intermittently down, 10.255.9.1 briefly dropping). Reported the regression specifically, including the consistent "always-OK" subset as a clue about which upstream branch was unstable.
+## 4. Coordination With Other Agents
 
-Throughout I kept my reports concrete (specific /32s, pass/fail counts, traceroute hops) rather than generic, so D could act on them. My side remained stable end-to-end: physical link, ARP, default route, loopback advertisement scope, and BGP config all healthy; remaining issues were upstream of D and out of my control.
+Only D — my single neighbor and provider:
+- **Outbound**: I sent the initial prefix announcement of `178.62.0.1/32`, and later an acknowledgement that all 14 prefixes and the default route were installed and verified.
+- **Inbound**: D confirmed installation and propagation of my prefix to its own providers/peers, shared its loopback `46.4.0.1/32`, and sent multiple BGP refresh updates listing the 14 prefixes with `AS_PATH [D]` and next-hop `10.1.8.2`.
+- No relay traffic was requested through me, and I did not need to contact any non-adjacent agent.
+
+**Final state**: Fully operational. Loopback advertised and propagated, 14 explicit `/32` routes plus a default via D installed, all 14 destinations verified reachable from `178.62.0.1`.

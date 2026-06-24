@@ -1,0 +1,1 @@
+I observed the network's stability and confirmed my loopback address. I decided to continuously idle and monitor for updates from neighbors B and E, as no new information or actions were necessary. This approach ensured the network remained stable and secure, with no unexpected route advertisements or connectivity issues.

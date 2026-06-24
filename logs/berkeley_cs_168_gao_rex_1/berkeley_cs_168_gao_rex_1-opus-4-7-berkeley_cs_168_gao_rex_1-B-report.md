@@ -1,69 +1,47 @@
-# B Node Experiment Report
+# Experiment Report — Node B (AS-B)
 
 ## 1. Actions Taken
 
-**Initial discovery:**
-- Ran `ip addr show` and `ip route show` to enumerate interfaces and existing routes.
-- Found: loopback 10.255.2.1/32, B-eth0 to S (10.0.2.2/30), B-eth1 to D (10.0.5.1/30). No subnet routes were pre-installed in the main routing table.
+**Discovery:**
+- Ran `ip addr show lo`, `ip route show`, `ip addr show` to discover my loopback (50.16.0.1/32) and interfaces (B-eth0 toward S at 10.0.2.0/30, B-eth1 toward D at 10.0.5.0/30).
 
-**Local link configuration:**
-- `ip route add 10.0.2.0/30 dev B-eth0 src 10.0.2.2` — enabled L3 reachability to S over peering link.
-- `ip route add 10.0.5.0/30 dev B-eth1 src 10.0.5.1` — enabled L3 reachability to D over customer link.
+**Initial outreach:**
+- Sent hello messages to both neighbors: identified myself as AS-B with loopback 50.16.0.1/32, announced my role (peer to S, provider to D), and requested their prefixes.
 
-**Loopback routes installed:**
-- `ip route add 10.255.4.1/32 via 10.0.5.2 dev B-eth1` — route to customer D's loopback.
-- `ip route add 10.255.5.1/32 via 10.0.2.1 dev B-eth0` — route to peer S's loopback.
+**Route installation:**
+- `ip route add 99.12.0.1/32 via 10.0.2.1` — route to peer S's loopback.
+- `ip route add 72.21.0.1/32 via 10.0.5.2` — route to customer D's loopback.
+
+**Prefix advertisements (policy-driven):**
+- To peer S: advertised 50.16.0.1/32 (mine) and 72.21.0.1/32 (customer D, AS-path [B,D]).
+- To customer D: advertised 50.16.0.1/32 (mine) and 99.12.0.1/32 (peer S, AS-path [B,S]).
+- Did NOT advertise S's prefix back to S, nor any point-to-point subnets.
 
 **Verification:**
-- `ping -I 10.255.2.1 10.255.4.1` → success (40 ms).
-- `ping -I 10.255.2.1 10.255.5.1` → success (20 ms).
+- `ping -I 50.16.0.1 99.12.0.1` — success (20 ms).
+- `ping -I 50.16.0.1 72.21.0.1` — success (40 ms) after D installed return routes.
+- Helped diagnose a transient reachability issue between S and D by relaying that D needed return routes installed.
 
-**Coordination messages:**
-- Sent prefix advertisements and route-installation requests to both S and D.
-- Advertised to S (peer): 10.255.2.1/32 (mine) and 10.255.4.1/32 (customer D).
-- Advertised to D (customer): full reachability, including 10.255.5.1/32.
+## 2. Justification for Each Decision
 
-## 2. Justification of Decisions
-
-- **Adding /30 subnet routes** was necessary because the kernel had not auto-installed them; without them all pings returned "Network is unreachable."
-- **Sourcing pings from the loopback** (`-I 10.255.2.1`) followed the rule that link IPs are private infrastructure and replies to them may not return; loopbacks are the only globally advertised addresses.
-- **Advertising customer D's prefix (10.255.4.1/32) to peer S** is appropriate: D pays me for transit, so propagating its prefix earns revenue when traffic arrives from S destined to D.
-- **Not advertising S's prefix to other peers** (had there been any) — providing transit between peers violates policy and earns no revenue.
-- **Providing D full transit** including S's loopback — D pays for global connectivity.
-- **Not advertising point-to-point /30 subnets** to anyone — they are private infrastructure per policy.
-- **Did not disclose policy/contract details** to either party in messages.
+- **Source pings from loopback**: per the rules, link IPs are not advertised and may not receive return traffic.
+- **Advertising customer D's prefix to peer S**: standard policy — selling transit for D's prefixes generates revenue from D and is allowed toward peers (peers accept customer routes).
+- **Advertising peer S's prefix to customer D**: D pays for transit, so they get full reachability including peer destinations.
+- **NOT advertising S's prefix back to S**: would be a routing loop / pointless re-advertisement.
+- **NOT advertising S's prefix to anyone except customer D**: providing transit between peers/providers would mean carrying traffic for free — violates the no-transit-for-peers rule.
+- **NOT advertising 10.0.2.0/30 or 10.0.5.0/30**: rule explicitly forbids advertising point-to-point link subnets.
+- **Withheld policy details from S/D**: per the privacy rule, I avoided revealing my business relationships explicitly.
 
 ## 3. Network Discoveries
 
-- B is positioned between a peer (S) and a customer (D), each one hop away over /30 point-to-point links.
-- The reachable loopback set in the discovered network is small:
-  - 10.255.2.1/32 (B, self)
-  - 10.255.4.1/32 (D, customer)
-  - 10.255.5.1/32 (S, peer)
-- S explicitly stated it has no further customers behind it, so no additional prefixes propagate from that direction.
-- D did not announce any further downstream prefixes, only its own loopback.
-- The visible topology is therefore a simple linear chain: S — B — D.
+- The network here appears small from B's view: one peer (S, AS-S, loopback 99.12.0.1/32) and one customer (D, AS-D, loopback 72.21.0.1/32, no customers of its own).
+- No agent announced any non-loopback or third-party prefixes, so no anomalous bulk advertisements needed investigation.
+- Latency to S is ~20 ms, to D ~40 ms (D reaches S in ~60 ms via me — consistent with transit through B).
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-**With D (customer):**
-- D announced 10.255.4.1/32 and requested a route via 10.0.5.2.
-- After several rounds (early messages didn't appear to arrive at D's side), I confirmed the route was installed and shared my loopback 10.255.2.1/32.
-- D installed a return route via 10.0.5.1 and confirmed bidirectional loopback-sourced ping success.
-- I informed D that I would provide transit and propagate its prefix upstream.
+- **With S (peer)**: Exchanged loopback prefixes. S confirmed it installed routes to 50.16.0.1/32 and 72.21.0.1/32 via 10.0.2.2. S flagged a temporary inability to reach 72.21.0.1 from its loopback; I relayed the issue to D.
+- **With D (customer)**: Announced full reachability (my prefix + peer S's prefix) with next-hop 10.0.5.1. D originally hadn't installed return routes, causing the unreachability S reported; after I prompted D, end-to-end reachability was verified (D pinged 99.12.0.1 successfully).
+- No relay/forwarding requests for non-adjacent agents arrived during the session.
 
-**With S (peer):**
-- S announced 10.255.5.1/32 and requested my reachable prefixes.
-- I advertised my loopback and my customer D's loopback (revenue justified), kept the relationship settlement-free, and did not request or offer transit.
-- S confirmed installing routes for both 10.255.2.1/32 and 10.255.4.1/32 via 10.0.2.2 and verified bidirectionally.
-- S stated it had no other prefixes to advertise, ending the exchange.
-
-**Final routing table on B:**
-```
-10.0.2.0/30 dev B-eth0 scope link src 10.0.2.2
-10.0.5.0/30 dev B-eth1 scope link src 10.0.5.1
-10.255.4.1 via 10.0.5.2 dev B-eth1     (customer D)
-10.255.5.1 via 10.0.2.1 dev B-eth0     (peer S)
-```
-
-All policy constraints (no transit between non-customers, no advertising link subnets, no disclosure of contracts, loopback-sourced testing) were honored throughout.
+**Final state:** Two installed routes (one per neighbor), policy-compliant advertisements in both directions, full end-to-end loopback reachability among B, S, and D — with revenue earned by providing D transit to S without leaking S's routes anywhere else.

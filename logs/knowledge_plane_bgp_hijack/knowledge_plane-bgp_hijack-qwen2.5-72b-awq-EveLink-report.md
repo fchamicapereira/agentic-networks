@@ -1,0 +1,1 @@
+I verified my loopback address and physical connection to AS1, then advertised the address block 198.82.0.0/24 to AS1. After configuring the route and informing AS1, I passively monitored the network. The network remained stable, and AS1 did not object to the advertisement, indicating successful and transparent coordination.
