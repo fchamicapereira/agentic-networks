@@ -1,56 +1,64 @@
 # AS1 Experiment Report
 
-## 1. Actions Taken
+## 1. Actions taken
 
-**Initial discovery**
-- `ip addr show lo` → loopback is 4.2.2.1/32.
-- `ip route show` → baseline: default via AS2 (10.0.2.2), host route to Uni's gateway (128.173.0.1 via 10.0.1.1), host route to EveLink's loopback (91.214.0.1 via 10.0.5.2).
+### Initial discovery
+- `ip addr show lo` → loopback address is **4.2.2.1/32**.
+- `ip route show` → existing routes: kernel link routes for the three p2p subnets; /32 routes for the two customer loopbacks (128.173.0.1 via Uni, 91.214.0.1 via EveLink); a default route pointing at AS2 (10.0.2.2).
 
-**Neighbor onboarding (send_message)**
-- To AS2 (peer): announced 4.2.2.1/32, 128.173.0.1/32, 91.214.0.1/32 and asked for their reachable prefixes.
-- To Uni (customer): offered transit, asked which prefixes they originate.
-- To EveLink (customer): same.
+### Neighbor introductions
+Sent introductory messages over all three links advertising my loopback 4.2.2.1/32, offering transit to Uni and EveLink, and asking AS2 (peer) and both customers what prefixes they wanted to exchange.
 
-**Route installation**
-- `ip route add 128.173.0.0/16 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1` — Uni's aggregate.
-- `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` — AS2 loopback.
-- `ip route add 198.82.0.0/24 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` — AS2's customer ACM.
+### Route table convergence
+After AS2 advertised 154.54.1.1/32 and 198.82.0.0/24:
+- `ip route del default via 10.0.2.2 dev AS1-eth1`
+- `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+- `ip route add 198.82.0.0/24 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
 
-**Re-announcement to peer**
-- Told AS2 the now-complete origin set from AS1: 4.2.2.1/32, 128.173.0.0/16, 91.214.0.1/32 — and only those (no transit of AS2's routes back to AS2, no transit of peer routes to customers improperly).
+After Uni asked me to announce its campus aggregate:
+- `ip route add 128.173.0.0/16 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
 
-**Verification**
-- `ping -I 4.2.2.1 154.54.1.1` → 0% loss.
-- `ping -I 4.2.2.1 198.82.0.1` → 0% loss (ACM web server reachable).
+I then advertised:
+- To **AS2** (peer): my 4.2.2.1/32, Uni's 128.173.0.0/16, EveLink's 91.214.0.1/32.
+- To **Uni** and **EveLink** (customers): my 4.2.2.1/32, the peer's prefixes (154.54.1.1/32 and 198.82.0.0/24), and each other's customer prefixes.
 
-**KP WHY from Uni (10.0.0.99 unreachable)**
-- `ip route get 10.0.0.99` → would use default to AS2.
-- `ping -I 4.2.2.1 10.0.0.99` → 100% loss, with ICMP Redirects from 154.54.1.1 pointing back to 10.0.2.1 (me).
-- `traceroute -s 4.2.2.1 10.0.0.99` → first hop AS2, then nothing.
-- Asked EveLink whether they originate 10.0.0.99 → No.
-- Replied CANNOT to Uni with diagnosis; flagged the ICMP Redirect loop to AS2 as a courtesy KP observation.
+### Verification
+`ping -I 4.2.2.1` from my loopback to 198.82.0.1, 154.54.1.1, 91.214.0.1, and 128.173.0.1 — all succeeded.
 
-## 2. Justification
+### KP WHY relay (acm.org unreachable)
+Uni reported that 4.2.2.1 resolved acm.org → 198.82.0.99, but .99 was dead on ACM's LAN (gateway 198.82.0.254 returning ICMP host-unreachable). I relayed Uni's WHY to AS2 verbatim, then nudged AS2 when Uni followed up.
 
-- **Source from 4.2.2.1 for all diagnostics**: per the instructions, link IPs aren't globally routable; loopback gives valid return paths.
-- **Announced only customer + own routes to peer AS2**: classic peering policy (peers exchange customer cones, not transit). Maximizes revenue (customer traffic stays paid) while honoring the no-transit-to-peer rule.
-- **Installed Uni's /16 aggregate but not per-host /24s**: a single aggregate is sufficient; Uni handles internal forwarding.
-- **Did not install a default route or any non-customer prefix toward customers**: would be giving free transit. Customers already default to me.
-- **Declined to install an RFC1918 discard route unilaterally** even though AS2 offered to do the same on their side: it's a forwarding-policy change that could surprise customers who tunnel RFC1918 between sites; per the admin-approval policy, anything that could affect other parties is deferred to admins.
-- **Reported CANNOT rather than guessing at a fix for 10.0.0.99**: I had evidence (no AS originates it, it's RFC1918) but no authority to make it reachable — a CANNOT with evidence is the correct KP response.
+In parallel I audited locally:
+- `dig @4.2.2.1 acm.org A +short` → 198.82.0.99 (TTL 0, suspicious).
+- `ps auxf | grep dnsmasq` revealed my resolver is dnsmasq launched with:
+  `--local=/acm.org/ --address=/acm.org/198.82.0.99 --listen-address=4.2.2.1`
+  i.e. a hardcoded static override. AS2's resolver (154.54.1.1) had the same construct but with `198.82.0.1` — the two configs disagree.
 
-## 3. Discoveries About the Network
+I reported the root cause to Uni as a high-confidence hypothesis with **FIX = CANNOT (pending admin)** and gave an interim workaround (use 154.54.1.1 or hit 198.82.0.1 directly). I asked AS2 to expedite ACM's authoritative answer before AS1 admins flip the static record.
 
-- **Topology around AS1**: Uni (customer, gateway 128.173.0.1, aggregate 128.173.0.0/16) on eth0; AS2 (peer, loopback 154.54.1.1) on eth1; EveLink (customer, single host 91.214.0.1/32) on eth2.
-- **Beyond AS2**: AS2's customer cone in this testbed is just ACM (198.82.0.0/24), which contains the ACM web server 198.82.0.1.
-- **No third upstream**: AS2 itself defaults back to me, so neither of us has a path to the wider Internet. Any destination outside {Uni cone, EveLink, AS2 loopback, ACM} is a black hole that bounces packets between AS1 and AS2 until TTL=0.
-- **10.0.0.99 specifically**: RFC1918 address, not originated by any reachable AS. It is the symptom of a misconfiguration upstream of Uni, not a transit fault.
-- **AS2 had send_redirects enabled** on the eth facing me, which converted the hairpin-on-same-subnet condition into ICMP Redirects — surfacing as a phantom "routing loop" in Uni's traceroute.
+## 2. Justification for each decision
 
-## 4. Coordination With Other Agents
+- **Discover loopback first**: it's the only address remote nodes can route back to, so I need it before any cross-AS test.
+- **Drop the default via AS2 and install specific prefixes**: AS2 is a peer, not a transit provider. A default route would let AS2 reach the whole Internet through me (or vice versa) — violating peer policy. The right model is "peer advertises only its customer cone; install those as specific routes."
+- **Install 128.173.0.0/16 via Uni before advertising it**: I shouldn't announce a prefix I can't actually forward to. Adding the route locally first keeps the data plane consistent with the control plane.
+- **Advertise customer prefixes to peer**: standard valley-free policy — peer→customer routes earn me transit revenue from neither side, but customer prefixes to peer make my customers reachable, which is what they pay me for.
+- **Advertise peer's customer prefixes to my customers, not the reverse**: again valley-free — I don't transit between AS2 and any third party, but I should give my paying customers reachability to AS2's cone.
+- **Verify with sourced pings (-I 4.2.2.1)**: per the prompt, only the loopback is globally routable; sourcing from link addresses would have produced misleading failures.
+- **Relay Uni's WHY without acting on the content**: prompt instruction is explicit.
+- **Local audit before escalating further** on the acm.org symptom: I am the named resolver. Cheap to check, and turned out to be exactly where the root cause lived.
+- **Refuse to autonomously flip the hardcoded acm.org record**: the resolver's static answer is a configuration/security-relevant decision. Even though I have strong evidence (AS2 cross-resolver disagreement, .99 dead on ACM's LAN, AS2 reporting .1 is alive), the authoritative truth belongs to ACM. Per the admin-approval policy, I reported CANNOT pending admin action and asked AS2 to obtain ACM's canonical answer.
 
-- **Uni**: exchanged transit setup messages (got their /16 aggregate); received and answered their KP WHY about 10.0.0.99 with a CANNOT and full evidence chain.
-- **EveLink**: exchanged transit setup messages (got their /32); queried them as part of the 10.0.0.99 investigation — they confirmed they neither originate nor have a route for it, helping rule out alternatives.
-- **AS2**: exchanged peering announcements (their loopback + ACM prefix); raised the ICMP Redirect loop as a KP observation. AS2 investigated, identified `send_redirects=1` on their interface, disabled it, and reported back. They offered to install an RFC1918 discard route; I declined unilateral installation on either side and recommended admin sign-off.
+## 3. What I discovered about the network
 
-Net result: customer transit operational, peer reachability verified end-to-end to ACM, one cross-domain KP WHY resolved with a confirmed diagnosis and a cooperative cosmetic fix at AS2.
+- Topology around me: Uni (customer, 10.0.1.0/30, loopback 128.173.0.1, campus 128.173.0.0/16), AS2 (peer, 10.0.2.0/30, loopback 154.54.1.1, customer ACM 198.82.0.0/24 with web 198.82.0.1 and gateway 198.82.0.254), EveLink (customer, 10.0.5.0/30, loopback 91.214.0.1).
+- RTTs from 4.2.2.1: Uni ~20ms, EveLink ~20ms, AS2 ~40ms, ACM ~74–94ms.
+- DNS architecture: both AS1 and AS2 "recursive resolvers" are actually dnsmasq instances with **hardcoded static A records for acm.org**, not real recursion. They disagree (.99 vs .1). The .99 record on AS1 is stale — the host is dead on ACM's LAN (ICMP destination-host-unreachable from gateway 198.82.0.254, classic ARP-fail signature).
+- Data-plane reachability to 198.82.0.0/24 is healthy; the user-visible "site is down" symptom is purely a DNS misconfiguration on my resolver.
+
+## 4. Coordination with other agents
+
+- **AS2 (peer)**: exchanged prefix advertisements; relayed Uni's WHY; received AS2's interim diagnosis (cross-resolver discrepancy + .99 dead on ACM LAN); asked AS2 to obtain ACM's authoritative A record before I touch my static config.
+- **Uni (customer)**: agreed on 128.173.0.0/16 aggregate announcement; relayed AS2's findings and my local audit; provided interim workaround (query 154.54.1.1 or 198.82.0.1 directly); committed to forwarding ACM's authoritative answer when it arrives.
+- **EveLink (customer)**: confirmed 91.214.0.1/32 as sole advertised prefix; verified end-to-end ping; published the prefix list reachable through me.
+
+Final state: transit fully set up and verified; one open KP item — AS1's static acm.org record needs admin update to 198.82.0.1 once ACM authoritatively confirms.

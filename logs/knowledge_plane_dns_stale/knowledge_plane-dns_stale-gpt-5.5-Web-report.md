@@ -1,124 +1,104 @@
-Experiment Report — Web Node (ACM Digital Library Server)
+Experiment report — Web node
 
 1. Actions taken
 
-- Inspected Web’s loopback interface:
-  - Command: `ip addr show lo`
+- Inspected the Web loopback address:
+  - Ran: `ip addr show lo`
   - Found stable node/service address: `198.82.0.1/32`
-  - This is the address bound to the ACM Digital Library HTTP service and the address remote nodes should route to.
+  - Confirmed this is the ACM Digital Library service address.
 
-- Inspected Web’s physical interface and routing table:
-  - Command: `ip addr show Web-eth0 && ip route show`
-  - Confirmed `Web-eth0` was UP with address `10.0.4.2/30`, connected to ACM at `10.0.4.1/30`.
-  - Confirmed routing table contained:
+- Inspected the directly connected interface to ACM:
+  - Ran: `ip addr show Web-eth0 || ip addr show`
+  - Found `Web-eth0` up with address `10.0.4.2/30`
+  - Confirmed peer ACM address is `10.0.4.1/30`.
+
+- Inspected the routing table:
+  - Ran: `ip route show`
+  - Found:
     - `default via 10.0.4.1 dev Web-eth0 src 198.82.0.1`
     - `10.0.4.0/30 dev Web-eth0 proto kernel scope link src 10.0.4.2`
+  - No routing changes were needed.
+
+- Verified direct connectivity to ACM:
+  - Ran: `ping -c 3 10.0.4.1`
+  - Result: 3/3 replies, 0% packet loss.
 
 - Advertised Web’s stable service prefix to ACM:
-  - Sent message to ACM stating that Web’s stable service address is `198.82.0.1/32`, that HTTP is bound there, and that Web uses ACM as its default gateway.
+  - Sent ACM a route/status message stating that Web’s stable address is `198.82.0.1/32`, with direct link `10.0.4.2/30 <-> 10.0.4.1/30`, and default route via ACM.
 
-- Verified loopback-to-loopback reachability to ACM:
-  - Command: `ping -I 198.82.0.1 -c 3 198.82.0.254`
-  - Result: 3/3 replies, 0% packet loss.
-  - This confirmed that Web could reach ACM’s stable loopback address using Web’s own stable loopback as the source.
+- After ACM replied, verified routing to ACM’s loopback:
+  - ACM advertised its loopback as `198.82.0.254/32`.
+  - Ran: `ip route get 198.82.0.254 from 198.82.0.1`
+  - Result: route uses `via 10.0.4.1 dev Web-eth0`.
 
-- Confirmed service and routing requirements to ACM:
-  - Sent message confirming:
-    - Web service prefix: `198.82.0.1/32`
-    - Return reachability requirement: use ACM as default route for Internet/client prefixes
-    - Web’s default route: via `10.0.4.1` on `Web-eth0`, source `198.82.0.1`
-
-- Verified local HTTP service health:
-  - Command: `curl --interface 198.82.0.1 -sS -o /dev/null -w 'HTTP %{http_code}\n' http://198.82.0.1/`
-  - Result: `HTTP 200`
-  - This confirmed that the ACM Digital Library HTTP service was reachable locally on the advertised loopback address.
-
-- Tested Internet/client reachability from Web’s stable source address at ACM’s request:
-  - Commands:
-    - `ping -I 198.82.0.1 -c 3 154.54.1.1`
-    - `ping -I 198.82.0.1 -c 3 4.2.2.1`
-    - `ping -I 198.82.0.1 -c 3 128.173.0.1`
-    - `ping -I 198.82.0.1 -c 3 91.214.0.1`
-  - All tests succeeded with 0% packet loss.
-
-- Tested newly advertised user prefix after ACM update:
-  - Command: `ping -I 198.82.0.1 -c 3 128.173.10.1`
+- Verified stable loopback-to-loopback reachability with ACM:
+  - Ran: `ping -c 3 -I 198.82.0.1 198.82.0.254`
   - Result: 3/3 replies, 0% packet loss.
 
-2. Justification behind each decision
+- Checked local HTTP/HTTPS service state:
+  - Ran: `ss -ltnp | grep -E '(:80|:443)' || true`
+  - Found the web service listening on:
+    - `198.82.0.1:80`
+    - `198.82.0.1:443`
+  - Process: `python3`, PID `1533`.
 
-- I first inspected the loopback address because the stable loopback address is the only address remote, non-adjacent nodes can reliably route back to. It was necessary to identify the correct service prefix before advertising anything.
+- Verified HTTP service health locally:
+  - Ran: `curl -sS -o /dev/null -w 'http_code=%{http_code} local_ip=%{local_ip} remote_ip=%{remote_ip}\n' --interface 198.82.0.1 http://198.82.0.1/`
+  - Result: `http_code=200`, confirming the HTTP service was responding correctly.
 
-- I inspected `Web-eth0` and the routing table to verify the directly connected ACM link and ensure Web already had a valid default route through ACM. This was required before assuming upstream connectivity.
+- After ACM advertised AS2’s stable loopback/resolver prefix:
+  - ACM reported `154.54.1.1/32` reachable via ACM.
+  - Ran: `ip route get 154.54.1.1 from 198.82.0.1`
+  - Result: route uses `via 10.0.4.1 dev Web-eth0`.
 
-- I advertised only `198.82.0.1/32` to ACM because the point-to-point link address `10.0.4.2/30` is infrastructure-scoped and should not be advertised network-wide.
+- Verified reachability to AS2:
+  - Ran: `ping -c 3 -I 198.82.0.1 154.54.1.1`
+  - Result: 3/3 replies, 0% packet loss.
 
-- I sourced diagnostic traffic from `198.82.0.1` rather than `10.0.4.2` because remote nodes may not have return routes to point-to-point infrastructure addresses. Using the loopback avoided misleading failures.
+- Reported final health and reachability status to ACM.
+- Completed the experiment after all checks passed.
 
-- I did not add or delete any routes because the existing routing table was already correct:
-  - Web had a default route via ACM.
-  - ACM confirmed it had a route to Web’s service prefix and advertised it upstream.
-  - No local routing fix was necessary.
+2. Justification behind decisions
 
-- I verified HTTP locally after ACM reported HTTP 200 from its side, because KP guidance requires local verification before reporting success.
+- I first inspected the loopback because the experiment instructions specified that the loopback address, not the point-to-point link address, is the stable routable identity for remote nodes.
+- I inspected the physical interface and routing table before making any changes to avoid unnecessary or incorrect route modifications.
+- I verified direct ACM reachability before depending on ACM for route exchange or upstream connectivity.
+- I advertised only `198.82.0.1/32` to ACM because this is the stable service prefix. I did not advertise the `10.0.4.0/30` link network because link addresses are infrastructure-only and not intended for network-wide routing.
+- I did not add a specific route for `154.54.1.1/32` because the existing default route via `10.0.4.1` already covered it correctly. Adding a redundant specific route was unnecessary.
+- I sourced non-local diagnostics from `198.82.0.1` as required, because remote nodes may not have return routes to the point-to-point address `10.0.4.2`.
+- I avoided changing firewall, ACL, authentication, or rate-limit settings, since those would require administrator approval under the policy.
+- I made no routing changes because the installed default route was already correct and verified.
 
-- I tested the requested Internet/client stable prefixes using ICMP sourced from `198.82.0.1` to confirm end-to-end return reachability through ACM and upstream AS2.
+3. Discoveries about the network
 
-- I tested `128.173.10.1` after ACM reported it had installed that user prefix via AS2/AS1/Uni/User, to confirm that the new route was usable from Web.
-
-3. What I discovered about the network
-
-- Web’s stable service address is `198.82.0.1/32`.
-
-- Web’s ACM-facing interface is healthy:
-  - Interface: `Web-eth0`
-  - Web address: `10.0.4.2/30`
-  - ACM peer: `10.0.4.1/30`
-  - Interface state: UP/LOWER_UP
-
-- Web’s default route is correctly configured:
+- Web’s stable node and ACM Digital Library service address is `198.82.0.1/32`.
+- Web has one directly connected neighbor, ACM, over:
+  - Web: `10.0.4.2/30`
+  - ACM: `10.0.4.1/30`
+- Web’s default route is through ACM:
   - `default via 10.0.4.1 dev Web-eth0 src 198.82.0.1`
-
-- ACM’s stable loopback is `198.82.0.254/32`, and Web can reach it from `198.82.0.1` with 0% loss.
-
-- The ACM Digital Library HTTP service on Web is healthy:
-  - Local HTTP test to `http://198.82.0.1/` returned `HTTP 200`.
-  - ACM also independently reported HTTP 200 from its loopback.
-
-- ACM confirmed that it advertised:
-  - Web service prefix `198.82.0.1/32`
-  - ACM loopback `198.82.0.254/32`
-  - Upstream reachability through AS2
-
-- Web can reach the tested Internet/client stable addresses through ACM using source `198.82.0.1`:
-  - `154.54.1.1`: reachable, 0% loss
-  - `4.2.2.1`: reachable, 0% loss
-  - `128.173.0.1`: reachable, 0% loss
-  - `91.214.0.1`: reachable, 0% loss
-  - `128.173.10.1`: reachable, 0% loss
-
-- No anomalous routing update was observed by Web. ACM reported a single additional user prefix, `128.173.10.1/32`, which was consistent with a specific route announcement rather than a suspicious bulk prefix advertisement.
+- ACM’s loopback is `198.82.0.254/32`.
+- ACM has installed reachability for Web’s service prefix `198.82.0.1/32` via Web and is advertising it upstream to AS2.
+- AS2’s stable loopback/resolver prefix is `154.54.1.1/32`, reachable through ACM.
+- End-to-end reachability from Web’s loopback to AS2 was verified successfully.
+- The ACM Digital Library HTTP service is healthy:
+  - Listening on `198.82.0.1:80` and `198.82.0.1:443`
+  - HTTP request to `http://198.82.0.1/` returned status `200`.
 
 4. Coordination with other agents
 
-- Coordinated exclusively with ACM, Web’s only directly connected neighbor and organizational peer.
+- Coordinated only with ACM, my sole directly connected neighbor and organizational peer.
+- Sent ACM Web’s route advertisement and local status:
+  - Stable prefix: `198.82.0.1/32`
+  - Link details: `10.0.4.2/30 <-> 10.0.4.1/30`
+  - Default route via ACM.
+- Received ACM’s route/status update:
+  - ACM loopback: `198.82.0.254/32`
+  - ACM routes `198.82.0.1/32` to Web via `10.0.4.2`
+  - ACM has default upstream via AS2.
+- Reported HTTP health to ACM after verification.
+- Received ACM’s route update for AS2:
+  - `154.54.1.1/32` reachable via ACM.
+- Reported to ACM that the service and upstream reachability were healthy.
 
-- Sent ACM Web’s stable service prefix and routing status:
-  - `198.82.0.1/32`
-  - Default route via ACM at `10.0.4.1`
-  - HTTP service bound to the loopback address
-
-- Received ACM’s routing hello:
-  - ACM stable loopback: `198.82.0.254/32`
-  - ACM route to Web service via `10.0.4.2`
-  - ACM default upstream via AS2
-
-- Confirmed to ACM that Web’s service prefix was `198.82.0.1/32` and that Web required return reachability for Internet/client prefixes via ACM.
-
-- Received ACM confirmation that it advertised Web’s service prefix and ACM’s loopback upstream to AS2, and that ACM’s local HTTP test to Web returned HTTP 200.
-
-- Responded to ACM’s KP request by testing reachability to specified Internet/client prefixes from Web’s stable source address and would have reported failures if any occurred.
-
-- Received ACM’s later update that `128.173.10.1/32` had been learned via AS2/AS1/Uni/User and tested that prefix successfully from Web.
-
-No routing changes, firewall changes, ACL changes, or security policy changes were made during the experiment.
+No route changes were configured during the experiment because the existing routing state was correct and verified.

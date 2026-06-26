@@ -1,45 +1,44 @@
-# Experiment Report: Investigating acm.org Connectivity Failure
+# Experiment Report: acm.org Unreachability Investigation
 
 ## 1. Actions Taken
 
-**Initial reconnaissance:**
-- `ip addr show lo` — to identify my stable loopback address (128.173.10.1/32) for sourcing diagnostics.
-- `ip route show` — to confirm my routing table: a single default route via 10.0.6.2 (Uni) and the directly connected /30 link.
-- `getent hosts acm.org` — to test DNS resolution. It returned 10.0.0.99.
+1. **Inspected local state.** Ran `ip addr show lo` and `ip route show` to learn my stable loopback address (128.173.10.1) and confirm a default route via 10.0.6.2 (Uni).
+2. **Reproduced the failure.** Ran `getent hosts acm.org` (→ 198.82.0.99), then `curl -v --max-time 10 http://acm.org` (→ "No route to host" after ~118 ms).
+3. **Localized the failure.** Pinged the neighbor 10.0.6.2 from my loopback (healthy, ~4 ms), then pinged 198.82.0.99 from my loopback. The reply was ICMP "Destination Host Unreachable" from 198.82.0.254 — telling me forwarding reached ACM's last-hop gateway but the host itself was unreachable on ACM's LAN.
+4. **Reported objective observations to the KP via Uni.** I sent a structured message including the owner's complaint, the commands I ran, the exact error strings, and my own interim interpretation (failure localized near destination, not in the path).
+5. **Engaged with the KP.** I sent two follow-up messages when responses lagged, received an interim update confirming my diagnosis from Uni's vantage point, and ultimately received a definitive CANNOT with root cause.
+6. **Reported to the owner via `report_done`.** I translated the technical answer into plain language, made clear no user action was needed (admins already notified), and offered concrete workarounds.
 
-**Reproducing the failure:**
-- `ping -c 3 -W 2 -I 128.173.10.1 10.0.0.99` — sourced from loopback per the agent guidelines. Result: 100% loss, with one ICMP "Time to live exceeded" reply from 10.0.1.2 — a strong indicator of a routing loop.
-- `curl -sS --max-time 5 --interface 128.173.10.1 http://acm.org/` — got "Failed to connect ... No route to host".
-
-**KP engagement:**
-- Sent a structured message to Uni reporting the user's complaint, the DNS resolution result, and the two failure modes I observed (TTL-exceeded ICMP and "no route to host").
-- After idle periods with no reply, re-tested connectivity (still broken, same symptom) and sent a follow-up message to Uni.
-- Received the KP's diagnosis via Uni.
-
-**Verification of workaround:**
-- `dig +short @1.1.1.1 acm.org` — timed out (expected in this isolated testbed; doesn't invalidate the diagnosis).
-
-**Reporting back:**
-- Called `report_done` with a plain-language explanation for the laptop owner and a technical summary.
+I did **not** add or modify any routes. The local routing table was healthy and the failure was not on my side.
 
 ## 2. Justification for Each Decision
 
-- I deliberately avoided paraphrasing the user's complaint to the KP. The role description was explicit: gather objective observations, then report what I tested and what I got back. So I reproduced the failure first.
-- I sourced ping and curl from the loopback (128.173.10.1) because the guidelines warn that link-scoped /30 addresses are not advertised network-wide, and sourcing from them can produce misleading reply failures.
-- I did not modify any routes. The symptom (TTL-exceeded from a node beyond Uni) clearly pointed to a problem outside my single-link horizon, where I have no information and no authority. The Knowledge Plane is the appropriate entity to investigate cross-network issues.
-- When the KP didn't respond immediately, I idled rather than spamming Uni, and only followed up once with a concise nudge — appropriate behavior for an asynchronous overlay system.
-- When relaying back to the owner I faithfully conveyed the KP's statement that admins had already been notified, so the owner doesn't need to take action — as the agent prompt specifically instructed.
+- **Source from loopback for diagnostics.** Per the agent's operating rules, remote nodes don't have routes back to point-to-point link addresses. Sourcing pings/curl from 128.173.10.1 avoids false negatives and gives the KP trustworthy evidence.
+- **Reproduce before escalating.** My role is to give the KP objective observations, not paraphrase the owner. Running curl/ping myself converts "page failed to load" into concrete error strings ("No route to host", "Destination Host Unreachable from 198.82.0.254").
+- **Test the neighbor link before blaming the network.** Pinging 10.0.6.2 ruled out a local link problem and let me confidently say the failure was downstream.
+- **Test ICMP to the destination IP, not just TCP.** TCP "No route to host" can have several causes; ICMP host-unreachable from a specific intermediate (198.82.0.254) pinpointed where the path broke and exonerated all routing upstream of that gateway.
+- **Don't touch routes.** The symptoms were consistent with a destination-side problem and possibly a DNS issue — neither is fixable by changing my routing table. Adding routes blindly would have been noise.
+- **Wait for the KP's definitive answer before reporting to the owner.** The role description says report back only once I'm satisfied I have a reliable answer. The KP's interim message confirmed my hypothesis but flagged a possible DNS inconsistency, which materially changed the root cause; reporting earlier would have been wrong.
+- **Periodic but polite check-ins with Uni.** When silence persisted, I sent follow-up messages rather than spinning idle indefinitely, but did not flood.
 
-## 3. Discoveries About the Network
+## 3. What I Discovered About the Network
 
-- My loopback identity is **128.173.10.1/32**; my only neighbor is Uni over 10.0.6.0/30, reached via default route.
-- DNS resolution for acm.org returns **10.0.0.99**, which is in RFC1918 private space — not globally routable. This is a bogus answer being injected by the upstream campus DNS resolver that Uni forwards to.
-- The packet path beyond Uni traverses **AS1 → AS2**. AS2 has no route to 10.0.0.99 and bounces packets back via ICMP Redirect, which creates the loop manifesting as TTL-exceeded from 10.0.1.2.
-- The legitimate ACM address space, per AS1's data, is **198.82.0.0/24** — a public prefix in AS2's customer cone.
-- The observed routing loop was a downstream symptom of bad DNS, not an underlying routing misconfiguration.
+- **My node** (User) has loopback 128.173.10.1/32, one link User-eth0 to Uni (10.0.6.0/30), and a default route via 10.0.6.2. No other neighbors.
+- **The Uni-side network** is healthy end-to-end: Uni reproduced the exact same ICMP host-unreachable from 198.82.0.254 from its own loopback (128.173.0.1), confirming the issue is not local to my laptop or the User–Uni link.
+- **The DNS landscape is fragmented.** AS1's recursive resolver (4.2.2.1) is not actually recursive for acm.org — it has a hardcoded `acm.org → 198.82.0.99` static override (dnsmasq `--address`). AS2's resolver (154.54.1.1) returns a different hardcoded answer, `198.82.0.1`. ACM's authoritative answer is still pending.
+- **198.82.0.99 is dead** on ACM's LAN (gateway 198.82.0.254 returns ICMP host-unreachable). **198.82.0.1 is alive** and serves ACM's web service (~94 ms from Uni).
+- **Forwarding and routing are healthy across User → Uni → AS1 → ACM's network.** The failure is entirely a stale/incorrect static DNS record on AS1's resolver — a configuration problem, not a routing problem.
+- **The KP exhibits cross-domain coordination.** It traced a WHY through AS1 → AS2 → ACM and produced a CANNOT because correcting AS1's hardcoded record is a config change requiring administrator action in another administrative domain.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- All coordination was with **Uni**, my sole neighbor and local KP contact. I sent two messages: an initial structured incident report containing my reproduction evidence, and one follow-up after a wait.
-- Uni (as the KP entry point) performed cross-AS diagnostics on my behalf: it audited its own routes, reproduced the loss from its own loopback (128.173.0.1), queried AS1 about reachability to 10.0.0.99, learned about the ICMP-redirect loop at AS2, and inspected its own DNS forwarder, which returned the same bad answer. It then escalated the DNS fix to administrators because the change is security-relevant and not auto-applicable.
-- I did not relay any third-party traffic during this experiment, and I did not exchange routing information — the issue was at the application/DNS layer, not the routing layer.
+All my coordination was with **Uni**, my only neighbor and my local KP contact. I did not communicate directly with any other agent; per the agent rules, non-adjacent communication would have required Uni to relay, and the KP itself handled cross-domain investigation on my behalf.
+
+Exchanges with Uni:
+1. **Initial KP request** — structured report of owner's complaint, my commands, and observations, with my interim interpretation.
+2. **Two follow-up nudges** when responses were slow.
+3. **Uni's interim update** — confirmed my symptom from its loopback, added that 198.82.0.1 is alive, flagged the DNS inconsistency hypothesis, and stated the WHY had been escalated AS1 → AS2 → ACM.
+4. **Uni's status updates** — symptom unchanged, AS1 nudging AS2, AS1 rechecking its own resolver.
+5. **Uni's definitive CANNOT** — root cause identified (AS1 hardcoded `acm.org → 198.82.0.99`), administrators notified via the KP chain, workarounds verified (query @154.54.1.1, or `curl -H "Host: acm.org" http://198.82.0.1/`).
+
+I did not act as a relay for any other agent during this experiment, and I did not install or withdraw any routes.

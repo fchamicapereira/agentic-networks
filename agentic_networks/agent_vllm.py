@@ -78,6 +78,22 @@ _MAX_REQUEST_RETRIES = 1
 _FREQUENCY_PENALTY = 0.3
 
 
+def _sampling_for_model(model: str, temperature: float) -> dict:
+    """Return the per-model sampling kwargs for a chat completion.
+
+    QwQ-32B is a reasoning model that degenerates into token-repetition loops at
+    low temperature with no nucleus/top-k filtering (e.g. emitting a runaway digit
+    loop in place of an IP address). The Qwen team's recommended sampling —
+    temperature 0.6, top_p 0.95, top_k 30 — is designed to prevent exactly that, so
+    we override regardless of the caller's temperature. Instruct models (Qwen2.5,
+    etc.) keep the caller-supplied temperature unchanged.
+    """
+    if "qwq" in model.lower():
+        # top_k is not an OpenAI field; vLLM reads it from extra_body.
+        return {"temperature": 0.6, "top_p": 0.95, "extra_body": {"top_k": 30}}
+    return {"temperature": temperature}
+
+
 def _count_tokens(text: str) -> int:
     return int(len(text.split()) * _TOKENS_PER_WORD)
 
@@ -172,6 +188,9 @@ class _Summarizer:
         self._client = client
         self._model = model
         self._log = logging.getLogger("Summarizer")
+        # Summaries want deterministic output (temperature 0.0), but greedy decoding
+        # is exactly what makes QwQ loop — so QwQ falls back to its recommended sampling.
+        self._sampling = _sampling_for_model(model, 0.0)
 
     def summarize(self, text: str) -> str:
         if _count_tokens(text) > _SUMMARIZER_INPUT_CAP_TOKENS:
@@ -182,7 +201,7 @@ class _Summarizer:
             response = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                temperature=0.0,
+                **self._sampling,
                 messages=[
                     {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": text},
@@ -307,6 +326,7 @@ class AgentVLLM(Agent):
         augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
         super().__init__(model, name, augmented_prompt, max_tokens, tool_defs, window_size)
         self.temperature = temperature
+        self._sampling = _sampling_for_model(model, temperature)
 
         base_url = f"http://{host}:{port}/v1"
         if not check_server(base_url):
@@ -319,6 +339,7 @@ class AgentVLLM(Agent):
         self.client = OpenAI(base_url=base_url, api_key="none", timeout=_REQUEST_TIMEOUT_SECONDS, max_retries=_MAX_REQUEST_RETRIES)
         self.context_limit = fetch_context_limit(self.client, self.model)
         self.log.info("vLLM context window for %s: %d tokens", self.model, self.context_limit)
+        self.log.info("Sampling for %s: %s", self.model, self._sampling)
         self.thinking_summarizer = ThinkingSummarizer(self.client, self.model)
         self.history_summarizer = HistorySummarizer(self.client, self.model)
         self.log_summarizer = LogSummarizer(self.client, self.model)
@@ -384,7 +405,7 @@ class AgentVLLM(Agent):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            **self._sampling,
             messages=messages,
             # Quantized models (e.g. AWQ) can degenerate into emitting runaway newline
             # runs after finishing their answer, padding toward max_tokens. A mild
@@ -496,7 +517,7 @@ class AgentVLLM(Agent):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            **self._sampling,
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_message},

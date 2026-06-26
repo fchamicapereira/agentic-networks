@@ -1,14 +1,16 @@
-1. **What was observed:**
-   - Traceroute to `acm.org` showed traffic reaching Uni (128.173.0.1) but failing to progress further.
-   - Uni was unresponsive initially, leading to follow-up messages.
-   - AS1 was involved but slow to respond, while AS2 was brought in for additional diagnostics.
+1. **Observed:**
+   - Verified loopback interface and direct neighbor connectivity.
+   - DNS resolution for acm.org was successful.
+   - Pings to acm.org's IP address failed with "Destination Host Unreachable."
+   - Traceroute identified the issue at hop 4 (198.82.0.254).
+   - Local end-to-end connectivity to Uni was confirmed.
 
-2. **What was decided:**
-   - Reported traceroute findings to Uni and followed up for updates.
-   - Kept the owner informed about the status and actions taken.
-   - Idled to allow Uni time to investigate and respond.
+2. **Decided:**
+   - Reported the network issue to Uni for further investigation.
+   - Reiterated the issue to Uni, confirming local connectivity.
+   - Updated the owner on the status and ongoing investigation.
 
 3. **Why:**
-   - To diagnose the network issue and identify the point of failure.
-   - To ensure Uni was actively working on the problem and to expedite resolution.
-   - To maintain transparency and manage expectations with the owner.
+   - To isolate the issue and confirm local network functionality.
+   - To provide detailed information for deeper troubleshooting by the Knowledge Plane.
+   - To keep stakeholders informed and manage expectations.

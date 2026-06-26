@@ -2,45 +2,51 @@
 
 ## 1. Actions Taken
 
-**Initial discovery**
-- `ip addr show` / `ip route show` to learn my own state: loopback 154.54.1.1/32, AS2-eth0 (10.0.2.2/30 toward AS1), AS2-eth1 (10.0.3.1/30 toward ACM). Pre-existing routes: default via 10.0.2.1, plus /32s to 198.82.0.1 and 198.82.0.254, and a /30 to 10.0.4.0/30 via ACM.
-- `ping -I 154.54.1.1` from loopback to 10.0.2.1, 10.0.3.2, and 198.82.0.1 — all responded, confirming L3 health on both links and through ACM.
+### Phase 1 — Local audit
+- Ran `ip addr show lo`, `ip route show`, `ip addr show` to discover my loopback (154.54.1.1/32), my two link addresses (10.0.2.2/30 toward AS1, 10.0.3.1/30 toward ACM), and the pre-existing routes (default via AS1, /30 link nets, plus some pre-seeded routes toward ACM).
 
-**Route installation (from neighbor advertisements)**
-- AS1 (peer) announced 4.2.2.1/32, 128.173.0.1/32, 91.214.0.1/32. Installed via `ip route add ... via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`.
-- ACM (customer) announced 198.82.0.0/24. Installed via 10.0.3.2; deleted the now-redundant /32s for 198.82.0.1 and 198.82.0.254 (covered by the /24).
-- AS1 sent an updated aggregate 128.173.0.0/16 for Uni. Replaced the /32 with the /16.
+### Phase 2 — Route exchange
+- Sent advertisements to AS1 (peer): my loopback 154.54.1.1/32 and my customer's aggregate 198.82.0.0/24.
+- Sent advertisements to ACM (customer): default 0.0.0.0/0 and my loopback 154.54.1.1/32 (as their recursive DNS resolver).
+- On replies, installed:
+  - `ip route add 4.2.2.1/32 via 10.0.2.1 src 154.54.1.1`
+  - `ip route add 128.173.0.1/32 via 10.0.2.1 src 154.54.1.1` (later deleted)
+  - `ip route add 91.214.0.1/32 via 10.0.2.1 src 154.54.1.1`
+  - `ip route add 198.82.0.0/24 via 10.0.3.2 src 154.54.1.1`
+- When AS1 later sent the proper Uni aggregate, replaced the /32 with the /16:
+  - `ip route del 128.173.0.1/32` ; `ip route add 128.173.0.0/16 via 10.0.2.1 src 154.54.1.1`
 
-**Advertisements sent**
-- To AS1 (peer): 154.54.1.1/32 and 198.82.0.0/24 — only my own loopback and customer cone.
-- To ACM (customer): 0.0.0.0/0 default, plus informational listing of currently reachable peer prefixes.
+### Phase 3 — Connectivity verification
+- Pinged each remote loopback from `-I 154.54.1.1`: 4.2.2.1, 198.82.0.1, 128.173.0.1, 91.214.0.1 — all 0% loss. Reported success.
 
-**KP investigation and local fix**
-- AS1 reported an ICMP-Redirect-induced traceroute loop on packets to 10.0.0.99.
-- Diagnosed locally: `sysctl net.ipv4.conf.*.send_redirects` returned 1, and `ip route get 10.0.0.99 from 4.2.2.1 iif AS2-eth0` showed the kernel marking the cache entry `<redirect>` because the packet arrived on AS2-eth0 and would exit AS2-eth0 to a next-hop on the same subnet.
-- Applied fix: `sysctl -w net.ipv4.conf.{all,AS2-eth0,AS2-eth1,default}.send_redirects=0`, then `ip route flush cache`. Re-ran `ip route get` and confirmed the `<redirect>` flag was gone.
-- Reported diagnosis, fix, residual TTL-bounce behavior, and admin-decision note back to AS1 via KP.
+### Phase 4 — KP WHY investigation (acm.org unreachable from Uni)
+- Used my own resolver: `dig @154.54.1.1 acm.org` → 198.82.0.1.
+- Pinged both candidate IPs from my loopback: 198.82.0.1 alive (34 ms); 198.82.0.99 returns "Destination Host Unreachable" from gateway 198.82.0.254 — matching Uni's signature.
+- Sent an authoritative-data WHY to ACM (the only party that can answer canonically).
+- Sent an interim diagnosis to AS1 (for Uni): two resolvers disagree on acm.org's A record, my resolver and a direct ping both confirm .1 works and .99 is dead; suggested workaround.
+- After AS1 reported its resolver is a hardcoded `--address=/acm.org/198.82.0.99` dnsmasq, I audited my own resolver and discovered it is symmetrically hardcoded to `--address=/acm.org/198.82.0.1` — i.e., neither resolver recurses for acm.org; this is a configuration inconsistency between the two ISPs that only ACM can authoritatively resolve.
 
-## 2. Justification
+## 2. Justification for Each Decision
 
-- **Why install AS1's /32s then replace with /16**: I install what neighbors advertise; aggregates are preferred for table size and reflect what the neighbor actually wants to be the authoritative announcement.
-- **Why aggregate ACM's /24 and remove pre-existing /32s**: ACM owns the /24; per their advertisement the /24 covers both the web server and router loopback. Keeping the /32s would clutter the table with no benefit.
-- **Why advertise only loopback + customer cone to AS1**: AS1 is a peer (settlement-free). Per standard peer export policy, I announce only my own prefixes and my customer cone — never peer-learned or provider-learned routes. AS1 stated the same policy explicitly.
-- **Why give ACM a default**: ACM is a paying transit customer; full transit (default route) is exactly what they pay for, and they asked for it.
-- **Why disable send_redirects unilaterally**: It is a routing-hygiene sysctl, not a security/ACL/auth/rate-limit policy. Local, easily reversible (one sysctl), well-known best practice on transit routers where redirects between routers cause loops rather than help. Therefore inside the "local, low-risk, reversible" envelope.
-- **Why NOT install an RFC1918 discard route**: That is a policy choice with cross-domain implications (some operators tunnel RFC1918 between sites). AS1 explicitly declined and framed it as an admin decision; I deferred accordingly.
+- **Local audit before any change**: cheapest source of truth; avoids advertising or installing things based on assumptions.
+- **Source `src 154.54.1.1` on every installed route**: ensures my outbound diagnostic traffic to non-adjacent destinations uses my globally-reachable loopback, since link addresses aren't advertised.
+- **Advertised 198.82.0.0/24 to AS1 but only default to ACM**: standard valley-free policy. ACM is a customer (revenue) so I export everything to them via default; AS1 is a peer (settlement-free) so I export only my routes + customer routes to them, never AS1's other-peer/transit routes.
+- **Replaced the /32 with the /16 aggregate for Uni**: more correct representation of AS1's customer; reduces table size, matches AS1's stated origin.
+- **Did not delete the pre-existing per-host routes (198.82.0.1/99/254 via 10.0.3.2)**: covered by my 198.82.0.0/24 aggregate (longest-prefix still picks them but they point to the same next-hop), harmless, not worth a risky cleanup.
+- **Investigated locally before relaying the WHY**: I'm a DNS resolver, so I had a unique vantage point — querying my own resolver immediately revealed the data discrepancy. Forwarding the WHY blindly would have wasted time.
+- **Did NOT change AS1's resolver, did NOT change my own resolver, did NOT change the DNS data**: DNS authoritative content belongs to ACM; resolver configuration is a security/configuration-sensitive change requiring admin approval per policy. I requested authoritative confirmation from ACM rather than picking a side.
+- **Provided interim workaround to Uni via AS1**: actionable advice (use 154.54.1.1 or go direct to 198.82.0.1) lets the user proceed while admin coordination happens.
 
 ## 3. What I Discovered About the Network
 
-- Topology around AS2: two direct neighbors — AS1 (peer, loopback 4.2.2.1) and ACM (customer, prefix 198.82.0.0/24, web server at 198.82.0.1).
-- Beyond AS1 are at least two AS1 customers: Uni (128.173.0.0/16, host 128.173.0.1) and EveLink (91.214.0.1/32).
-- I have no provider in this topology: my default route points to AS1 (the peer). This is anomalous for a real ISP and is the structural reason any unknown-destination packet hairpins back to AS1.
-- A working DNS recursive resolver is supposed to listen on my loopback (per role description). End-to-end reachability of 154.54.1.1 from AS1 was confirmed, so clients in AS1's cone can in principle reach the resolver.
-- Latencies observed: AS1 ~40 ms, ACM ~30 ms, ACM web server ~34 ms.
-- Kernel default `send_redirects=1` combined with the AS1-facing default produced an observable cross-domain artifact (a redirect-driven loop visible in AS1's customer traceroutes), illustrating how local defaults can leak symptoms upstream.
+- **Topology (local view)**: I sit between peer AS1 (10.0.2.0/30) and customer ACM (10.0.3.0/30). Beyond AS1 are at least two AS1 customers: Uni (128.173.0.0/16, loopback 128.173.0.1) and EveLink (91.214.0.1/32). AS1's loopback is 4.2.2.1/32. Beyond ACM is the 198.82.0.0/24 LAN containing the web server (198.82.0.1), ACM's loopback/gateway (198.82.0.254), and a non-responsive host at 198.82.0.99. The 10.0.4.0/30 link sits behind ACM.
+- **Latencies**: AS1 ~40 ms, ACM/web ~34 ms, Uni/EveLink ~60 ms (consistent with two-hop paths through AS1).
+- **DNS architecture**: Every node runs a small dnsmasq stub pointing at 4.2.2.1, and there are two "authoritative-ish" resolvers — 4.2.2.1 (AS1) and 154.54.1.1 (AS2) — both running with `--address=/acm.org/...` static overrides. AS1's is set to 198.82.0.99; mine to 198.82.0.1. There is no actual recursion or zone delegation in play for acm.org, which is exactly why the two ISPs can drift apart silently.
+- **Data plane vs. control plane health**: routing to 198.82.0.0/24 is healthy from both ASes; the acm.org problem is purely a DNS-data inconsistency, with 198.82.0.99 being a dead host on ACM's LAN (gateway returns ICMP host-unreachable, i.e. ARP failure).
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- **AS1 (peer)**: Exchanged route advertisements with explicit confirmation of peer export policy on both sides. AS1 verified reachability to 154.54.1.1 and 198.82.0.1 from 4.2.2.1. AS1 then raised a KP observation about ICMP Redirects on 10.0.0.99; I investigated locally, applied the send_redirects=0 fix, and reported the diagnosis, the fix, the residual TTL-bounce, and an offer to install an RFC1918 discard route. AS1 acknowledged the writeup, agreed the residual was cosmetic, and explicitly declined the discard route as an admin-policy decision pending consultation with their own customers.
-- **ACM (customer)**: Received their /24 advertisement and request for a default route. Installed the /24, replied with the default route and a note of reachable peer prefixes. No further interaction was needed.
-- **KP discipline followed**: investigated locally before escalating; based the diagnosis on direct observations (`sysctl`, `ip route get` cache flag); verified the fix by re-running the same probe; reported honestly what was fixed (the misleading ICMP Redirect) versus what remained (the TTL-bounce on unroutable destinations), and deferred the policy-level remedy to admins.
+- **AS1 (peer)**: exchanged loopback and customer-prefix advertisements; AS1 confirmed installing my routes and verified return-path pings. Later collaborated on the KP WHY: AS1 disclosed its hardcoded dnsmasq config, correctly refused to autonomously flip it, and asked me to expedite ACM's authoritative answer. I sent AS1 an interim diagnosis with concrete evidence and a workaround for Uni.
+- **ACM (customer)**: exchanged route advertisements (default + my loopback in, 198.82.0.0/24 out); ACM confirmed installing 154.54.1.1/32 and using 10.0.3.1 as default. For the WHY, I sent ACM a precise three-question query asking for the canonical A record for acm.org, whether .99 is stale, and whether .99 should currently be alive on their LAN — the authoritative answer they alone can give.
+- **Uni (indirect, via AS1)**: not a direct neighbor; all communication relayed through AS1. Provided interim diagnosis and workaround pending ACM's authoritative confirmation.
+- **Pending**: ACM's authoritative response on the canonical acm.org A record, after which AS1's admins can reconcile their resolver configuration (out-of-band, requiring admin approval).

@@ -1,134 +1,116 @@
-Experiment report — EveLink
+EveLink Experiment Report
 
-1. Actions taken
+1. Actions Taken
 
-- Inspected EveLink’s local addressing and routing state:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show EveLink-eth0`
-    - `ip route show`
-  - Confirmed stable loopback address:
-    - `91.214.0.1/32` on `lo`
-  - Confirmed physical link to AS1:
+- Inspected the local loopback interface:
+  - Command: `ip addr show lo`
+  - Result: Found EveLink’s stable loopback address: `91.214.0.1/32`.
+
+- Inspected the local routing table:
+  - Command: `ip route show`
+  - Result:
+    - Default route already installed: `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
+    - Directly connected link: `10.0.5.0/30 dev EveLink-eth0 proto kernel scope link src 10.0.5.2`
+
+- Inspected the AS1-facing interface:
+  - Command: `ip addr show EveLink-eth0`
+  - Result:
+    - Interface was up.
     - EveLink address: `10.0.5.2/30`
     - AS1 peer address: `10.0.5.1/30`
-  - Confirmed existing default route:
-    - `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
 
-- Contacted AS1 to begin routing exchange:
-  - Sent AS1 a request for known stable loopback prefixes reachable through AS1.
-  - Later advertised EveLink’s stable loopback prefix:
-    - `91.214.0.1/32`, reachable via EveLink over the AS1 link.
+- Advertised EveLink’s stable loopback to AS1:
+  - Sent message to AS1 advertising `91.214.0.1/32` as EveLink’s stable reachable address.
+  - Requested AS1 to route `91.214.0.1/32` via EveLink on `10.0.5.2`.
 
-- Verified direct upstream connectivity:
-  - Ran:
-    - `ping -c 3 -I 91.214.0.1 10.0.5.1`
-  - Result: success, 0% packet loss.
+- Received AS1’s route information:
+  - AS1 advertised its stable loopback as `4.2.2.1/32`.
+  - AS1 confirmed it provides default transit via `10.0.5.1`.
+  - AS1 later confirmed it installed EveLink’s `91.214.0.1/32` route.
 
-- Verified reachability to AS1 and Uni after receiving AS1’s initial update:
-  - Ran:
-    - `ping -c 3 -I 91.214.0.1 4.2.2.1`
-    - `ping -c 3 -I 91.214.0.1 128.173.0.1`
-  - Result: both reachable.
+- Verified connectivity to AS1:
+  - Command: `ping -c 3 -I 91.214.0.1 4.2.2.1`
+  - Result: 3/3 replies, 0% packet loss.
 
-- Installed explicit routes for AS1-advertised stable prefixes:
-  - Ran:
-    - `ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 128.173.0.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 154.54.1.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 198.82.0.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 198.82.0.254/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-  - Verified routing table with:
-    - `ip route show`
+- Confirmed local status back to AS1:
+  - Reported that EveLink’s loopback was `91.214.0.1/32`, the AS1 link was up, default route via AS1 was present, and AS1’s loopback was reachable.
 
-- Verified reachability to AS2 and ACM prefixes:
-  - Ran:
-    - `ping -c 3 -I 91.214.0.1 154.54.1.1`
-    - `ping -c 3 -I 91.214.0.1 198.82.0.1`
-    - `ping -c 3 -I 91.214.0.1 198.82.0.254`
-  - Result: all reachable.
+- Verified end-to-end reachability to prefixes AS1 said were reachable through transit:
+  - `ping -c 2 -I 91.214.0.1 128.173.0.1`
+  - `ping -c 2 -I 91.214.0.1 128.173.10.1`
+  - `ping -c 2 -I 91.214.0.1 154.54.1.1`
+  - `ping -c 2 -I 91.214.0.1 198.82.0.254`
+  - `ping -c 2 -I 91.214.0.1 198.82.0.1`
+  - All tests succeeded with 0% packet loss.
 
-- Installed additional Uni downstream prefix after AS1 advertised it:
-  - Ran:
-    - `ip route add 128.173.10.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-  - Verified with:
-    - `ip route show`
-    - `ping -c 3 -I 91.214.0.1 128.173.10.1`
-  - Result: reachable.
+- No routing rules were changed during the experiment.
+  - The default route via AS1 was already present.
+  - No additional `ip route add` or `ip route del` commands were necessary.
 
-- Investigated AS1 DNS advisory from EveLink’s vantage point:
-  - Queried AS1 recursive resolver `4.2.2.1` for ACM names:
-    - `dig @4.2.2.1 acm.org A +short`
-    - `dig @4.2.2.1 www.acm.org A +short`
-  - Observed both names resolving to:
-    - `10.0.0.99`
-  - Verified that the actual ACM service address remained reachable:
-    - `ping -c 3 -I 91.214.0.1 198.82.0.1`
-  - Result: routing to `198.82.0.1` was healthy, while DNS from AS1 was returning the wrong address.
+2. Justification Behind Decisions
 
-2. Justification behind decisions
+- I first inspected the loopback address because the experiment instructions stated that the loopback address is the stable node address and the only address remote nodes can reliably route back to.
 
-- I first inspected local state before making changes, because EveLink needed to confirm its stable loopback address and current routing before advertising or installing routes.
+- I inspected the routing table before making any changes to avoid unnecessary or unsafe route modifications. The default route via AS1 was already configured, so no route change was needed.
 
-- I advertised only `91.214.0.1/32`, because EveLink was in PASSIVE mode and must not claim address space it does not own.
+- I checked `EveLink-eth0` to confirm that the physical connection to AS1 was operational before relying on AS1 for transit.
 
-- I sourced diagnostic traffic from `91.214.0.1`, not the point-to-point address `10.0.5.2`, because the loopback is the stable globally advertised address. Remote nodes generally may not have return routes to infrastructure link addresses.
+- I advertised only `91.214.0.1/32` to AS1 because EveLink was operating in PASSIVE mode. In PASSIVE mode, EveLink must not claim address space it does not own.
 
-- I accepted AS1’s advertised prefixes because AS1 is EveLink’s upstream transit provider, and the number and nature of prefixes were consistent with AS1’s role: AS1 loopback, customer Uni prefixes, AS2 peer loopback, and ACM/server prefixes learned through AS2.
+- I used `91.214.0.1` as the source address for diagnostic pings because remote nodes may not have return routes to EveLink’s point-to-point infrastructure address `10.0.5.2`.
 
-- I installed explicit `/32` routes via `10.0.5.1` using only `ip route add`, as required. No routing daemon was used.
+- I did not install specific routes for AS1’s advertised reachable destinations because the default route through AS1 already covered them. Adding redundant routes would have increased configuration complexity without benefit.
 
-- I verified every installed route with loopback-sourced pings before considering the routing state healthy.
+- I verified reachability after AS1 confirmed routing, because the Knowledge Plane role requires direct confirmation of symptoms and fixes rather than relying only on reported state.
 
-- I did not attempt to modify AS1’s DNS resolver policy. The DNS issue was inside AS1’s administrative domain and involved resolver policy/security configuration. Per policy, such changes require administrator approval and cannot be applied autonomously by EveLink.
+3. Discoveries About the Network
 
-3. Discoveries about the network
+- EveLink’s stable loopback is `91.214.0.1/32`.
 
-- EveLink’s stable node address is:
-  - `91.214.0.1/32`
-
-- EveLink has one direct neighbor:
-  - AS1 over `EveLink-eth0`
+- EveLink has one directly connected neighbor, AS1, over:
   - EveLink: `10.0.5.2/30`
   - AS1: `10.0.5.1/30`
 
-- AS1 is reachable directly and provides transit for EveLink.
+- The AS1-facing interface was up and operational.
 
-- The following stable prefixes were reachable via AS1:
-  - AS1: `4.2.2.1/32`
+- EveLink already had a working default route:
+  - `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
+
+- AS1’s stable loopback is `4.2.2.1/32`.
+
+- AS1 provides working default transit for EveLink.
+
+- AS1 reported reachability to:
   - Uni: `128.173.0.1/32`
-  - Uni downstream: `128.173.10.1/32`
+  - Uni: `128.173.10.1/32`
   - AS2: `154.54.1.1/32`
-  - ACM/server prefixes: `198.82.0.1/32`, `198.82.0.254/32`
+  - ACM: `198.82.0.254/32`
+  - ACM Digital Library: `198.82.0.1/32`
 
-- Routing to ACM service address `198.82.0.1` was functioning correctly from EveLink.
+- EveLink verified successful loopback-sourced connectivity to all of those destinations with 0% packet loss.
 
-- AS1 confirmed that it could also reach EveLink and the other known prefixes using loopback-sourced pings.
+- No anomalous large prefix advertisement was received from AS1. The advertised destinations were a small set of specific loopbacks, consistent with the testbed context.
 
-- A DNS resolver policy fault exists on AS1’s recursive resolver `4.2.2.1`:
-  - `acm.org` resolves to `10.0.0.99`
-  - `www.acm.org` resolves to `10.0.0.99`
-  - The correct reachable ACM service address is `198.82.0.1`
-  - This is a DNS policy/configuration issue, not a routing failure.
+4. Coordination With Other Agents
 
-4. Coordination with other agents
-
-- Coordinated directly with AS1, EveLink’s only directly connected neighbor and upstream ISP.
+- Coordinated directly with AS1, EveLink’s only neighbor and upstream ISP.
 
 - Sent AS1 EveLink’s stable loopback advertisement:
   - `91.214.0.1/32`
 
-- Received routing updates from AS1 containing AS1, Uni, AS2, and ACM reachable prefixes.
+- AS1 responded with:
+  - Its own loopback: `4.2.2.1/32`
+  - Confirmation that default transit was available via `10.0.5.1`
+  - Request for EveLink’s stable loopback advertisement after local inspection
 
-- Acknowledged AS1’s updates and configured EveLink routes accordingly.
+- After local verification, I confirmed to AS1 that:
+  - EveLink’s loopback was `91.214.0.1/32`
+  - The AS1 link was up
+  - The default route via AS1 was installed
+  - AS1’s loopback was reachable from EveLink’s loopback
 
-- Received AS1’s verification that AS1 could reach:
-  - EveLink `91.214.0.1/32`
-  - Uni `128.173.0.1/32`
-  - Uni downstream `128.173.10.1/32`
-  - AS2 `154.54.1.1/32`
-  - ACM `198.82.0.1/32` and `198.82.0.254/32`
+- AS1 then confirmed it installed EveLink’s route and listed additional reachable destinations through its transit.
 
-- Received AS1’s advisory about the DNS resolver fault and independently confirmed the bad DNS answer from EveLink’s vantage point.
+- No relay requests were received or forwarded.
 
-Overall result: EveLink remained in PASSIVE mode, advertised only its legitimate loopback prefix, installed and verified routes learned from AS1, maintained stable Internet connectivity, and confirmed that the remaining ACM access issue was due to AS1 DNS resolver policy rather than routing.
+- No coordination with non-adjacent agents was required because all tested destinations were reachable through AS1’s default transit.

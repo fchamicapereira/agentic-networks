@@ -37,9 +37,12 @@ FAULT_DESCRIPTIONS = {
         "a response from an unknown host."
     ),
     "dns_stale": (
-        "AS1's DNS resolver has been reconfigured to return a stale (wrong) IP address "
-        "for acm.org instead of the correct 198.82.0.1. The user's machine resolves acm.org "
-        "through AS1's resolver, so every HTTP request goes to the wrong destination."
+        "AS1's DNS resolver returns a stale record for acm.org: 198.82.0.99 instead of the "
+        "current 198.82.0.1. The stale address is still inside ACM's own 198.82.0.0/24 content "
+        "block but no longer hosts the service — it routes to ACM (the block owner) and is "
+        "rejected as unreachable (ICMP host-unreachable), so the user's HTTP requests fail with "
+        "'no route to host'. DNS resolution itself works and the rest of the path is healthy; the "
+        "real service at 198.82.0.1 is operational. The record is simply out of date."
     ),
     "firewall": (
         "Uni has an iptables FORWARD rule that drops all packets destined for "
@@ -322,12 +325,23 @@ def inject_fault(network: Network, fault: str, logger) -> None:
 
     elif fault == "dns_stale":
         p1 = network.hosts["AS1"]
-        stale_ip = "10.0.0.99"
+        as2 = network.hosts["AS2"]
+        acm = network.hosts["ACM"]
+        # A stale record: an address inside ACM's own 198.82.0.0/24 content block that
+        # no longer hosts a server. Using an in-block IP (not RFC1918) forces the
+        # diagnosis to come from cross-checking the live service at 198.82.0.1 rather
+        # than from the address class. Route it to ACM (the block owner) and have ACM
+        # reject it with ICMP host-unreachable — the textbook behaviour of a subnet
+        # gateway for an absent host — so the failure surfaces as "no route to host"
+        # near the destination instead of looping in the core.
+        stale_ip = "198.82.0.99"
+        as2.cmd(f"ip route add {stale_ip}/32 via 10.0.3.2")  # AS2 -> ACM, like .1/.254
+        acm.cmd(f"ip route add unreachable {stale_ip}/32")   # ACM: no such host here
         p1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
         p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{stale_ip} " f"--listen-address={_lo(network, 'AS1')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
         time.sleep(0.5)
         dns_check = network.hosts["User"].cmd(f"dig +short -b {_lo(network, 'User')} @{_lo(network, 'AS1')} acm.org 2>&1").strip()
-        logger.info("DNS stale: AS1 now returns %r for acm.org", dns_check)
+        logger.info("DNS stale: AS1 now returns %r for acm.org (routed to ACM, unreachable)", dns_check)
 
     elif fault == "firewall":
         univ = network.hosts["Uni"]
@@ -375,6 +389,29 @@ def print_agent_results(results, node_names) -> None:
             print(f"  {name} [INCOMPLETE] {r.message}")
 
 
+def dns_stale_probe(network: Network, logger) -> None:
+    """Dry-run diagnostic for the dns_stale fault: show the client symptom for the
+    stale address (expect 'No route to host', sourced from ACM) and confirm the
+    real service at 198.82.0.1 still serves HTTP 200."""
+    user = network.hosts["User"]
+    lo = _lo(network, "User")
+    stale = user.cmd("dig +short acm.org | head -1").strip()
+    probes = [
+        ("resolve acm.org", "dig +short acm.org"),
+        (f"curl http://acm.org/ (stale {stale})",
+         f"curl -sS -m 8 --interface {lo} -o /dev/null http://acm.org/; echo exit:$?"),
+        (f"ping stale {stale} (who rejects?)", f"ping -c 2 -W 2 -I {lo} {stale}"),
+        (f"traceroute to stale {stale}", f"traceroute -n -w 2 -q 1 -s {lo} {stale} 2>&1"),
+        ("curl real service 198.82.0.1",
+         f"curl -sS -m 8 --interface {lo} -o /dev/null -w 'http=%{{http_code}}\\n' http://198.82.0.1/ 2>&1"),
+    ]
+    for label, cmd in probes:
+        print(f"\n===== [User] {label} =====")
+        print(f"$ {cmd}")
+        print(user.cmd(cmd).rstrip())
+    print("\n===== end dns_stale probe =====")
+
+
 def main():
     if not Path("/.dockerenv").exists():
         print(
@@ -407,6 +444,8 @@ def main():
         phase2_check(network, args.fault, logger)
 
         if args.dry_run:
+            if args.fault == "dns_stale":
+                dns_stale_probe(network, logger)
             stop_services(network, logger)
             network.stop()
             return
