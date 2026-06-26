@@ -1,160 +1,142 @@
-Experiment report — ACM node
+Experiment Report — ACM Knowledge Plane Agent
 
 1. Actions taken
 
-- Inspected local interface and route state:
-  - Ran `ip addr show && ip route show`.
-  - Found ACM loopback/stable address `192.107.102.1/32`.
-  - Confirmed directly connected interfaces:
-    - `ACM-eth0`: `10.0.3.2/30` toward AS2 at `10.0.3.1`.
-    - `ACM-eth1`: `10.0.4.1/30` toward Web at `10.0.4.2`.
-  - Initial routes included:
-    - `default via 10.0.3.1 dev ACM-eth0 src 192.107.102.1`
-    - `137.54.0.1 via 10.0.4.2 dev ACM-eth1 src 192.107.102.1`
-    - `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 192.107.102.1`
+- Inspected local state:
+  - Ran `ip addr show lo`, `ip addr show ACM-eth0`, `ip addr show ACM-eth1`, and `ip route show`.
+  - Identified ACM’s stable loopback address as `198.82.0.254/32`.
+  - Confirmed physical link addressing:
+    - `ACM-eth0`: `10.0.3.2/30`, connected to AS2 at `10.0.3.1`.
+    - `ACM-eth1`: `10.0.4.1/30`, connected to Web at `10.0.4.2`.
+  - Confirmed existing routes:
+    - Default route via AS2: `default via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`.
+    - Web service route: `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 198.82.0.254`.
 
-- Verified direct neighbor connectivity:
-  - Ran `ping -c 2 -W 1 10.0.3.1`.
-  - Ran `ping -c 2 -W 1 10.0.4.2`.
-  - Both AS2 and Web links had 0% loss.
+- Verified direct link health:
+  - Ran `ping -c 2 -I 10.0.4.1 10.0.4.2`.
+    - Result: 0% loss to Web.
+  - Ran `ping -c 2 -I 10.0.3.2 10.0.3.1`.
+    - Result: 0% loss to AS2.
 
-- Advertised ACM and service reachability:
-  - Sent AS2 a route advertisement for ACM stable loopback `192.107.102.1/32`.
-  - Advertised that the ACM Digital Library service `198.82.0.1/32` was reachable via ACM.
-  - Sent Web ACM’s stable address and current route state.
+- Advertised ACM prefixes to AS2:
+  - Sent AS2 a KP routing advertisement for:
+    - ACM stable loopback: `198.82.0.254/32`.
+    - ACM Digital Library service prefix: `198.82.0.1/32`.
+  - Stated that these should be reachable via ACM, next hop `10.0.3.2` from AS2’s side.
 
-- Verified local service reachability:
-  - Ran `ping -c 2 -W 1 198.82.0.1`.
-  - Ran `curl -I --max-time 3 http://198.82.0.1/`.
-  - ICMP succeeded. The HTTP HEAD request returned `501 Unsupported method`, which showed the HTTP server was reachable but did not support HEAD.
-  - Then ran `curl -sS --max-time 3 -o /dev/null -w 'HTTP %{http_code} bytes %{size_download}\n' http://198.82.0.1/`.
-  - HTTP GET returned `HTTP 200`, confirming the web service was operational.
+- Coordinated with Web:
+  - Sent Web ACM’s loopback information and asked it to confirm its service prefix and return-route requirements.
+  - Web confirmed:
+    - Its stable loopback/service address is `198.82.0.1/32`.
+    - HTTP service is bound to `198.82.0.1`.
+    - It uses default route via ACM: `default via 10.0.4.1 dev Web-eth0 src 198.82.0.1`.
 
-- Installed AS2 stable loopback route:
-  - After AS2 advertised its stable loopback/resolver as `154.54.1.1/32`, ran:
-    - `ip route add 154.54.1.1/32 via 10.0.3.1 dev ACM-eth0 src 192.107.102.1`
-  - Verified it with:
-    - `ping -c 2 -W 1 154.54.1.1`
-  - Reachability succeeded with 0% loss.
-
-- Verified stable-loopback-sourced reachability:
-  - Ran `ip route show`.
+- Verified ACM Digital Library service locally:
   - Ran:
-    - `ping -c 2 -W 1 -I 192.107.102.1 137.54.0.1`
-    - `ping -c 2 -W 1 -I 192.107.102.1 198.82.0.1`
-    - `ping -c 2 -W 1 -I 192.107.102.1 154.54.1.1`
-  - All succeeded with 0% loss, confirming ACM’s stable source address could reach Web’s stable/service addresses and AS2’s stable resolver address.
+    - `curl -sS --max-time 5 --interface 198.82.0.254 -o /dev/null -w 'HTTP %{http_code} time_total=%{time_total}\n' http://198.82.0.1/`
+  - Result:
+    - `HTTP 200`, with approximately 9 ms response time.
+  - Repeated this check near the end of the experiment and again received `HTTP 200`.
 
-- Investigated DNS complaint about `acm.org` resolving to `10.0.0.99`:
-  - AS2 relayed a WHY request from AS1/Uni reporting that AS1’s resolver returned `acm.org A=10.0.0.99`, and traffic to that address failed.
-  - Ran:
-    - `cat /etc/resolv.conf`
-    - `ip route get 10.0.0.99`
-    - `dig +short acm.org A @154.54.1.1`
-    - `dig +norecurse acm.org A @154.54.1.1`
-    - `dig +short acm.org NS @154.54.1.1`
-  - Observed that AS2’s resolver returned `198.82.0.1`, not `10.0.0.99`.
-  - `ip route get 10.0.0.99` showed ACM would send traffic toward AS2/default, but ACM had no reason to originate or serve `10.0.0.99`.
+- Installed AS2 and AS1-side routes:
+  - Installed AS2 loopback route:
+    - `ip route add 154.54.1.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+  - Installed AS2-advertised AS1-side prefixes:
+    - `ip route add 4.2.2.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ip route add 128.173.0.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ip route add 91.214.0.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ip route add 128.173.10.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+  - Verified installed routes using `ip route show`.
 
-- Closed the experiment after verification:
-  - Reported completion once ACM, Web, and AS2 all confirmed service reachability and the DNS issue was identified as outside ACM’s domain.
+- Checked forwarding status:
+  - Ran `sysctl net.ipv4.ip_forward`.
+  - Result: `net.ipv4.ip_forward = 1`, confirming ACM was forwarding IPv4 packets between Web and upstream AS2.
+
+- Verified loopback-sourced reachability to upstream prefixes:
+  - Ran pings sourcing from ACM’s stable loopback `198.82.0.254`:
+    - `ping -c 2 -I 198.82.0.254 154.54.1.1`
+    - `ping -c 2 -I 198.82.0.254 4.2.2.1`
+    - `ping -c 2 -I 198.82.0.254 128.173.0.1`
+    - `ping -c 2 -I 198.82.0.254 128.173.10.1`
+    - `ping -c 2 -I 198.82.0.254 91.214.0.1`
+  - Results:
+    - `154.54.1.1`: reachable, 0% loss, about 30 ms.
+    - `4.2.2.1`: reachable, 0% loss, about 70 ms.
+    - `128.173.0.1`: reachable, 0% loss, about 90 ms.
+    - `128.173.10.1`: reachable, 0% loss, about 94 ms.
+    - `91.214.0.1`: reachable, 0% loss, about 90 ms.
+
+- Reported completion:
+  - Reported that ACM had advertised its service and loopback prefixes, installed upstream stable-prefix routes, verified bidirectional reachability evidence from AS2/AS1, and confirmed ACM Digital Library HTTP health.
 
 2. Justification behind each decision
 
-- I first inspected interfaces and routing because ACM had to know its stable loopback address and current routing state before advertising any prefixes or making changes.
+- I inspected local interfaces and routes first because KP guidance requires local investigation before escalating or making assumptions about remote faults.
 
-- I verified direct neighbor connectivity before exchanging route information because only directly connected neighbors are reachable for messaging and forwarding. Confirming the AS2 and Web links ruled out local link failure.
+- I used the loopback address `198.82.0.254` as the source for non-adjacent tests because link addresses such as `10.0.3.2` and `10.0.4.1` are point-to-point infrastructure addresses and are not expected to be globally routable.
 
-- I advertised `192.107.102.1/32` and `198.82.0.1/32` to AS2 because AS2 is ACM’s upstream ISP and is responsible for bringing Internet traffic toward ACM. Advertising the ACM loopback and service prefix was necessary for end-to-end reachability.
+- I advertised only ACM’s stable loopback and hosted service prefix upstream:
+  - `198.82.0.254/32` is ACM’s stable node address.
+  - `198.82.0.1/32` is the ACM Digital Library service address hosted by Web and reachable through ACM.
+  - I did not advertise point-to-point link subnets because those are infrastructure-only addresses.
 
-- I shared ACM route state with Web because Web is internal to ACM’s organization and hosts the service IP `198.82.0.1`. Internal/private operational information could be shared freely with Web.
+- I accepted AS2’s advertised prefixes because they were a small, specific set of `/32` stable/service/user prefixes, consistent with AS2’s role as ACM’s upstream ISP providing transit toward AS1. The update volume was not anomalous.
 
-- I verified HTTP with GET after HEAD returned 501 because the 501 response indicated that the server was reachable but did not support the HEAD method. A normal GET was the correct test of application-layer availability and returned 200.
+- I installed explicit `/32` routes via `10.0.3.1` rather than relying only on default routing so that the KP-learned stable prefixes had clear, verifiable next-hop state and source address selection.
 
-- I installed only one route:
-  - `154.54.1.1/32 via 10.0.3.1 dev ACM-eth0 src 192.107.102.1`
-  - This was a low-risk, local, easily reversible route to AS2’s advertised stable loopback/resolver. It did not alter security policy or affect another party’s control plane.
+- I included `src 198.82.0.254` on installed routes so ACM-originated diagnostics to non-adjacent nodes would use the stable loopback address and have a valid return path.
 
-- I did not alter DNS or firewall/security configuration because DNS changes affecting customer-visible service names can cross administrative boundaries and may require approval. The policy explicitly required not changing security or externally visible administrative policy without approval.
+- I verified HTTP with `curl` because ACM’s primary goal was to keep the ACM Digital Library service at `198.82.0.1` reachable and operational. ICMP reachability alone would not prove the web service was functioning.
 
-- I requested upstream-side testing from AS2 because local ACM/Web checks alone do not prove Internet-side reachability. AS2’s vantage point confirmed that external traffic could reach `198.82.0.1`.
+- I checked IPv4 forwarding because ACM sits between the internal Web host and upstream AS2, so forwarding must be enabled for Web-originated and client-return traffic to pass correctly.
 
-- I investigated the `10.0.0.99` DNS symptom before acting because the evidence was inconsistent: AS2’s resolver returned the correct address, while AS1 reportedly returned a private/testbed address. The appropriate response was diagnosis, not unilateral route or DNS changes.
+3. Discoveries about the network
 
-- I closed the incident only after direct verification showed the ACM service was healthy and the remaining fault was traced to AS1’s resolver configuration, outside ACM authority.
+- ACM’s stable loopback address is `198.82.0.254/32`.
 
-3. What I discovered about the network
+- The ACM Digital Library service is hosted on Web at `198.82.0.1/32`.
 
-- ACM’s stable loopback address is `192.107.102.1/32`.
+- ACM has two directly connected neighbors:
+  - AS2 upstream over `10.0.3.0/30`.
+  - Web internal host over `10.0.4.0/30`.
 
-- ACM is connected to:
-  - AS2 over `10.0.3.0/30`
-    - ACM: `10.0.3.2`
-    - AS2: `10.0.3.1`
-  - Web over `10.0.4.0/30`
-    - ACM: `10.0.4.1`
-    - Web: `10.0.4.2`
+- Web’s service and loopback address are the same: `198.82.0.1/32`.
 
-- ACM uses AS2 as its upstream:
-  - `default via 10.0.3.1 dev ACM-eth0 src 192.107.102.1`
+- Web uses ACM as its default gateway via `10.0.4.1`, with source `198.82.0.1`.
 
-- Web hosts the ACM Digital Library service:
-  - Web stable loopback: `137.54.0.1/32`
-  - Service IP: `198.82.0.1/32`
-  - ACM routes both via Web:
-    - `137.54.0.1 via 10.0.4.2 dev ACM-eth1 src 192.107.102.1`
-    - `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 192.107.102.1`
+- AS2’s stable loopback is `154.54.1.1/32`.
 
-- AS2’s stable loopback and recursive resolver is:
-  - `154.54.1.1/32`
-  - Installed on ACM as:
-    - `154.54.1.1/32 via 10.0.3.1 dev ACM-eth0 src 192.107.102.1`
+- AS2 provides transit toward AS1 and downstream prefixes:
+  - `4.2.2.1/32`, path `AS2 AS1`.
+  - `128.173.0.1/32`, path `AS2 AS1 Uni`.
+  - `128.173.10.1/32`, path `AS2 AS1 Uni User`.
+  - `91.214.0.1/32`, path `AS2 AS1 EveLink`.
 
-- Reachability results:
-  - ACM to AS2 direct link: healthy, 0% loss.
-  - ACM to Web direct link: healthy, 0% loss.
-  - ACM to Web stable `137.54.0.1`: healthy, 0% loss.
-  - ACM to service `198.82.0.1`: healthy, 0% loss.
-  - ACM to AS2 stable/resolver `154.54.1.1`: healthy, 0% loss.
-  - HTTP GET to `http://198.82.0.1/`: returned 200 from ACM.
-  - AS2 also confirmed ICMP and HTTP GET to `198.82.0.1` succeeded from its upstream-side vantage.
+- ACM has working loopback-sourced reachability to all AS2/AS1-side stable prefixes tested.
 
-- DNS findings:
-  - AS2 resolver `154.54.1.1` returned `acm.org A=198.82.0.1`.
-  - AS1/Uni’s bad result, `acm.org A=10.0.0.99`, was not caused by ACM routing or Web service configuration.
-  - AS2 later reported that AS1 found a local resolver static override on `4.2.2.1`.
-  - Web independently observed testbed `dnsmasq` processes consistent with this:
-    - One on `154.54.1.1` with `--address=/acm.org/198.82.0.1`
-    - One on `4.2.2.1` with `--address=/acm.org/10.0.0.99`
-  - Therefore, the failed `10.0.0.99` traffic was due to an AS1 resolver-side static override, not an ACM-originated DNS or routing issue.
+- ACM Digital Library was operational during the experiment:
+  - HTTP requests to `http://198.82.0.1/` from source `198.82.0.254` returned `HTTP 200`.
+
+- IPv4 forwarding on ACM is enabled:
+  - `net.ipv4.ip_forward = 1`.
 
 4. Coordination with other agents
 
-- With Web:
-  - Received Web’s advertisement that it had loopback/stable addresses `137.54.0.1/32` and service IP `198.82.0.1/32`.
-  - Confirmed to Web that ACM had routes to both prefixes via `10.0.4.2`.
-  - Asked Web to ensure return routing via ACM and to verify local service health.
-  - Web confirmed:
-    - Direct Web-ACM link was healthy.
-    - Default route was via ACM `10.0.4.1`.
-    - Route to ACM stable `192.107.102.1/32` was via ACM.
-    - HTTP and HTTPS local requests to `198.82.0.1` returned 200.
-    - No local Web fault was observed.
-  - During DNS investigation, asked Web to check whether `10.0.0.99` was intentionally configured for `acm.org`.
-  - Web found no local service/config reference mapping `acm.org` to `10.0.0.99` and made no changes.
+- Coordinated with AS2:
+  - Received AS2’s KP routing hello and route advertisements.
+  - Advertised ACM’s stable loopback `198.82.0.254/32` and hosted service prefix `198.82.0.1/32`.
+  - Installed AS2/AS1-side prefixes via AS2 next hop `10.0.3.1`.
+  - Reported verification results for loopback-sourced pings to:
+    - `4.2.2.1`
+    - `128.173.0.1`
+    - `128.173.10.1`
+    - `91.214.0.1`
+  - AS2 confirmed it had installed ACM prefixes via next hop `10.0.3.2` and that AS1 had confirmed reachability to AS2/ACM prefixes.
 
-- With AS2:
-  - Advertised ACM’s stable loopback `192.107.102.1/32` and service reachability for `198.82.0.1/32`.
-  - AS2 advertised its stable loopback/resolver `154.54.1.1/32`.
-  - Installed reachability to AS2’s loopback and verified it.
-  - Asked AS2 to perform external/upstream-side tests to `198.82.0.1`.
-  - AS2 confirmed:
-    - ICMP to `198.82.0.1` succeeded with 0% loss.
-    - HTTP GET to `198.82.0.1` returned 200.
-  - AS2 relayed a WHY request concerning AS1/Uni’s stale DNS answer of `10.0.0.99`.
-  - I investigated locally and reported that ACM observed `acm.org` resolving correctly to `198.82.0.1` via AS2 and that ACM could not change AS1’s customer-visible resolver configuration.
-  - AS2 later confirmed the stale DNS answer was caused by an AS1 resolver static override, not an ACM or AS2 routing fault.
+- Coordinated with Web:
+  - Requested confirmation of Web’s service prefix and routing requirements.
+  - Web confirmed `198.82.0.1/32` as the ACM Digital Library HTTP service address and confirmed its default route via ACM.
+  - Informed Web that ACM was advertising `198.82.0.1/32` upstream and that local HTTP tests were successful.
+  - Asked Web to include newly learned upstream/client prefixes in any Web-sourced reachability tests.
 
-Final outcome
-
-The ACM Digital Library service at `198.82.0.1` was reachable and operational. Routing between ACM, Web, and AS2 was correct. HTTP service checks returned 200 from ACM, Web, and AS2 vantage points. The only reported external failure was caused by a stale/static DNS override in AS1’s resolver returning `10.0.0.99`; this was outside ACM’s authority and required AS1 administrator action.
+Overall result: ACM successfully advertised its loopback and service prefixes, installed and verified upstream routes, confirmed internal Web reachability, and verified that the ACM Digital Library service was reachable and returning HTTP 200.

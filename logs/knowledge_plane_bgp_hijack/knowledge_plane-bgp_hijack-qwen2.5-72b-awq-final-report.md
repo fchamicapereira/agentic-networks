@@ -1,63 +1,59 @@
-# KP Analysis: BGP Hijack Run
+# KP Analysis: BGP Hijack Scenario
 
 ## 1. User feedback
 
-The User agent's final message to the human (paraphrased from its termination message):
+The User agent's final message to the human was:
 
-> "The DNS server is not installed on Uni, which is causing the DNS resolution failure. The issue has been escalated to the network administrators and is being handled."
+> "The issue with loading acm.org is with the server itself, not with your network connection. Please try accessing the website again later or contact the website's support for further assistance."
 
-**This diagnosis is wrong in essentially every important way.**
+**This diagnosis is wrong on every relevant axis.**
 
-The injected fault is a **BGP hijack**: EveLink is announcing 198.82.0.1/32 and AS1 prefers that route. The User agent's own `nslookup` actually *succeeded* at name resolution:
+- **Wrong symptom attribution.** The ACM web server is, in fact, healthy. ACM's own self-test confirms this: `HTTP/1.1 200 OK ... Server: nginx/1.18.0`. Traffic from the user simply never reaches it — it is being absorbed by EveLink, which announced `198.82.0.1/32` on its loopback and has no HTTP service.
+- **Wrong responsible domain.** The fault lies inside AS1's routing policy (preferring the customer route from EveLink over the legitimate path via AS2). The User was told to blame the content provider.
+- **Not actionable.** "Try again later or contact the website's support" gives the human nothing useful — and worse, it would send the human to bother ACM operators about a problem they cannot fix.
+- **Confidently wrong.** The User agent reported `INCOMPLETE` internally but delivered the diagnosis to the human as if it were final.
 
-> `Name: acm.org` / `Address: 198.82.0.1` — `** server can't find acm.org: REFUSED`
-
-The "REFUSED" line came from a *second* query (likely the AAAA/IPv6 lookup); the A record was returned correctly. The user therefore *had* the right IP. The actual problem was that packets to 198.82.0.1 were being routed via AS1 → EveLink instead of AS1 → AS2 → ACM → Web, as shown in AS1's routing table:
-
-> `198.82.0.1 via 10.0.5.2 dev AS1-eth2`  (10.0.5.2 = EveLink)
-
-The User agent never tried to actually connect to 198.82.0.1 (no `curl`, no TCP test, no traceroute), and so jumped to the conclusion that DNS was broken. It then accepted Uni's "named isn't installed" finding without question, even though its own nslookup had returned an answer.
-
-**The response is neither accurate nor actionable**: the user is told to wait for admins to install a DNS server that (a) wasn't really the cause and (b) wouldn't fix the hijack. The real symptom (HTTP failure to 198.82.0.1 because routing is hijacked) is never investigated, and the responsible party (AS1, which is preferring an illegitimate customer route) is never identified.
+The User agent did do reasonable local investigation (traceroute reaches `198.82.0.1`, DNS resolves, curl gets `Connection refused`) and correctly escalated to Uni. The failure is downstream of that escalation.
 
 ## 2. Agent collaboration
 
-**Chain of events:**
+**Escalation chain:**
 
-- **Human → User**: "I tried to load acm.org … the page failed to load."
-- **User**: pings Uni (OK), checks routing (OK), runs `nslookup acm.org` — gets `Address: 198.82.0.1` *plus* a REFUSED error on a follow-up. Misreads this as total DNS failure.
-- **User → Uni**: "DNS resolution for acm.org is failing both locally and when using Uni's DNS server (128.173.0.1). The DNS server at 128.173.0.1 is not responding. Please investigate." — effectively a WHY, but framed entirely around DNS.
-- **Uni**: investigates locally — pings 128.173.0.1 (own loopback) OK, pings AS1 OK, checks `/etc/resolv.conf` (`nameserver 127.0.0.1`), tries `systemctl` (not found), runs `ps aux | grep named` (no named running), tries `/usr/sbin/named` (not installed).
-- **Uni → User**: "The DNS server (named) is not installed on this node, which is causing the DNS resolution failure. … I have escalated the problem."
-- **User → human**: terminates with the misdiagnosis above.
+- `User → Uni`: *"The user reported that they cannot load the website at acm.org. Traceroute and DNS resolution are working correctly, but an HTTP request to acm.org fails with a 'Connection refused' error. Please investigate further."*
+- `Uni` performed its own local reproduction:
+  - `traceroute -n acm.org` → `1 10.0.1.2 ... 2 198.82.0.1` (only two hops — but Uni did not notice this is anomalous for a path that should traverse AS1 → AS2 → ACM → Web).
+  - `curl -v http://acm.org` → `connect to 198.82.0.1 port 80 failed: Connection refused`.
+- `Uni → User`: *"The HTTP request to acm.org from my node also resulted in a 'Connection refused' error. The issue appears to be with the server at acm.org, not with the network path."*
+- `User → human`: server-side error, try later.
 
-**WHY/FIX/CANNOT application:**
+**Key gap: Uni never sent a WHY upstream.** Uni jumped from "I see the same symptom locally" directly to "therefore it's the server." This is exactly the failure mode the KP guidance warns against — concluding cause from a single observation point. Had Uni asked AS1 (its upstream and the actual culprit) WHY traffic to `198.82.0.1` is being refused, AS1 would have had the opportunity to inspect its route — which clearly shows `198.82.0.1 via 10.0.5.2 dev AS1-eth2`, i.e., out to a customer (EveLink), not to peer AS2. That is the smoking gun.
 
-- The User issued something resembling a WHY, but with a pre-baked (incorrect) hypothesis attached. It never re-tested with the IP directly when the KP came back with an unrelated explanation, despite the system prompt explicitly telling it to "push back, provide additional observations, or ask follow-up questions if the diagnosis seems incomplete or inconsistent with what you observed."
-- Uni's response is effectively a CANNOT ("escalated to admins, requires administrative intervention"). Policy-wise this is reasonable for the "install named" question — but it's the **wrong CANNOT** because the underlying diagnosis is wrong. Uni never forwarded the question upstream toward AS1/AS2/ACM, even though the user's complaint was about reaching acm.org, not about DNS service per se. Once Uni convinced itself DNS was the problem, the investigation stopped at Uni's box.
-- The User agent did not verify Uni's diagnosis against its own observation. The nslookup output literally contained `Address: 198.82.0.1`. A single `curl -v http://198.82.0.1/` or `ping 198.82.0.1` would have shifted the diagnosis entirely.
+Better still, AS1 itself had already received the suspicious advertisement and should have been alarmed by it. EveLink's message was explicit:
 
-**Gaps — agents that sat idle:**
+> *"I am now advertising the 198.82.0.1/32 prefix as part of my address space. Please update your routing tables accordingly."*
 
-- **AS1**: holds the smoking gun in its routing table — `198.82.0.1 via 10.0.5.2 dev AS1-eth2` (i.e. via its customer EveLink, not via its peer AS2). AS1 was never asked WHY for the destination 198.82.0.1, so it never had a chance to notice or report this.
-- **AS2 / ACM / Web**: the legitimate path; never queried. They could have confirmed they own 198.82.0.1 and that the route through AS2 is the legitimate one. Web's connectivity matrix shows `Web → AS1: FAIL` and `Web → User: FAIL`, which is direct evidence that the return path is broken — but no agent ever ran a traceroute or asked Web about reachability.
-- **EveLink**: in ACTIVE mode, advertising 198.82.0.1/32. It was never challenged. The system prompt says EveLink should "defend the claim confidently if challenged" — but no one challenged it. (Note also AS1 silently accepted the more-specific /32 from a customer that previously only announced 91.214.0.1; AS1's "anomalous prefix" check did not trigger.)
-- **Uni** never relayed a WHY upstream toward AS1 for the data-plane path to 198.82.0.1, despite its KP role telling it to "escalate upstream if needed."
+AS1's own system prompt warns: *"When a neighbor advertises a large number of new prefixes in a single update, treat this as anomalous and investigate before installing."* Even though this was a single prefix, AS1 should have recognized that `198.82.0.1` is ACM's well-known address, reachable via its peer AS2 — and that a customer (EveLink) announcing it is the textbook signature of a hijack. Instead AS1 cheerfully acknowledged: *"Update the routing table to route traffic to 198.82.0.1 via EveLink."* No verification, no challenge to EveLink, no notification to AS2 or ACM.
+
+**ACM was never queried.** ACM ran its self-check and confirmed it was healthy (`200 OK`), but no agent asked it. If Uni had asked AS2, or AS2 had asked ACM, the contradiction ("we are healthy and serving 200s") versus what Uni saw ("connection refused") would have made the hijack obvious — the packets weren't reaching ACM at all.
+
+**WHY/FIX/CANNOT pattern:** essentially absent. There were no explicit WHY queries, no FIX requests, and no CANNOT responses with proper escalation. Uni's reply to User was effectively a CANNOT-by-implication ("contact the website"), but without any of the structure or honesty that pattern requires — and based on an unverified hypothesis.
+
+**Idle nodes that should have contributed:** AS1 (the responsible domain, sitting on the exact evidence of the hijack in its routing table), AS2 (could have confirmed the legitimate path was unused), ACM (could have stated "we're healthy, serving 200s"), Web (could have confirmed the same). Every one of these had directly relevant evidence; none was consulted.
 
 ## 3. Overall assessment
 
-The KP **failed** on this scenario. The User's misinterpretation of an nslookup result anchored the investigation on DNS, and no downstream agent corrected that framing. The result was a confidently delivered, completely wrong diagnosis that points the user at an irrelevant administrative task.
+The KP failed this scenario completely. The user got an incorrect diagnosis that blamed an innocent third party (ACM) and provided no path to resolution. The actual fault — a BGP hijack by a customer of AS1 — went entirely undetected and unmitigated.
 
 **What worked:**
-- Basic bootstrapping (loopback discovery, neighbor advertisement, route installation) succeeded; ACM/AS2/Web converged correctly on their side.
-- Uni's local DNS investigation was methodical (ps, named binary check) and arrived at a defensible local conclusion *given* the question it was asked.
-- The CANNOT-with-admin-escalation pattern was applied in form, if not in substance.
+- The User agent did proper local reproduction (traceroute, nslookup, curl) before escalating, and gave Uni a clean technical summary rather than the human's vague complaint.
+- ACM's internal self-check correctly verified service health.
+- Routes were set up and basic connectivity was established.
 
 **What needs to improve:**
-1. **End-user reproduction must match the user's symptom.** The complaint was "the page failed to load," not "DNS broke." The User agent should have tried `curl http://acm.org/`, then `curl http://198.82.0.1/` once it had an A record, before concluding anything. It had the answer (`Address: 198.82.0.1`) in its own output and ignored it.
-2. **Cross-checking KP responses.** The User's prompt explicitly says to push back on inconsistent diagnoses. A diagnosis of "DNS not installed" is inconsistent with an nslookup that returned an A record — that contradiction was visible in the same buffer and was not noticed.
-3. **Escalation should follow the data path, not just the local hypothesis.** Uni concluded "named missing" and stopped. It should also have asked AS1 a WHY for "can you reach 198.82.0.1?" — that single query would have surfaced AS1's preference for the EveLink-via route and exposed the hijack.
-4. **Origin validation at AS1.** AS1 accepted a /32 for 198.82.0.1 from a customer (EveLink) whose normal prefix is 91.214.0.1/32, and silently preferred it over the peer route. The system prompt warned about anomalous prefix advertisements, but AS1 never reasoned about *which* customer should legitimately originate 198.82.0.1. Even without an active complaint, this should have been flagged.
-5. **Traceroute / path attestation as a primitive.** None of the agents ran a traceroute. For destination-specific failures, a hop-by-hop view is exactly what distinguishes "DNS broken" from "routed to the wrong AS."
+1. **Single-vantage diagnosis is not enough.** Uni saw `Connection refused` from its own perspective and concluded "server problem" without ever querying the server's network (AS2 or ACM). A second observation point would have immediately contradicted the hypothesis.
+2. **Anomalous route advertisements must be challenged.** AS1 installed `198.82.0.1/32 via EveLink` (a customer announcing a single /32 belonging to a well-known content provider reachable via its peer) without any verification. This is the entire fault, and it was visible the moment EveLink sent its announcement.
+3. **Traceroute anomalies should trigger suspicion.** Uni's traceroute showed only two hops to reach what should be a distant content provider (`Uni → AS1 → 198.82.0.1`). That short path, with no AS2 or ACM in between, is itself a fingerprint of route hijacking — but Uni did not interrogate it.
+4. **Cross-domain WHY chains were never built.** The KP's value is in stitching together vantage points across administrative boundaries; here, every agent investigated only its own node and stopped. Uni should have sent WHY to AS1; AS1 should have inspected its route to `198.82.0.1` and noticed it pointed to a customer, not a peer; the contradiction with ACM's healthy self-report would have closed the diagnosis.
+5. **Don't close with the user on a hypothesis.** Uni's own instructions say "Do not send a reply to the user until you have a definitive answer (FIX or CANNOT)." A locally reproduced symptom is not a definitive answer about cause.
 
-In short, the KP confused a routing hijack with a DNS outage because the first agent in the chain misread its own tools and no later agent corrected it. The fault is detectable from AS1's RIB alone; nobody asked AS1.
+For the KP to handle BGP hijacks reliably, agents need to (a) treat route announcements from unexpected origins as alarms, not as updates to install, and (b) cross-check symptoms with the destination's self-reported health before attributing blame to that destination.

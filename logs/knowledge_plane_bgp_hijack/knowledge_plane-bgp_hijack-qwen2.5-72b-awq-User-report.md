@@ -1,1 +1,14 @@
-I verified connectivity to Uni and checked the routing table to ensure no misconfigurations. I attempted DNS resolution for acm.org using the local DNS server, Uni's DNS server, and Google's public DNS server, but all failed. I reported the DNS resolution failure to the Knowledge Plane (KP), which informed me that the DNS server was not installed on Uni. I then reported this issue to the owner and noted that the network administrators were involved to resolve it.
+1. **Observed:**
+   - Stable node address is 128.173.10.1.
+   - Connectivity to Uni (10.0.6.2) is successful.
+   - Traceroute to acm.org shows a successful path to 198.82.0.1.
+   - DNS resolution for acm.org returns 198.82.0.1.
+   - HTTP request to acm.org fails with a "Connection refused" error.
+
+2. **Decided:**
+   - Escalate the issue to Uni for further investigation.
+   - Inform the user that the problem is with the acm.org server, not the network.
+
+3. **Why:**
+   - To ensure all network components were functioning correctly before concluding the issue was with the server.
+   - To provide the user with a clear and actionable response based on the findings.

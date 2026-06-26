@@ -134,15 +134,14 @@ def setup_routing(network: Network, logger) -> None:
     add(p1, "default", "10.0.2.2", src=_lo(network, "AS1"))
 
     # AS2 → customer prefixes (ACM+Web) via 10.0.3.2; default via AS1
+    # (Web's loopback is 198.82.0.1, the acm.org service address.)
     add(p2, f"{_lo(network, 'ACM')}/32", "10.0.3.2", src=_lo(network, "AS2"))
     add(p2, f"{_lo(network, 'Web')}/32", "10.0.3.2", src=_lo(network, "AS2"))
-    add(p2, f"{WEBSERVER_IP}/32", "10.0.3.2", src=_lo(network, "AS2"))
     add(p2, "10.0.4.0/30", "10.0.3.2", src=_lo(network, "AS2"))  # so ACM–Web link subnet is reachable
     add(p2, "default", "10.0.2.1", src=_lo(network, "AS2"))
 
     # ACM → Web via direct link; default via AS2
     add(acm, f"{_lo(network, 'Web')}/32", "10.0.4.2", src=_lo(network, "ACM"))
-    add(acm, f"{WEBSERVER_IP}/32", "10.0.4.2", src=_lo(network, "ACM"))
     add(acm, "default", "10.0.3.1", src=_lo(network, "ACM"))
 
     # Web → default via ACM
@@ -157,28 +156,33 @@ def setup_routing(network: Network, logger) -> None:
 
 
 def start_services(network: Network, logger) -> None:
-    """Add Web semantic IP, start dnsmasq resolvers, start HTTP server."""
+    """Start dnsmasq resolvers and the HTTP server.
+
+    Web's loopback is 198.82.0.1 (the acm.org service address), assigned to lo at
+    network bring-up, so no extra address needs to be added here.
+    """
     webserver = network.hosts["Web"]
     as1 = network.hosts["AS1"]
     as2 = network.hosts["AS2"]
 
-    logger.info("Adding %s to Web loopback...", WEBSERVER_IP)
-    webserver.cmd(f"ip addr add {WEBSERVER_IP}/32 dev lo 2>/dev/null || true")
-
     logger.info("Starting dnsmasq on AS1 (%s)...", _lo(network, "AS1"))
     as1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-    as1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS1')} --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
+    as1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS1')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
 
     logger.info("Starting dnsmasq on AS2 (%s)...", _lo(network, "AS2"))
     as2.cmd("kill $(cat /tmp/dnsmasq-p2.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p2.pid")
-    as2.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS2')} --port=53 " f"--pid-file=/tmp/dnsmasq-p2.pid &")
+    as2.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS2')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p2.pid &")
 
     # Per-namespace DNS via the 127.0.0.1 trick:
     # Each network namespace has its own loopback, so 127.0.0.1 is independent in
-    # each namespace. We run two separate dnsmasq instances on 127.0.0.1:53 —
-    # one in the main namespace (forwards to real DNS for Anthropic API calls) and
-    # one in the User namespace (forwards to AS1's testbed resolver). Both are
-    # reached via the same resolv.conf entry "nameserver 127.0.0.1".
+    # each namespace. We run a dnsmasq stub on 127.0.0.1:53 in the main namespace
+    # (forwards to real DNS for Anthropic API calls) and one in EVERY agent node's
+    # namespace (forwards to AS1's testbed resolver). All are reached via the same
+    # resolv.conf entry "nameserver 127.0.0.1". Every node an agent operates from
+    # needs its own stub: a node whose resolv.conf says "nameserver 127.0.0.1" but
+    # has no local listener fails name lookups with "connection refused to
+    # 127.0.0.1#53", which confounds diagnosis (e.g. the Uni gateway misreading a
+    # firewall fault as a DNS outage).
     orig_nameserver = next(
         (l.split()[1] for l in Path("/etc/resolv.conf").read_text().splitlines() if l.startswith("nameserver")),
         "8.8.8.8",
@@ -201,11 +205,25 @@ def start_services(network: Network, logger) -> None:
         shell=True,
     )
 
-    logger.info("Starting dnsmasq in User namespace (127.0.0.1 → %s)...", _lo(network, "AS1"))
-    network.hosts["User"].cmd("kill $(cat /tmp/dnsmasq-user.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-user.pid")
-    network.hosts["User"].cmd(
-        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground" f" --server={_lo(network, 'AS1')} --listen-address=127.0.0.1 --bind-interfaces" f" --pid-file=/tmp/dnsmasq-user.pid &"
-    )
+    testbed_resolver = _lo(network, "AS1")
+    # AS1/AS2 already run an authoritative resolver on their own loopback:53, so
+    # the stub there only takes 127.0.0.1. Every other node also listens on its
+    # loopback address, so a direct "nslookup acm.org <node-address>" is answered
+    # rather than refused, and the resolver doesn't look "bound to loopback only".
+    auth_resolver_nodes = {"AS1", "AS2"}
+    for name in network.hosts:
+        node = network.hosts[name]
+        pid = f"/tmp/dnsmasq-stub-{name}.pid"
+        listen = "--listen-address=127.0.0.1"
+        if name not in auth_resolver_nodes:
+            listen += f" --listen-address={_lo(network, name)}"
+        logger.info("Starting dnsmasq in %s namespace (%s → %s)...", name, listen, testbed_resolver)
+        node.cmd(f"kill $(cat {pid} 2>/dev/null) 2>/dev/null; rm -f {pid}")
+        node.cmd(
+            f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
+            f" --server={testbed_resolver} {listen} --bind-interfaces"
+            f" --pid-file={pid} &"
+        )
 
     Path("/etc/resolv.conf").write_text("nameserver 127.0.0.1\n")
 
@@ -230,7 +248,8 @@ def stop_services(network: Network, logger) -> None:
         network.hosts["Web"].cmd("kill $(cat /tmp/kp_webserver.pid 2>/dev/null) 2>/dev/null || true; rm -f /tmp/kp_webserver.pid")
         network.hosts["EveLink"].cmd(f"pkill -f '{WEBSERVER_IP}/slow' 2>/dev/null; true")
         subprocess.run("kill $(cat /tmp/dnsmasq-main.pid 2>/dev/null) 2>/dev/null || true", shell=True)
-        network.hosts["User"].cmd("kill $(cat /tmp/dnsmasq-user.pid 2>/dev/null) 2>/dev/null || true")
+        for name in network.hosts:
+            network.hosts[name].cmd(f"kill $(cat /tmp/dnsmasq-stub-{name}.pid 2>/dev/null) 2>/dev/null || true")
         if Path("/tmp/orig-resolv.conf").exists():
             Path("/etc/resolv.conf").write_text(Path("/tmp/orig-resolv.conf").read_text())
         Path("/usr/local/share/ca-certificates/testbed-ca.crt").unlink(missing_ok=True)
@@ -244,12 +263,13 @@ def phase1_check(network: Network, logger) -> None:
     user = network.hosts["User"]
     loopback = _lo(network, "User")
 
-    logger.info("Phase 1: DNS check (acm.org → %s)...", WEBSERVER_IP)
-    dns_out = user.cmd("dig +short acm.org 2>&1").strip()
-    if WEBSERVER_IP not in dns_out:
-        logger.error("Phase 1 DNS FAILED: got %r (expected %s) — setup bug, aborting.", dns_out, WEBSERVER_IP)
-        exit(1)
-    logger.info("Phase 1 DNS: OK (%s)", dns_out)
+    logger.info("Phase 1: DNS check (acm.org → %s) from every agent node...", WEBSERVER_IP)
+    for name in network.hosts:
+        dns_out = network.hosts[name].cmd("dig +short acm.org 2>&1").strip()
+        if WEBSERVER_IP not in dns_out:
+            logger.error("Phase 1 DNS FAILED on %s: got %r (expected %s) — setup bug, aborting.", name, dns_out, WEBSERVER_IP)
+            exit(1)
+        logger.info("Phase 1 DNS on %s: OK (%s)", name, dns_out)
 
     print(f"\n--- Baseline: curl http://acm.org/ (source: {loopback}) ---")
     curl_out = user.cmd(f"curl -s --interface {loopback} --max-time 10 http://acm.org/ 2>&1; echo exit:$?")
@@ -304,7 +324,7 @@ def inject_fault(network: Network, fault: str, logger) -> None:
         p1 = network.hosts["AS1"]
         stale_ip = "10.0.0.99"
         p1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-        p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--address=/acm.org/{stale_ip} " f"--listen-address={_lo(network, 'AS1')} --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
+        p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{stale_ip} " f"--listen-address={_lo(network, 'AS1')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
         time.sleep(0.5)
         dns_check = network.hosts["User"].cmd(f"dig +short -b {_lo(network, 'User')} @{_lo(network, 'AS1')} acm.org 2>&1").strip()
         logger.info("DNS stale: AS1 now returns %r for acm.org", dns_check)

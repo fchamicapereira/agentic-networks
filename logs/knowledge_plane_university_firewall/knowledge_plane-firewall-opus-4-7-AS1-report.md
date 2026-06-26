@@ -1,45 +1,45 @@
 # AS1 Experiment Report
 
-## 1. Actions Taken & 2. Justification
+## 1. Actions Taken
 
-**Initial state discovery.** I ran `ip addr show lo` and `ip route show` to learn my loopback address (4.2.2.1/32) and existing routes. I found three connected interfaces (Uni, AS2, EveLink), a pre-installed default via AS2, and pre-installed /32 routes to neighbor loopbacks. This baseline was essential before making any advertisements — I needed to know what was already there.
+**Initial reconnaissance**
+- `ip addr show lo` → discovered my loopback address: 4.2.2.1/32.
+- `ip route show` → noted preconfigured state: connected /30s, a default via 10.0.2.2 (AS2), and two customer /32s (128.173.0.1 via Uni, 91.214.0.1 via EveLink).
 
-**Initial routing advertisements.** I sent messages to all three neighbors announcing my loopback and asking for their prefixes. The advertisements followed standard transit/peer policy:
-- To **Uni** (customer): offered default route 0.0.0.0/0 → full transit (customers pay for everything).
-- To **EveLink** (customer): offered default route 0.0.0.0/0 → full transit.
-- To **AS2** (peer): announced only my own prefix + customer cone (no transit for non-customers, no leaking AS2's routes back to AS2).
+**Neighbor introductions** — sent `send_message` to all three neighbors (Uni, EveLink, AS2) advertising my loopback 4.2.2.1/32 and asking each to share the prefixes they own / reach.
 
-**Route installation from neighbor responses.** AS2 initially advertised some /32s plus 10.0.3.0/30 and 10.0.4.0/30. I installed them all with `ip route add ... via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`, and also added Uni's downstream 128.173.10.1/32 via 10.0.1.1.
+**Route installations** after replies:
+- `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` (AS2 loopback)
+- `ip route add 198.82.0.0/24 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` (ACM, customer of AS2)
+- `ip route add 128.173.0.0/16 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1` (Uni's campus aggregate)
 
-**Route cleanup after AS2 correction.** AS2 then sent a correction: ACM should be installed as the /24 aggregates (192.107.102.0/24 and 198.82.0.0/24), 137.54.0.1/32 was never theirs, and 10.0.0.0/8 P2P space should not be globally routed. I:
-- Deleted 198.82.0.1/32, 192.107.102.1/32, 137.54.0.1/32, 10.0.3.0/30, 10.0.4.0/30.
-- Installed 198.82.0.0/24 and 192.107.102.0/24 aggregates via 10.0.2.2.
+**Policy corrections**:
+- `ip route del default via 10.0.2.2 dev AS1-eth1` — removed the preconfigured default through my peer AS2 after AS2 reminded me of peering policy.
+- `ip route del 128.173.0.1 via 10.0.1.1 dev AS1-eth0` — removed the now-redundant /32 covered by the new /16 aggregate.
 
-This was the right call: aggregates are operationally cleaner than /32s, P2P /30s should never be globally announced, and 137.54.0.1 being outside AS2's customer cone was a red flag I should not perpetuate.
+**Verification** — sourced from 4.2.2.1, pinged 91.214.0.1, 128.173.0.1, 128.173.10.1, 154.54.1.1, 198.82.0.1. All succeeded.
 
-**KP WHY investigation for Uni → 198.82.0.1.** Uni reported 100% loss to ACM. I:
-1. Ran `ping -c 3 198.82.0.1` from AS1 — succeeded (3 hops, 74 ms).
-2. Ran `traceroute 198.82.0.1` to confirm forward path AS1→AS2→192.107.102.1→198.82.0.1.
-3. Reproduced a related symptom: `ping -I 10.0.1.2 198.82.0.1` failed while `ping -I 4.2.2.1 198.82.0.1` succeeded.
-4. Ran `tcpdump -ni AS1-eth1 'icmp'` while pinging — confirmed echo-requests left AS1 toward AS2 but no replies returned for the 10.0.1.2-sourced flow.
-5. Asked AS2 to test from its own vantage and relay WHY to ACM.
-6. After AS2 confirmed all paths healthy on its side, asked Uni to tcpdump on their AS1-facing interface and inspect `iptables -L -v -n`.
-7. Uni found the smoking gun: explicit iptables DROP rules in FORWARD and OUTPUT chains targeting 198.82.0.0/24, with counter increments matching the test pings exactly.
+## 2. Justification
 
-I did **not** apply any fix because the remediation (removing a security ACL) belongs to Uni admins per policy. I closed the WHY as CANNOT (pending admin action) and informed AS2 to stand down.
+- **Sourcing diagnostics from the loopback** is required because remote nodes don't have routes back to the /30 link addresses.
+- **Installing AS2's peer-side routes (154.54.1.1/32 and 198.82.0.0/24)** lets me reach AS2 and its customer cone, which I need to provide to my customers Uni and EveLink (transit revenue).
+- **Removing the default via AS2**: peers are settlement-free and do not provide each other transit. Keeping a default through AS2 would have me using a peer as a transit provider, violating policy and risking traffic I shouldn't be sending there. Since I have no upstream transit in this topology, no default route is appropriate — I only forward what I explicitly know how to reach.
+- **Installing 128.173.0.0/16 from Uni and removing the redundant /32**: aggregation is cleaner and announcing only the /16 to AS2 keeps the routing table compact.
+- **Announcing to AS2 only my loopback + customer prefixes**: peer export policy — never announce a peer's or upstream's routes to another peer. (Here I had no other peers, but the discipline is the same.)
+- **Did not install anything autonomously that I could not verify the owner/origin of.** All prefixes came from the party that legitimately announces them (customers' own prefixes, peer's own + its customer's prefixes).
 
-## 3. What I Discovered About the Network
+## 3. Network Discoveries
 
-- **Topology beyond direct neighbors.** Beyond Uni, AS2, and EveLink, I learned: AS2 has a customer ACM, reached via 10.0.3.0/30 and announcing 192.107.102.0/24 (infra) and 198.82.0.0/24 (web). Uni has a campus aggregate 128.173.0.0/16 with at least two loopbacks: 128.173.0.1 (gateway) and 128.173.10.1 (downstream user). EveLink only announced its loopback 91.214.0.1/32.
-- **Operational practice.** AS2 enforces the discipline: do not announce P2P /30s globally, prefer aggregates, and do not announce prefixes outside one's customer cone. AS2 also caught its own earlier over-announcement and corrected it — useful trust signal.
-- **End-to-end paths work.** AS1↔Uni and AS1↔AS2↔ACM both function bidirectionally at the network layer once correct routes are in place. RTTs: AS1↔Uni ≈ 20 ms; AS1↔AS2 ≈ 40 ms; AS1↔ACM ≈ 74 ms.
-- **The Uni outage was a host-level policy issue, not a routing problem.** Convergent evidence from three independent vantage points (AS1, AS2, ACM) localized the drop to Uni's own gateway iptables. The interesting subtle finding was the source-IP dependence: AS1-sourced pings to 198.82.0.1 worked, Uni-sourced pings did not — because Uni's iptables OUTPUT chain dropped them before they ever left Uni's box.
+- I am a regional transit ISP with two paying customers (Uni, EveLink) and one settlement-free peer (AS2). No upstream transit provider exists in my view.
+- **Uni** owns 128.173.0.0/16 (gateway 128.173.0.1, internal hosts e.g. 128.173.10.1). Connected on AS1-eth0 via 10.0.1.0/30.
+- **EveLink** owns only 91.214.0.1/32. Connected on AS1-eth2 via 10.0.5.0/30.
+- **AS2** has loopback 154.54.1.1/32 and a customer ACM owning 198.82.0.0/24 (web server 198.82.0.1, gateway 198.82.0.254). Connected on AS1-eth1 via 10.0.2.0/30.
+- End-to-end RTTs from 4.2.2.1: EveLink ~20 ms, Uni ~20 ms (internal host ~24 ms), AS2 ~40 ms, ACM ~74 ms — consistent with ACM sitting behind AS2.
+- The preconfigured default toward AS2 was a policy mismatch with the stated peer relationship; one of the first useful pieces of evidence AS2 itself contributed.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- **Uni:** Initial route exchange and default-route offer; multiple back-and-forth WHY messages including a coordinated tcpdump test that confirmed Uni's own iptables was the culprit. I also clarified an apparent capture inconsistency by noting that my earlier tcpdump caught only AS1-originated diagnostic traffic, not Uni-originated flows — so both observations were consistent.
-- **EveLink:** Standard customer route exchange (loopback 91.214.0.1, default route, mutual install).
-- **AS2:** Initial peering exchange; route correction round-trip; WHY relay (asking AS2 to test from its vantage and to relay WHY further to ACM); closing message. AS2 also relayed ACM's findings (no ACLs, default route working, service healthy) which corroborated my own data.
-- **ACM (via AS2 relay):** Two-hop KP query/response chain. AS2 forwarded my questions to ACM and relayed back ACM's diagnostics. I never spoke directly to ACM — proper use of the relay model since ACM is not a direct neighbor.
-
-No routing daemons were used. All routes were configured exclusively with `ip route add/del`, and all routing information was exchanged via `send_message`, as required.
+- **Uni**: exchanged loopback advertisements; Uni asked me to announce 128.173.0.0/16 covering its campus. I installed it, removed the redundant /32, announced to AS2, and confirmed reachability to it.
+- **EveLink**: exchanged loopback advertisements; EveLink confirmed 91.214.0.1/32 as its only owned prefix and confirmed its default via me is in place. No further changes needed on my side.
+- **AS2** (peer): exchanged loopbacks; AS2 reminded me that as peers it will not be my default/transit. I removed my default. AS2 first advertised 198.82.0.1/32 + 198.82.0.254/32, then sent an aggregate 198.82.0.0/24 — I had already installed the /24, so no change was needed. I in turn announced 4.2.2.1/32 + 128.173.0.0/16 (Uni) + 91.214.0.1/32 (EveLink) to AS2 with explicit peer export policy.
+- No Knowledge Plane WHY/FIX exchanges were needed; all coordination was routine routing exchange and policy alignment.

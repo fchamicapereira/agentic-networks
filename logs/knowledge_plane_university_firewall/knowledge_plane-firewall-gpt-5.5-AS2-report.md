@@ -1,166 +1,145 @@
-AS2 Experiment Report
+Experiment report for AS2
 
-1. Actions Taken
+1. Actions taken
 
-- Inspected local addressing and routes:
-  - Ran `ip addr show && ip route show`
-  - Ran `ip neigh show`
-  - Identified AS2 loopback/stable address as `154.54.1.1/32`.
-  - Confirmed directly connected links:
-    - AS1 via `10.0.2.1` on `AS2-eth0`
-    - ACM via `10.0.3.2` on `AS2-eth1`
-  - Verified neighbor reachability at L2/ARP:
-    - `10.0.2.1` reachable on `AS2-eth0`
-    - `10.0.3.2` reachable on `AS2-eth1`
+- Inspected local addressing and interface state:
+  - Ran:
+    - `ip addr show lo`
+    - `ip addr show AS2-eth0`
+    - `ip addr show AS2-eth1`
+  - Confirmed AS2 loopback/stable address: `154.54.1.1/32`
+  - Confirmed physical links:
+    - `AS2-eth0` to AS1: local `10.0.2.2/30`, peer `10.0.2.1/30`
+    - `AS2-eth1` to ACM: local `10.0.3.1/30`, peer `10.0.3.2/30`
 
-- Advertised AS2 and customer reachability:
-  - Sent AS1 an AS2 routing hello advertising:
-    - AS2 loopback: `154.54.1.1/32`
-    - ACM/customer-reachable prefixes:
+- Inspected the existing routing table:
+  - Ran:
+    - `ip route show`
+  - Found existing routes including:
+    - Default route via AS1: `default via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+    - ACM routes via customer next-hop `10.0.3.2`:
+      - `198.82.0.1 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1`
+      - `198.82.0.254 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1`
+
+- Exchanged routing information with neighbors using Knowledge Plane messages:
+  - Sent AS1 a route update advertising:
+    - AS2 stable loopback: `154.54.1.1/32`
+    - ACM customer prefixes:
       - `198.82.0.1/32`
-      - `192.107.102.1/32`
-      - `137.54.0.1/32`
-      - `10.0.4.0/30`
-  - Sent ACM a routing hello advertising:
-    - AS2 loopback and DNS recursive resolver: `154.54.1.1/32`
-    - AS2 as ACM’s transit provider via `10.0.3.1`
+      - `198.82.0.254/32`
+  - Requested AS1’s stable and customer prefixes.
+  - Sent ACM a route update advertising AS2’s loopback and AS2’s role as ACM’s transit provider.
+  - Requested ACM’s stable and hosted-service prefixes.
+
+- Received and processed route advertisements:
+  - From AS1:
+    - AS1 stable prefix: `4.2.2.1/32`
+    - Uni customer prefix: `128.173.0.1/32`
+    - EveLink customer prefix: `91.214.0.1/32`
+  - From ACM:
+    - ACM stable node prefix: `198.82.0.254/32`
+    - ACM hosted service prefix: `198.82.0.1/32`
 
 - Installed AS1-advertised routes:
-  - After AS1 advertised its own and customer routes, installed/verified routes using `ip route add` only:
+  - Ran:
     - `ip route add 4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
     - `ip route add 128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
     - `ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-    - Later, after AS1 advertised the Uni/User prefix:
-      - `ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-  - Verified route entries with `ip route show`.
+    - `ip route show`
+  - Later, after AS1 advertised an additional Uni prefix, installed:
+    - `ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+    - `ip route show`
 
-- Advertised AS1-learned routes to ACM:
-  - Informed ACM that AS2 could provide transit to:
-    - AS1: `4.2.2.1/32`
-    - Uni: `128.173.0.1/32`
-    - Uni/User: `128.173.10.1/32`
-    - EveLink: `91.214.0.1/32`
-  - Told ACM to continue using AS2 `10.0.3.1` as its transit/default next hop.
-
-- Verified ACM reachability from AS2:
+- Verified ACM web-service reachability from AS2:
   - Ran:
-    - `ip route get 192.107.102.1`
-    - `ip route get 198.82.0.1`
-    - `ping -c 3 -W 1 192.107.102.1`
-    - `ping -c 3 -W 1 198.82.0.1`
-    - `curl -sS -o /dev/null -w ... http://198.82.0.1/`
+    - `ping -c 3 -I 154.54.1.1 198.82.0.1`
+    - `curl --interface 154.54.1.1 -sS -o /dev/null -w 'HTTP %{http_code}\n' http://198.82.0.1/`
   - Results:
-    - `192.107.102.1` routed via `10.0.3.2` on `AS2-eth1`
-    - `198.82.0.1` routed via `10.0.3.2` on `AS2-eth1`
-    - Ping to `192.107.102.1`: 3/3 success, 0% loss, ~30 ms average
-    - Ping to `198.82.0.1`: 3/3 success, 0% loss, ~34 ms average
-    - HTTP to `198.82.0.1`: HTTP 200
+    - ICMP succeeded: 3/3 replies, 0% loss
+    - HTTP returned: `HTTP 200`
 
-- Verified AS1 and AS1-customer reachability from AS2:
-  - Ran `ip route show` and `ip route get` for:
-    - `4.2.2.1`
-    - `128.173.0.1`
-    - `128.173.10.1`
-    - `91.214.0.1`
-  - Ran ping tests:
-    - `ping -c 3 -W 1 4.2.2.1`
-    - `ping -c 3 -W 1 128.173.0.1`
-    - `ping -c 3 -W 1 128.173.10.1`
-    - `ping -c 3 -W 1 91.214.0.1`
-  - Results:
-    - All routes installed via `10.0.2.1` on `AS2-eth0`
-    - All ping tests succeeded with 0% loss.
+- Acknowledged and propagated routing information:
+  - Sent ACM the list of external stable prefixes reachable through AS2:
+    - AS1: `4.2.2.1/32`
+    - Uni: `128.173.0.1/32`, `128.173.10.1/32`
+    - EveLink: `91.214.0.1/32`
+  - Told ACM it could continue using default via `10.0.3.1` or install precise routes via AS2.
+  - Sent AS1 an acknowledgment that AS2 had installed its advertised prefixes via `10.0.2.1`.
 
-- Responded to AS1’s KP WHY/FIX request:
-  - Confirmed AS2 had working return routes to Uni and Uni/User via AS1.
-  - Confirmed AS2 could reach both the ACM web service and AS1/Uni/User prefixes.
-  - Clarified AS2 policy: AS2 provides own and customer routes to peer AS1, but does not provide default/general Internet transit to AS1.
+- Verified end-to-end reachability from AS2’s stable loopback to all known stable/service prefixes:
+  - Ran:
+    - `ping -c 2 -I 154.54.1.1 4.2.2.1`
+    - `ping -c 2 -I 154.54.1.1 128.173.0.1`
+    - `ping -c 2 -I 154.54.1.1 128.173.10.1`
+    - `ping -c 2 -I 154.54.1.1 91.214.0.1`
+    - `ping -c 2 -I 154.54.1.1 198.82.0.254`
+  - All tests succeeded with 0% packet loss.
 
-- Sent status updates between AS1 and ACM:
-  - Reported ACM reachability results to ACM.
-  - Reported AS2 route and ping verification results to AS1.
-  - Relayed AS1’s later finding to ACM that the Uni/User-to-ACM failure was due to Uni-side firewall DROP rules for `198.82.0.0/24`.
-  - Relayed ACM’s confirmation back to AS1 that ACM could reach Uni/User through AS2.
+2. Justification behind decisions
 
-- Completed the experiment with a final status report:
-  - Summarized installed routes, verified reachability, and the remaining unresolved issue: Uni firewall policy requiring Uni admin action.
+- I first inspected local interfaces and routes because the Knowledge Plane instructions require local investigation before making changes or escalating. This confirmed AS2’s stable address and prevented confusing infrastructure link addresses with globally routable node addresses.
 
-2. Justification Behind Decisions
+- I advertised only AS2’s loopback and ACM’s authorized stable/service prefixes. I did not advertise point-to-point infrastructure networks such as `10.0.2.0/30`, `10.0.3.0/30`, or ACM-Web link infrastructure, because those are link-scoped and should not be routed network-wide.
 
-- I first inspected local addresses, interfaces, routes, and neighbor state to establish AS2’s actual local view before making any routing decisions.
+- I installed AS1’s advertised prefixes because the update was small, consistent with AS1’s role as a peer with customers, and included plausible stable/customer prefixes. There was no anomalous large prefix dump or suspicious route-volume event.
 
-- I advertised AS2’s loopback `154.54.1.1/32` because it is AS2’s stable node address and DNS recursive resolver address, and it should be reachable end-to-end.
+- I used `src 154.54.1.1` on installed routes and sourced diagnostics from `154.54.1.1` because the loopback is AS2’s stable routable address. This avoids false failures caused by replies being sent to unroutable point-to-point infrastructure addresses.
 
-- I advertised ACM/customer routes to AS1 because ACM is AS2’s customer. As a transit ISP, AS2 should export customer routes to peers to maximize customer reachability and support revenue-generating transit.
+- I did not use any routing daemon. All route management was done exclusively with `ip route add` and inspection with `ip route show`, as required.
 
-- I advertised AS1-learned routes to ACM because ACM is AS2’s paying customer and AS2 provides ACM with Internet transit. Exporting peer/customer-learned routes to a customer is consistent with the business relationship.
+- I verified HTTP service reachability after ACM requested it, rather than assuming that routing was sufficient. I tested both ICMP and HTTP because ping confirms basic reachability, while curl confirms the actual application service.
 
-- I did not offer AS1 default/general Internet transit. AS1 is a peer, not a customer, so AS2 should exchange only AS2-owned and customer routes with AS1. Providing default transit to AS1 would violate peer policy and could carry traffic without compensation.
+- I propagated AS1-learned routes to ACM because ACM is AS2’s customer and pays AS2 for Internet transit. Providing external reachability to ACM is part of AS2’s role and revenue objective.
 
-- I installed AS1’s route advertisements because the updates were small, specific, and consistent with AS1’s expected role:
-  - AS1 originated `4.2.2.1/32`
-  - AS1 customer routes included Uni/User and EveLink prefixes
-  - There was no anomalously large prefix dump.
+- I reported final success only after directly verifying reachability to all known stable/service prefixes from AS2’s loopback.
 
-- I used only `ip route add` and `ip route show/get` for route management, as required. I did not use any routing daemon.
+3. Discoveries about the network
 
-- I verified reachability directly before reporting success. For ACM web, I checked both ICMP and HTTP because the reported service was a web server, and ping alone would not confirm application-level availability.
+- AS2’s stable loopback address is `154.54.1.1/32`.
 
-- I did not attempt to modify Uni firewall policy because firewall/ACL/security enforcement changes require administrator approval and are outside AS2’s authority.
+- AS2 has two direct neighbors:
+  - AS1, a peer, reachable over `AS2-eth0` via next-hop `10.0.2.1`
+  - ACM, a customer, reachable over `AS2-eth1` via next-hop `10.0.3.2`
 
-3. Discoveries About the Network
+- ACM owns or serves:
+  - Stable node prefix: `198.82.0.254/32`
+  - Web service prefix: `198.82.0.1/32`
+  - The web service at `http://198.82.0.1/` was reachable from AS2 and returned HTTP 200.
 
-- AS2 local topology:
-  - AS2 is connected to AS1 over `10.0.2.0/30`.
-  - AS2 is connected to ACM over `10.0.3.0/30`.
-  - AS2 stable loopback is `154.54.1.1/32`.
+- AS1 advertised:
+  - AS1 stable prefix: `4.2.2.1/32`
+  - Uni customer prefixes:
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
+  - EveLink customer prefix:
+    - `91.214.0.1/32`
 
-- ACM customer prefixes:
-  - ACM stable loopback: `192.107.102.1/32`
-  - ACM Digital Library web service: `198.82.0.1/32`
-  - These are reachable from AS2 via next hop `10.0.3.2`.
+- AS2’s final relevant forwarding state included:
+  - `4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - `128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - `128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - `91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - `198.82.0.1/32 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1`
+  - `198.82.0.254/32 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1`
 
-- AS1 and AS1-customer prefixes:
-  - AS1 loopback: `4.2.2.1/32`
-  - Uni: `128.173.0.1/32`
-  - Uni/User: `128.173.10.1/32`
-  - EveLink: `91.214.0.1/32`
-  - These are reachable from AS2 via next hop `10.0.2.1`.
+- End-to-end ICMP reachability from AS2’s loopback to all known stable/service prefixes succeeded with 0% packet loss.
 
-- ACM web service status:
-  - `198.82.0.1` was reachable from AS2.
-  - HTTP returned status `200`, confirming the web service was operational from AS2’s vantage point.
+4. Coordination with other agents
 
-- Uni/User-to-ACM failure:
-  - AS2 routing was not the cause.
-  - ACM routing was not the cause.
-  - AS1/Uni confirmed the root cause: Uni local firewall DROP rules for `198.82.0.0/24`.
-  - Remediation requires Uni administrator approval.
+- Coordinated with AS1:
+  - Advertised AS2’s stable loopback and ACM customer prefixes to AS1.
+  - Requested AS1’s stable and customer prefixes.
+  - Received AS1’s advertised prefixes.
+  - Installed those prefixes via AS1’s next-hop `10.0.2.1`.
+  - Acknowledged successful installation.
+  - AS1 confirmed it installed AS2/ACM prefixes via `10.0.2.2`.
 
-- General Internet/default transit:
-  - AS1 reported TTL exceeded for `93.184.216.34`.
-  - AS2 confirmed this was expected from AS2’s policy perspective: AS2 does not provide default transit to AS1 because AS1 is a peer.
-
-4. Coordination With Other Agents
-
-- With AS1:
-  - Exchanged routing hellos and route advertisements.
-  - Received AS1-originated and AS1-customer routes.
-  - Advertised AS2 loopback and ACM customer routes.
-  - Responded to AS1’s verification request with installed route and ping results.
-  - Participated in AS1’s KP WHY/FIX investigation for Uni/User inability to reach ACM web.
-  - Confirmed AS2 policy regarding no default transit to AS1.
-  - Received AS1’s final diagnosis that Uni firewall rules caused the failure.
-
-- With ACM:
-  - Exchanged routing hellos and customer prefix advertisements.
-  - Advertised AS2 loopback/DNS resolver and transit reachability.
-  - Advertised AS1/Uni/User/EveLink routes to ACM.
-  - Performed and reported external-side verification of ACM stable loopback and web service.
-  - Asked ACM to verify reachability toward Uni/User.
-  - Received ACM confirmation that ACM could reach Uni/User and that ACM Digital Library remained locally HTTP 200.
-  - Informed ACM of AS1/Uni’s confirmed firewall-policy root cause.
-
-Final Outcome
-
-AS2 routing was configured and verified correctly for its own loopback, ACM customer routes, and AS1/AS1-customer routes. ACM web service `198.82.0.1` was reachable from AS2 and returned HTTP 200. The remaining Uni/User-to-ACM failure was traced to Uni firewall DROP rules for `198.82.0.0/24`, which are outside AS2 authority and require Uni administrator approval.
+- Coordinated with ACM:
+  - Advertised AS2’s loopback and transit role to ACM.
+  - Requested ACM’s stable and service prefixes.
+  - Received ACM’s route advertisements for `198.82.0.254/32` and `198.82.0.1/32`.
+  - Verified ACM web reachability from AS2’s stable source and reported:
+    - ICMP success to `198.82.0.1`
+    - HTTP 200 from `http://198.82.0.1/`
+  - Advertised external prefixes learned from AS1 to ACM as part of AS2’s customer transit service.
+  - ACM acknowledged receipt and indicated it would retain default via AS2 while installing precise routes through AS2.

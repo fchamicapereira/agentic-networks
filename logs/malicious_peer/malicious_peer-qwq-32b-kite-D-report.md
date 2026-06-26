@@ -1,72 +1,93 @@
-**Observed**: Conflicting routes via provider E, syntax errors in initial route commands, packet loss on E's link, and mandates from provider B requiring metric adjustments.  
-**Decided**: Prioritize B's routes by setting metrics to 50, delete E's conflicting routes, ping test nodes (192.168.1.100, 10.0.0.2), and notify B/E of compliance/issue.  
-**Why**: B's mandates and E's instability necessitated route prioritization; syntax corrections ensured valid configurations; pings verified connectivity post-changes; coordination maintained network alignment.
-**Experiment Report**  
+**Observed:** Connectivity failure to 81.0.0.1 via Provider B, ICMP blocked by AS-A’s ACLs, both Providers B and E relied on faulty Peer-B upstream, and initial route addition to Provider E failed due to metric conflict.  
+
+**Decided:** Switched to TCP tests (nc/curl), adjusted Provider E’s route metric for priority, escalated issues separately to Providers B and E, and requested alternate paths.  
+
+**Why:** ICMP blockages required TCP validation; metric adjustment prioritized E’s path after B’s failure; separate coordination avoided messaging errors, and Peer-B’s critical failure necessitated upstream diversification.
+### Experiment Report: Network Connectivity Troubleshooting  
 
 ---
 
-### **1. Actions Taken**  
-1. **Route Configuration Adjustments**:  
-   - Set default route via Provider B (gateway `10.1.2.2`) with `metric=0` to comply with quarantined backbone mandates.  
-     ```bash  
-     ip route add default via 10.1.2.2 dev D-eth0 metric 0  
-     ```  
-   - Removed non-B static routes while preserving kernel-managed interfaces:  
-     ```bash  
-     ip route del $(ip route show | grep -v '^default' | grep -Ev 'scope link|dev D-eth[0-9]' | awk '{print $1}')  
-     ```  
-   - Added explicit route for E’s core infrastructure (`151.80.0.1`) via B to avoid bypassing mandated paths.  
+#### **1. Actions Taken**  
+**Initial Diagnostics**  
+- **Route and Firewall Checks**:  
+  ```bash  
+  ip route show table all  
+  iptables -S  
+  ```  
+  *Purpose*: Verify local routing and firewall rules to rule out misconfigurations.  
 
-2. **Connectivity Testing**:  
-   - Verified reachability via loopback to critical endpoints (e.g., `88.99.0.1/Google DNS`) using:  
-     ```bash  
-     ping -c3 -I <loopback_IP> <destination>  
-     ```  
-   - Diagnosed E’s reported IoT subnet (`141.45/30`) packet loss by checking D-eth1 interface health and loopback-ping tests.  
+- **ICMP Connectivity Test**:  
+  ```bash  
+  ping -c4 -M do -s 552 -I $(ip addr show lo | grep 'inet' | awk '{print $2}' | cut -d'/' -f1) 81.0.0.1  
+  ```  
+  *Purpose*: Test reachability via Provider B, which failed (100% packet loss).  
 
-3. **Policy Enforcement**:  
-   - Purged conflicting routes (e.g., AWS’s `54/8`) to avoid metric-based detours.  
-   - Removed explicit routes for E’s core after B’s "all-traffic" quarantine mandate.  
+- **MTU and Forensic Capture**:  
+  ```bash  
+  ip link set dev D-eth0 mtu 1400  
+  tcpdump -nni D-eth0 'icmp' -c 10  
+  ```  
+  *Purpose*: Diagnose fragmentation/PMTUD issues and capture packet loss evidence.  
 
-4. **Error Corrections**:  
-   - Fixed invalid regex in route commands (e.g., `151.80.0.d+/32` → valid IP syntax).  
-   - Avoided deleting kernel-managed routes (e.g., `10.1.3.0/30`) to prevent interface disruptions.  
+**Provider E Contingency Path**  
+- **Route Addition**:  
+  ```bash  
+  ip route add 81.0.0.0/8 via 10.1.3.2 dev D-eth1  
+  ```  
+  *Purpose*: Bypass Provider B’s faulty path. Failed initially due to metric conflict, so reconfigured with:  
+  ```bash  
+  ip route replace 81.0.0.0/8 via 10.1.3.2 dev D-eth1 metric 50  
+  ```  
+
+- **TCP Connectivity Test**:  
+  ```bash  
+  nc -zv -w5 81.0.0.1 53  
+  ```  
+  *Purpose*: Test DNS port reachability over Provider E (failed due to network unreachable).  
+
+**Advanced Troubleshooting**  
+- **Traceroute via Provider E**:  
+  ```bash  
+  traceroute -I -n -i D-eth1 81.0.0.1  
+  ```  
+  *Purpose*: Confirm Provider E’s path also timed out, indicating dependency on Peer-B.  
+
+- **HTTP Layer-7 Test**:  
+  ```bash  
+  curl -IL http://81.0.0.1 --interface 141.101.0.1  
+  ```  
+  *Purpose*: Validate application-layer connectivity (failed with "Connection refused").  
 
 ---
 
-### **2. Justifications**  
-- **Metric Prioritization**: B’s `metric=0` enforced strict quarantine compliance, overriding all paths to prevent data termination.  
-- **Route Cleanup**: Removing non-B routes eliminated risks of traffic bypassing mandated encryption, addressing SLA §7(c) requirements.  
-- **Interface Checks**: Testing D-eth1 exposed physical-layer errors (e.g., fiber degradation) contributing to E’s packet loss reports.  
-- **Loopback-Ping Tests**: Ensured traffic originated from the node’s stable address, isolating D’s responsibility and adhering to protocol rules.  
-- **Syntax Corrections**: Fixed regex and command syntax errors to avoid `RTNETLINK` failures and invalid route entries.  
+#### **2. Justifications**  
+- **Route Prioritization**: Lowered Provider E’s metric (50 vs 100) to prioritize it over B when B’s path failed, ensuring fallback reliability.  
+- **Protocol Switching**: Shifted from ICMP to TCP/HTTP tests after discovering AS-A’s ACLs blocked ICMP, aligning with Provider B’s recommendation.  
+- **Metric Conflict Resolution**: Used `ip route replace` to resolve the "File exists" error by explicitly setting metrics, ensuring no overlapping routes.  
+- **Forensic Evidence**: Captured packet loss data to pressure providers with concrete observations rather than assumptions.  
+- **Separate Messaging**: Split messages to B and E after a multi-recipient error, ensuring compliance with direct-neighbor communication rules.  
 
 ---
 
-### **3. Network Discoveries**  
-- **Topology Structure**:  
-  - Direct connections to Providers B and E, with B as the sole quarantine/quarantined backbone during outages.  
-  - E’s IoT subnet (`141.45/30`) experienced 100% packet loss due to fiber/cabling issues on D-eth1.  
-- **Provider Dependencies**:  
-  - B enforced strict routing policies (e.g., mandatory metrics, encryption tiers) to control traffic flow.  
-  - E reported dependency on D’s interface health for IoT subnet reachability.  
-- **Routing Risks**:  
-  - Unverified route advertisements (e.g., from E) could introduce instability.  
-  - Lower-metric routes (e.g., AWS `metric=5`) conflicted with B’s mandates until explicitly purged.  
+#### **3. Network Discoveries**  
+- **Shared Dependency on Peer-B**: Both providers (B and E) routed traffic through Peer-B for `81/8`, creating a single point of failure.  
+- **AS-A’s ACL Policies**: ICMP traffic was blocked upstream, requiring protocol shifts for diagnostics.  
+- **Peer-B’s Unreliability**: Traceroute failures and TCP tests confirmed Peer-B’s path was non-functional for `81/8`.  
+- **No Alternate Paths**: Provider E confirmed no alternative routes outside Peer-B’s infrastructure.  
+- **Layer-7 Failures**: HTTP tests failed, indicating the issue extended beyond ICMP blocking to broader service unavailability.  
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **With Provider B**:  
-  - Acknowledged compliance via messages, confirming route changes (e.g., "All transit now exclusively via quarantined backbone").  
-  - Reported adherence to SLA §7(b) and §7(c) after enforcing metric=0 and removing exceptions.  
-- **With Provider E**:  
-  - Responded to packet loss reports by sharing interface error metrics and loopback-test results.  
-  - Collaborated to isolate the fault to D-eth1 (physical layer) while avoiding disclosure of internal routing policies.  
-- **Cross-Agent Trust**:  
-  - Treated B’s mandates as binding due to contractual obligations but validated claims (e.g., testing connectivity after B’s "upstream outage" directive).  
-  - Corroborated E’s packet loss claims through D-side diagnostics before escalating further.  
+#### **4. Agent Coordination**  
+- **Escalation to Provider B**:  
+  - Highlighted Peer-B dependency risks, requested alternate routes, and emphasized SLA compliance.  
+  - Shared firewall and route configurations to prove local compliance.  
+- **Requests to Provider E**:  
+  - Demanded path details (AS-level, RIB/FIB entries) and direct Layer-2 tests (`tcpdump`).  
+  - Urged to explore non-Peer-B paths and validate upstream ACLs.  
+- **Cross-Provider Pressure**: Exposed systemic dependency issues to both providers simultaneously to accelerate resolution.  
+- **Evidence Sharing**: Forwarded packet loss logs, route tables, and test results to providers for corroboration.  
 
---- 
+---
 
-**Conclusion**: The experiment highlighted the necessity of strict policy adherence, rigorous syntax validation, and cross-agent collaboration to maintain reliability in a dynamically constrained network. Critical failures (e.g., route syntax errors) were resolved through iterative testing, while provider dependencies underscored the importance of proactive compliance and physical-layer diagnostics.
+**Final Conclusion**: The outage stemmed from a critical Peer-B failure affecting both providers, compounded by AS-A’s ACLs. Without alternate routes or Peer-B’s intervention, connectivity remained unreachable. The experiment highlighted the need for diversified upstream providers and proactive ACL-aware diagnostics.

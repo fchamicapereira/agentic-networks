@@ -1,37 +1,53 @@
 # Web Node Experiment Report
 
+## Role
+I am the HTTP server host for the ACM Digital Library, with my server bound to my loopback address (the public acm.org address). My only neighbor is ACM, which is also my organizational peer.
+
 ## 1. Actions Taken
 
-1. **Initial inspection** — Ran `ip addr show lo`, `ip route show`, and `ip addr show` to discover my pre-assigned addresses, interfaces, and existing routing state.
-2. **Connectivity check to neighbor** — Ran `ping -c 2 10.0.4.1` to verify the link to ACM.
-3. **Routing advertisement to ACM** — Sent a message to ACM declaring my two loopback addresses (137.54.0.1/32 and 198.82.0.1/32, the public acm.org address) and confirming ACM as my default gateway.
-4. **End-to-end verification** — After ACM confirmed routing, ran `ping -c 2 192.107.102.1` to verify the return path to ACM's loopback worked.
-5. **Reported done** with a summary of confirmed state.
+**Step 1 — Local discovery:**
+- `ip addr show lo` → identified my loopback as 198.82.0.1/32.
+- `ip route show` → confirmed pre-existing routing: a default route via 10.0.4.1 (ACM) with src 198.82.0.1, plus the connected /30 link 10.0.4.0/30 on Web-eth0.
 
-No `ip route add/del` commands were issued — the default route via 10.0.4.1 was already pre-installed and was sufficient.
+**Step 2 — Identity advertisement to ACM:**
+Sent a message to ACM informing it that my loopback/server address is 198.82.0.1/32, reachable via our P2P link (me 10.0.4.2, peer 10.0.4.1), and asked it to advertise the prefix network-wide.
 
-## 2. Justification
+**Step 3 — Local verification:**
+- `ping -c 3 -I 198.82.0.1 198.82.0.254` → 0% loss, ~4 ms RTT. Confirmed the link to ACM is healthy when sourcing from my loopback (correct practice — sourcing from link addresses can yield misleading reply failures).
 
-- **Inspect first**: I knew almost nothing about my own state, so checking addresses and existing routes was the necessary first step before making any changes.
-- **Ping the neighbor**: Before relying on ACM for upstream routing or sending coordination messages, I needed to confirm the L3 link was actually working.
-- **Tell ACM about my loopbacks**: ACM is my only neighbor and the only entity that can advertise my prefixes outward. Without coordination, the rest of the network cannot reach 198.82.0.1 (acm.org). Since ACM is in the same organization, sharing this information openly is appropriate.
-- **No unilateral route additions**: A working default route via my only upstream covers all non-local destinations. Adding more specific routes would have been redundant and potentially harmful.
-- **End-to-end ping**: A ping to ACM's loopback (not just the directly-connected link IP) tests that the default route, ACM's forwarding, and ACM's return path all function — directly confirming the symptom-level property I care about.
+**Step 4 — Status check-in:**
+After a wait period with no update, sent ACM a follow-up asking about AS2 acknowledgment and end-to-end reachability.
+
+**Step 5 — Completion:**
+Once ACM confirmed external propagation and successful HTTP GET, I reported success.
+
+## 2. Justifications
+
+- **No routing changes installed locally:** The default route via ACM was already correct and sufficient. As a stub host with a single neighbor, there is no reason to install additional routes; everything non-local goes through ACM.
+- **Source from loopback, not link IP:** Per the operational guidance, link addresses are not advertised network-wide. Sourcing diagnostics from 198.82.0.1 ensures replies can route back, avoiding false failure signals.
+- **Verified locally before escalating:** Per KP discipline, I confirmed link health with a ping to ACM's loopback before relying on ACM's external reachability claims.
+- **Deferred to ACM for upstream advertisement:** Advertising prefixes upstream to AS2 is ACM's responsibility (it owns the eBGP relationship). I only shared the information ACM needed.
+- **No security/ACL changes:** None were required, and such changes would have required admin approval anyway.
 
 ## 3. Network Discoveries
 
-- My physical topology: a single point-to-point link Web-eth0 (10.0.4.2/30) ↔ ACM (10.0.4.1/30).
-- My loopback carries two globally significant addresses: **137.54.0.1/32** (my stable node identity) and **198.82.0.1/32** (the public-facing acm.org service address).
-- A default route via 10.0.4.1 was pre-installed with source 137.54.0.1.
-- ACM's loopback is **192.107.102.1/32**, and ACM peers upward with **AS2**.
-- External path to acm.org: **AS2 → ACM → Web**. ACM advertises both of my loopback /32s plus its own loopback to AS2.
-- RTT to ACM is ~4 ms with 0% loss — link is healthy.
+- **My identity:** 198.82.0.1/32 on loopback (the public-facing acm.org address).
+- **Topology (local view):** Single uplink to ACM over 10.0.4.0/30; ACM's loopback is 198.82.0.254.
+- **Topology (learned from ACM):** Our /24 (198.82.0.0/24) is advertised by ACM to AS2 at 10.0.3.2. AS2 propagates it to its peers/transit. End-to-end paths exist to:
+  - AS2 loopback 154.54.1.1
+  - AS1 (4.2.2.1) — TTL 63 from ACM
+  - Uni (128.173.0.1) — TTL 62 from ACM
+- **Service health:** HTTP GET http://198.82.0.1/ returns 200 OK in ~9 ms from ACM, confirming the Digital Library is operational and externally reachable.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-Only one neighbor exists (ACM), and all coordination was with it:
+All coordination was with **ACM** (my only neighbor and same organization):
+1. **Initial notification:** Advertised my loopback 198.82.0.1/32 and asked ACM to advertise the covering /24 upstream.
+2. **ACK from ACM:** ACM confirmed link health (ping to 198.82.0.1 succeeded), installed a /32 route via 10.0.4.2, and began advertising 198.82.0.0/24 to AS2.
+3. **Status check-in:** I followed up to confirm AS2 had accepted the route and end-to-end reachability worked.
+4. **Final confirmation from ACM:** AS2 installed the prefix via 10.0.3.2, external pings to AS1/Uni succeeded, and an HTTP GET to my server returned 200 OK.
 
-- **I → ACM**: Announced my loopbacks 137.54.0.1/32 and 198.82.0.1/32, confirmed I treat 10.0.4.1 as default gateway, asked it to propagate the prefixes and to share any routing info I should know.
-- **ACM → me**: Confirmed both /32s were installed via 10.0.4.2, that it advertises them to upstream AS2 along with its own loopback 192.107.102.1/32, and that pings to 198.82.0.1 from its vantage point succeed. Instructed me to keep 10.0.4.1 as default gateway for everything outside 10.0.4.0/30 — which matched my existing config, so no changes were required.
+No coordination with non-adjacent agents was required; ACM handled all inter-AS signaling, which is appropriate since I cannot directly reach non-neighbors and ACM owns the external BGP relationship.
 
-No relay requests for other agents were received or issued during the experiment.
+## Outcome
+The ACM Digital Library at 198.82.0.1 is fully reachable from the Internet via ACM → AS2. No routing or configuration changes were needed on my side beyond the pre-existing default route; the experiment validated that local config, link health, and upstream advertisement are all correct.

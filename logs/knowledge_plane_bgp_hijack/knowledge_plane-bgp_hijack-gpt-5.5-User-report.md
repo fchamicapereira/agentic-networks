@@ -1,156 +1,164 @@
-Experiment report
+Experiment report: acm.org access failure investigation
 
 1. Actions taken
 
-- Inspected local addressing and routing:
+- Checked local addressing and routing:
   - Ran:
     - `ip addr show lo`
     - `ip addr show User-eth0`
     - `ip route show`
-  - Found:
+  - Observed:
     - Stable loopback address: `128.173.10.1/32`
-    - Direct link to Uni:
-      - User: `10.0.6.1/30`
-      - Uni: `10.0.6.2/30`
-    - Default route:
+    - Point-to-point link to Uni: `10.0.6.1/30`, peer `10.0.6.2`
+    - Default route already present:
       - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+    - Connected route:
+      - `10.0.6.0/30 dev User-eth0 proto kernel scope link src 10.0.6.1`
 
-- Reproduced the user’s reported acm.org failure:
+- Tested DNS resolution for the reported site:
   - Ran:
-    - `getent hosts acm.org`
-    - `ping -c 3 -W 1 acm.org`
-    - `curl -I --max-time 8 http://acm.org/`
-    - `curl -I --max-time 8 https://acm.org/`
-  - Observed:
+    - `getent ahosts acm.org || true`
+  - Result:
     - `acm.org` resolved to `198.82.0.1`
-    - ICMP ping succeeded with 0% loss
-    - TCP connection to port 80 failed with `Connection refused`
-    - TCP connection to port 443 failed with `Connection refused`
 
-- Contacted Uni, the local Knowledge Plane contact:
-  - Sent Uni a technical report containing:
-    - Owner’s original symptom
-    - DNS result
-    - ICMP success
-    - HTTP/HTTPS connection-refused failures
-    - Local interface and routing state
+- Tested IP reachability using the stable loopback as source:
+  - Ran:
+    - `ping -c 3 -I 128.173.10.1 198.82.0.1`
+  - Result:
+    - 3/3 replies received, approximately 44 ms RTT
 
-- Processed a routing update from Uni:
-  - Uni advertised its stable loopback:
-    - `128.173.0.1/32 reachable via 10.0.6.2`
-  - Installed the explicit route:
-    - `ip route add 128.173.0.1/32 via 10.0.6.2`
-  - Advertised my local originated prefix back to Uni:
-    - `128.173.10.1/32 reachable via 10.0.6.1`
-  - Stated that User originates only `128.173.10.1/32`.
+- Tested web access over HTTP and HTTPS using the stable loopback as source:
+  - Ran:
+    - `curl -4 -v --connect-timeout 5 --max-time 15 --interface 128.173.10.1 http://acm.org/ -o /tmp/acm_http.out`
+    - `curl -4 -v --connect-timeout 5 --max-time 15 --interface 128.173.10.1 https://acm.org/ -o /tmp/acm_https.out`
+  - Initial result:
+    - TCP connection to `198.82.0.1:80` failed with `Connection refused`
+    - TCP connection to `198.82.0.1:443` failed with `Connection refused`
+    - This occurred despite successful ICMP reachability
 
-- Performed Knowledge Plane-requested verification tests:
-  - Ran exactly:
-    - `ping -c 3 198.82.0.1`
-    - `curl -v --connect-timeout 5 http://acm.org/`
-    - `curl -vk --connect-timeout 5 https://acm.org/`
-  - Observed:
-    - Ping succeeded 3/3 to `198.82.0.1`
-    - HTTP connected to `198.82.0.1:80` and returned `HTTP/1.1 200 OK`
-    - HTTPS connected to `198.82.0.1:443`, completed TLS, and returned `HTTP/1.1 200 OK`
-    - The returned page was an ACM Digital Library HTML page
+- Reported objective findings to Uni, my local Knowledge Plane contact:
+  - Sent Uni a message describing:
+    - User report: browser failed to load `acm.org`
+    - DNS result: `acm.org -> 198.82.0.1`
+    - Ping success from `128.173.10.1`
+    - HTTP and HTTPS TCP connection refusals from `128.173.10.1`
+  - Asked Uni/KP to investigate why web service was refusing connections despite IP reachability.
 
-- Reported verification results back to Uni:
-  - Sent the successful ping, HTTP, and HTTPS results.
-  - Asked for a final diagnosis because the original connection-refused behavior had disappeared.
+- Re-ran tests when requested by Uni/KP:
+  - Ran:
+    - `getent ahosts acm.org || true`
+    - `curl -v --interface 128.173.10.1 --connect-timeout 5 --max-time 15 http://acm.org/ -o /dev/null`
+    - `curl -vk --interface 128.173.10.1 --connect-timeout 5 --max-time 15 https://acm.org/ -o /dev/null`
+  - Updated result:
+    - DNS still resolved to `198.82.0.1`
+    - HTTP connected successfully and returned:
+      - `HTTP/1.1 200 OK`
+      - Server: `nginx/1.18.0`
+      - Content-Length: `2152`
+    - HTTPS connected successfully, completed TLSv1.3, and returned:
+      - `HTTP/1.1 200 OK`
+      - Server: `nginx/1.18.0`
+      - Content-Length: `2152`
+    - HTTPS certificate verification warning was ignored because the test used `-k`; the service itself was reachable.
 
-- Received final Knowledge Plane diagnosis from Uni:
-  - KP marked the issue `FIX/RESOLVED`.
-  - Uni confirmed that both HTTP and HTTPS also worked from Uni.
-  - KP stated that Uni had installed/confirmed routes advertised by AS1 for Internet/ACM reachability and advertised Uni/User stable prefixes upstream.
-  - AS1 accepted and installed `128.173.10.1/32` via Uni.
-  - No firewall or NAT policy change was made.
+- Sent the updated successful test results back to Uni/KP.
 
-- Reported the resolution to the owner:
-  - Explained that acm.org was now reachable.
-  - Explained that the likely cause was transient or incomplete routing/control-plane state, not a campus firewall block and not an ACM web service outage.
+- Waited for final KP diagnosis, then followed up with Uni asking whether the incident was fixed, transient, or required more tests.
 
-- Received a later KP follow-up:
-  - Uni reported that AS1 had confirmed ACM KP validated `198.82.0.1/32` as ACM-originated and authorized via AS2, not via EveLink.
-  - This did not change the outcome, but clarified that AS1 was maintaining ACM reachability through AS2 as the authorized path.
+- Reported completion after Uni/KP gave final status.
 
-2. Justification behind each decision
+2. Justification behind decisions
 
-- I first inspected local addressing and routing to establish the User node’s stable identity, directly connected neighbor, and default path before making any network changes.
+- I first inspected loopback and routing because the testbed instructions state that the loopback address is the stable address remote nodes can route back to. Using the physical link address for remote diagnostics could have caused misleading failures.
 
-- I reproduced the user’s browser complaint using objective network tests rather than relying only on the non-technical report. DNS, ICMP, and HTTP(S) tests helped distinguish between name resolution, reachability, and application-layer service failures.
+- I sourced remote tests from `128.173.10.1` because it is the laptop’s stable loopback address and the default route was configured with `src 128.173.10.1`.
 
-- I contacted Uni because the laptop is not part of the Knowledge Plane and Uni is the designated local KP contact. The report included my observations rather than simply forwarding the user’s wording, so the KP had useful diagnostic data.
+- I tested DNS separately from connectivity to distinguish name-resolution problems from transport or service failures.
 
-- I installed the route to Uni’s stable loopback because Uni explicitly advertised `128.173.0.1/32` as reachable via the directly connected peer address `10.0.6.2`. This gave me explicit reachability to Uni’s stable address.
+- I used ping to `198.82.0.1` to determine whether basic IP forwarding and return routing were working. Since ping succeeded, the failure was unlikely to be a complete routing outage.
 
-- I advertised my own stable loopback, `128.173.10.1/32`, because the instructions required advertising local stable node addresses to neighbors so nodes can reach each other end-to-end.
+- I tested both HTTP and HTTPS because a browser may use either, and the owner’s description did not specify the protocol. Both ports initially refused TCP connections, which pointed toward a service-side refusal rather than a DNS or general IP reachability problem.
 
-- I waited for the KP rather than making speculative firewall or routing changes, because the problem appeared to involve paths beyond my directly connected neighbor and the Knowledge Plane was responsible for investigating the wider network.
+- I contacted Uni/KP instead of trying to infer global topology myself because this node is a personal laptop, not a KP node, and Uni is the designated local Knowledge Plane contact.
 
-- I ran the exact verification commands requested by Uni because the KP needed comparable, current measurements from the User node.
-
-- I requested a final diagnosis after the retest succeeded because the symptom changed from “connection refused” to “HTTP 200 OK,” and I wanted to avoid reporting an incomplete or unsupported conclusion to the owner.
-
-- I did not install any large or suspicious route set. The only route I added was the single Uni loopback prefix. No anomalous bulk prefix advertisement was received from Uni.
-
-3. What I discovered about the network
-
-- The User node’s stable loopback is `128.173.10.1/32`.
-
-- User is directly connected only to Uni:
-  - User interface: `User-eth0`
-  - User address: `10.0.6.1/30`
-  - Uni peer address: `10.0.6.2/30`
-
-- The User node’s default route initially pointed through Uni:
+- I did not configure or change any routes. The default route through Uni already existed and matched the advertised upstream role:
   - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+  No additional route was necessary to reproduce or diagnose the problem.
 
-- Uni’s stable loopback is `128.173.0.1/32`, reachable via `10.0.6.2`.
+- I did not use any routing daemon. All route inspection was done with `ip route show`, and no route management was needed.
 
-- `acm.org` resolved to `198.82.0.1`.
+- I waited for Uni/KP’s diagnosis before reporting back because the problem involved non-local service behavior and the KP could investigate across the network.
 
-- At the start of the experiment:
-  - `198.82.0.1` was reachable by ICMP.
-  - TCP connections to ports 80 and 443 were refused.
-  - This indicated the problem was not a simple DNS failure or total IP reachability failure.
+3. Discoveries about the network
 
-- After routing/control-plane updates between Uni and AS1:
-  - HTTP and HTTPS to acm.org both succeeded.
-  - Both returned `HTTP/1.1 200 OK`.
-  - The page content loaded correctly.
+- User node stable loopback:
+  - `128.173.10.1/32`
 
-- The KP determined that:
-  - The issue was most plausibly transient or incomplete routing/control-plane state between Uni/AS1 and the ACM path.
-  - There was no evidence of a current campus firewall block.
-  - There was no confirmed ACM web-service outage at verification time.
-  - Uni forwarding, FORWARD policy, and NAT were already correctly configured.
-  - No firewall or NAT security-policy changes were needed.
+- User-to-Uni link:
+  - User: `10.0.6.1/30`
+  - Uni: `10.0.6.2/30`
 
-- A later upstream clarification stated that:
-  - `198.82.0.1/32` was validated as ACM-originated.
-  - The authorized path was through AS2.
-  - AS1 was maintaining ACM reachability through AS2, not EveLink.
+- Default forwarding path:
+  - User sends non-local traffic to Uni via:
+    - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+
+- Uni advertised itself as campus gateway/upstream and confirmed it had a route back to User’s stable address:
+  - Uni loopback: `128.173.0.1/32`
+  - Uni route to User: `128.173.10.1 via 10.0.6.1`
+
+- `acm.org` resolved to:
+  - `198.82.0.1`
+
+- During the initial failure:
+  - ICMP to `198.82.0.1` worked.
+  - TCP connections to `198.82.0.1:80` and `198.82.0.1:443` were refused.
+  - This indicated that routing and basic reachability were present, but the web service or a service-side policy was refusing connections.
+
+- Later verification showed:
+  - HTTP and HTTPS both returned `HTTP/1.1 200 OK`
+  - Server identified as `nginx/1.18.0`
+  - The condition was no longer reproducible.
+
+- Uni/KP found:
+  - Uni routing/default transit and forwarding were healthy.
+  - No Uni-side routing or firewall outage was found.
+  - Uni did not apply a fix.
+
+- ACM later confirmed through the KP path:
+  - ACM’s service on `198.82.0.1:80` and `:443` was healthy.
+  - ACM boundary routing was correct.
+  - Forwarding was enabled.
+  - Packet filters had ACCEPT policy and no block/refusal rule was found.
+  - ACM made no boundary routing/firewall fix.
+
+- Final conclusion:
+  - The incident was transient.
+  - Current status is resolved/no current fault.
+  - Root cause could not be confirmed.
+  - The earlier connection-refused behavior was most consistent with a temporary remote web-service or service-side condition, but ACM could not provide a confirmed postmortem.
 
 4. Coordination with other agents
 
-- Coordinated directly with Uni, my only directly connected neighbor and local Knowledge Plane contact.
+- Coordinated directly with Uni, the only directly connected neighbor and local Knowledge Plane contact.
 
-- Sent Uni the initial technical failure report with:
-  - Local stable address `128.173.10.1`
-  - DNS resolution result for acm.org
-  - Successful ICMP results
-  - HTTP/HTTPS connection-refused errors
-  - Local routing/interface state
+- Received route advertisement from Uni:
+  - Uni stable loopback `128.173.0.1/32`
+  - Uni reachable via link peer `10.0.6.2`
+  - Uni is campus gateway/upstream
+  - Uni has route back to User stable address `128.173.10.1`
 
-- Received a route update from Uni and responded by:
-  - Installing `128.173.0.1/32 via 10.0.6.2`
-  - Advertising `128.173.10.1/32 via 10.0.6.1`
+- Sent Uni the initial diagnostic report with objective test results instead of relaying the human’s browser complaint directly.
 
-- Received and executed Uni’s KP verification request using the specified ping and curl commands.
+- Uni/KP requested immediate re-testing from source `128.173.10.1`, specifying DNS, HTTP, and HTTPS curl commands.
 
-- Reported the exact verification results back to Uni.
+- I ran the requested tests and reported exact results back to Uni.
 
-- Received Uni’s final KP diagnosis and later follow-up about authorized ACM reachability through AS2.
+- Uni/KP investigated beyond the local link, including Uni-side checks and coordination with ACM via AS1/AS2.
 
-- No direct communication with AS1, AS2, ACM KP, or EveLink occurred from User. All wider-network coordination was handled through Uni and the Knowledge Plane.
+- Uni/KP provided final diagnosis:
+  - Service restored.
+  - No local/User-side or Uni-side fix required.
+  - ACM-side boundary routing/firewall did not explain the earlier refusal.
+  - Root cause remains unconfirmed.
+
+- After receiving the KP final status, I reported the incident as resolved and completed the task.

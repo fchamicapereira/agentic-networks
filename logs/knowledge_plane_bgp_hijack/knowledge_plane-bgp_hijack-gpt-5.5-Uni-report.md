@@ -1,182 +1,183 @@
-Experiment report for Uni gateway router
+Experiment Report — Uni Node
 
 1. Actions taken
 
-- Inspected Uni’s local addressing and routing state:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show`
-    - `ip route show`
-    - `sysctl net.ipv4.ip_forward`
-  - Found Uni’s stable loopback address: `128.173.0.1/32`.
-  - Confirmed directly connected interfaces:
-    - `Uni-eth0`: `10.0.6.2/30` toward User at `10.0.6.1`
-    - `Uni-eth1`: `10.0.1.1/30` toward AS1 at `10.0.1.2`
-  - Confirmed IPv4 forwarding was enabled:
-    - `net.ipv4.ip_forward = 1`
-  - Observed existing default route:
+- Inspected Uni’s local state:
+  - Ran `ip addr show lo`, `ip addr show`, and `ip route show`.
+  - Confirmed Uni’s stable loopback address is `128.173.0.1/32`.
+  - Confirmed physical interfaces:
+    - `Uni-eth0` to User: `10.0.6.2/30`, peer `10.0.6.1/30`
+    - `Uni-eth1` to AS1: `10.0.1.1/30`, peer `10.0.1.2/30`
+  - Confirmed routing table included:
     - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Observed existing route to User stable loopback:
     - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
+  - Ran `sysctl net.ipv4.ip_forward` and confirmed forwarding was enabled: `net.ipv4.ip_forward = 1`.
 
-- Advertised Uni’s stable loopback to neighbors and requested route information:
-  - Sent AS1 a route update advertising `128.173.0.1/32`.
-  - Sent User a route update advertising `128.173.0.1/32`.
-  - Requested prefixes originated or carried by AS1 and User.
+- Advertised Uni’s stable loopback address to neighbors:
+  - Sent AS1 a route advertisement for `128.173.0.1/32`.
+  - Sent User a route advertisement for `128.173.0.1/32` and indicated Uni should be used as the upstream/default gateway.
 
-- Verified direct connectivity:
-  - Ran:
-    - `ping -c 2 10.0.1.2`
-    - `ping -c 2 10.0.6.1`
-    - `ping -c 2 128.173.10.1`
-  - Confirmed reachability to AS1 link IP, User link IP, and User stable loopback.
+- Verified basic reachability:
+  - Ran `ping -c 3 -I 128.173.0.1 4.2.2.1` to AS1’s loopback.
+  - Ran `ping -c 3 -I 128.173.0.1 128.173.10.1` to User’s loopback.
+  - Both succeeded with 0% packet loss.
 
-- Processed AS1’s route advertisement:
-  - AS1 advertised stable loopback `4.2.2.1/32` and later a small set of reachable Internet/customer prefixes:
-    - `91.214.0.1/32`
-    - `154.54.1.1/32`
-    - `198.82.0.1/32`
-    - `137.54.0.1/32`
-    - `192.107.102.1/32`
-    - `10.0.4.0/30`
-  - Installed the AS1 loopback route:
-    - `ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Installed the small AS1-advertised route set:
-    - `ip route add 91.214.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 154.54.1.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 198.82.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 137.54.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 192.107.102.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 10.0.4.0/30 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Confirmed the routing table afterward with `ip route show`.
-
-- Advertised Uni and User prefixes upstream:
-  - Sent AS1:
-    - Uni-originated prefix: `128.173.0.1/32`, AS-path `Uni`
-    - User/customer prefix: `128.173.10.1/32`, AS-path `Uni User`
-  - AS1 later confirmed it accepted and installed `128.173.10.1/32` via Uni.
-
-- Investigated User’s KP report about acm.org:
+- Investigated User’s acm.org web failure:
   - User reported:
-    - DNS resolved `acm.org` to `198.82.0.1`
-    - ICMP succeeded
-    - TCP connections to ports 80 and 443 were refused
-  - From Uni, checked route selection and reachability:
-    - `ip route get 198.82.0.1`
-    - `ping -c 3 198.82.0.1`
-  - ICMP to `198.82.0.1` succeeded.
-  - Initial `curl -I http://acm.org/` failed locally because Uni could not resolve `acm.org`, so I tested directly against the IP and with explicit Host/SNI behavior.
-  - Ran HTTP and HTTPS tests:
-    - `curl -I -v --connect-timeout 5 http://198.82.0.1/`
-    - `curl -I -vk --connect-timeout 5 https://198.82.0.1/`
-    - `curl -I -v --connect-timeout 5 -H 'Host: acm.org' http://198.82.0.1/`
-    - `curl -I -vk --connect-timeout 5 --resolve acm.org:443:198.82.0.1 https://acm.org/`
-  - These showed TCP connectivity was working from Uni, though `HEAD` returned `501 Unsupported method`.
-  - Then tested browser-like `GET` requests:
-    - `curl -v --connect-timeout 5 --max-time 10 http://198.82.0.1/`
-    - `curl -vk --connect-timeout 5 --max-time 10 --resolve acm.org:443:198.82.0.1 https://acm.org/`
-  - Both returned `HTTP/1.1 200 OK` with the ACM Digital Library page.
+    - `getent ahosts acm.org` resolved to `198.82.0.1`.
+    - ICMP to `198.82.0.1` succeeded from `128.173.10.1`.
+    - HTTP and HTTPS to `198.82.0.1` failed with “Connection refused.”
+  - Locally reproduced diagnostics from Uni:
+    - Ran `getent ahosts acm.org`.
+    - Ran `ip route get 198.82.0.1 from 128.173.0.1`.
+    - Ran `ping -c 3 -I 128.173.0.1 198.82.0.1`.
+    - Ran:
+      - `curl --interface 128.173.0.1 -v --connect-timeout 5 http://acm.org/ -o /dev/null`
+      - `curl --interface 128.173.0.1 -vk --connect-timeout 5 https://acm.org/ -o /dev/null`
+  - Uni’s tests showed DNS resolution, ICMP reachability, and HTTP/HTTPS all succeeded with `HTTP/1.1 200 OK`.
 
-- Inspected local firewall and NAT state without changing it:
+- Audited Uni firewall/NAT state:
   - Ran:
     - `iptables -S`
     - `iptables -t nat -S`
-  - Found:
-    - `INPUT`, `FORWARD`, and `OUTPUT` policies were `ACCEPT`
-    - NAT was already configured with:
-      - `-A POSTROUTING -o Uni-eth1 -j MASQUERADE`
-  - Made no firewall or NAT changes.
+    - `nft list ruleset`
+  - Found default ACCEPT policies and one NAT rule:
+    - `-A POSTROUTING -o Uni-eth1 -j MASQUERADE`
+  - Ran `iptables -t nat -L POSTROUTING -v -n --line-numbers` to inspect NAT counters.
+  - Also tested HTTP/HTTPS to acm.org while sourcing from Uni’s upstream link address:
+    - `curl --interface 10.0.1.1 ... http://acm.org/`
+    - `curl --interface 10.0.1.1 ... https://acm.org/`
+  - Those also returned `HTTP/1.1 200 OK`.
 
-- Requested User-side verification:
-  - Asked User to retest:
-    - `ping -c 3 198.82.0.1`
-    - `curl -v --connect-timeout 5 http://acm.org/`
-    - `curl -vk --connect-timeout 5 https://acm.org/`
-  - User reported:
-    - ICMP succeeded
-    - HTTP connected to `198.82.0.1:80` and returned `HTTP/1.1 200 OK`
-    - HTTPS connected to `198.82.0.1:443`, completed TLS, and returned `HTTP/1.1 200 OK`
-
-- Sent final KP diagnosis to User:
-  - Reported the issue as resolved.
-  - Explained that I had installed/confirmed routing to AS1/ACM and advertised Uni/User prefixes upstream.
-  - Stated that no firewall or NAT change was made.
-  - Identified the likely cause as transient or incomplete routing/control-plane state between Uni, AS1, and the ACM path, corrected after route exchange and installation.
-
-- Performed final spot checks:
+- Verified AS1-requested upstream reachability:
+  - AS1 advertised reachability to AS2, ACM, and EveLink prefixes.
   - Ran:
-    - `ping -c 2 4.2.2.1`
-    - `ping -c 2 128.173.10.1`
-    - `ping -c 2 198.82.0.1`
-  - Confirmed reachability to AS1 loopback, User loopback, and ACM.
+    - `ping -c 2 -I 128.173.0.1 154.54.1.1`
+    - `ping -c 2 -I 128.173.0.1 198.82.0.1`
+    - `ping -c 2 -I 128.173.0.1 198.82.0.254`
+    - `ping -c 2 -I 128.173.0.1 91.214.0.1`
+  - All succeeded.
 
-- Processed AS1’s later route validation update:
-  - AS1 reported that `198.82.0.1/32` was validated by ACM KP as ACM-originated and authorized via AS2, not EveLink.
-  - Sent User a follow-up explaining this refined the upstream routing context but did not change the outcome.
-  - Acknowledged the update to AS1.
+- Requested User re-test:
+  - Asked User to re-run DNS and HTTP/HTTPS tests from source `128.173.10.1`.
+  - User reported that both HTTP and HTTPS now succeeded with `HTTP/1.1 200 OK`.
 
-2. Justification behind decisions
+- Escalated to ACM through AS1:
+  - Sent AS1 relay requests asking ACM to investigate whether acm.org had briefly refused connections from `128.173.10.1` or Uni’s path.
+  - Updated ACM when the User’s re-test showed the issue was no longer reproducible.
+  - Followed up until ACM returned interim and final responses.
 
-- I first inspected local interface, loopback, and route state because Uni did not have a global topology view and needed to discover its stable address and current forwarding state before advertising routes.
+- Reported final status to User:
+  - Initially reported that the service was restored but root cause was unconfirmed.
+  - After ACM’s interim response, updated User that ACM found current service healthy and no boundary routing/firewall fault.
+  - After ACM’s final response, reported that the incident should be closed as resolved/no current fault, with root cause unconfirmed.
+  - ACM later refined the classification as a resolved transient ACM-side service availability event, root cause unconfirmed.
 
-- I advertised only Uni’s stable loopback and User’s known stable prefix because route exchange was to be done manually and conservatively. The User prefix was a directly connected customer route, so advertising it to AS1 was appropriate.
+No routing rules were added or deleted during this experiment. The existing routing table was already correct, so no `ip route add` or `ip route del` change was needed.
 
-- I installed AS1’s loopback and advertised Internet/customer prefixes because:
-  - AS1 is Uni’s upstream ISP.
-  - The advertised set was small and consistent with AS1’s role.
-  - The update did not contain an anomalously large number of prefixes.
-  - The routes were specific host/prefix routes and easily reversible with `ip route del`.
+2. Justification behind each decision
 
-- I did not change firewall or NAT rules because security enforcement changes require administrator approval. I only inspected them to determine whether a local policy might explain the User’s TCP failures.
+- I inspected local interfaces, loopback, routes, and forwarding first because Uni is the campus gateway and the Knowledge Plane instructions require local investigation before escalation. A local routing, forwarding, firewall, or NAT error could have affected thousands of users.
 
-- I tested both ICMP and TCP because the reported symptom was not basic reachability failure. ICMP already worked from the User, so the investigation needed to focus on TCP port behavior and application-level responses.
+- I used Uni’s loopback address `128.173.0.1` as the source for diagnostics to non-adjacent nodes because link addresses such as `10.0.1.1` and `10.0.6.2` are infrastructure addresses and may not be routable back from remote networks.
 
-- I tested raw IP, Host-header HTTP, and SNI-based HTTPS because Uni initially lacked local DNS resolution for `acm.org`, while User had already resolved it to `198.82.0.1`.
+- I advertised only Uni’s stable loopback prefix to neighbors because the instructions specify that stable node addresses should be advertised network-wide, while point-to-point link addresses should not be treated as globally reachable prefixes.
 
-- I used GET after HEAD returned `501 Unsupported method` because a browser would use GET, and the User’s complaint was browser page loading. The successful GET was a better test of the original symptom than HEAD.
+- I did not modify the default route because it was already correctly installed:
+  - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  This matched the AS1 relationship: AS1 is Uni’s upstream ISP.
 
-- I waited for User-side verification before sending a definitive KP result because KP policy requires confirmation that the original symptom is gone before reporting success.
+- I did not modify firewall or NAT rules because:
+  - Firewall/security changes require administrator approval.
+  - The existing firewall did not show a blocking rule for the reported symptom.
+  - The service was reachable from Uni and later from User, so there was no confirmed local security rule to fix.
 
-- I sent a follow-up after AS1’s later validation update because it refined the routing diagnosis after the final response and could affect the user’s understanding of the cause.
+- I tested both ICMP and TCP/HTTP(S) because the original symptom distinguished between IP reachability and application-layer failure. ICMP success alone did not prove that the web service was working.
 
-3. Discoveries about the network
+- I checked NAT state because Uni is responsible for NAT and forwarding. The broad MASQUERADE rule could have affected User traffic, so I verified whether sourcing from Uni’s upstream link address caused refusal. It did not.
 
-- Uni’s stable loopback is `128.173.0.1/32`.
+- I escalated to ACM only after local checks showed:
+  - Uni routing was healthy.
+  - IP forwarding was enabled.
+  - No local blocking rule was found.
+  - Uni could reach the ACM service successfully.
+  - The original User symptom had been real but was no longer reproducible.
+  Since the issue involved acm.org’s web listener and no Uni-side cause was found, ACM was the responsible domain for service-side investigation.
 
-- User’s stable loopback is `128.173.10.1/32`, reachable via:
-  - `10.0.6.1` on `Uni-eth0`
+- I waited for ACM’s response before closing the incident definitively because the Knowledge Plane instructions require avoiding premature final reports when an upstream WHY request is still pending.
 
-- AS1’s stable loopback is `4.2.2.1/32`, reachable via:
-  - `10.0.1.2` on `Uni-eth1`
+- I sent updated reports to User when ACM provided new information because later evidence refined the diagnosis after the initial restoration report.
 
-- Uni already had:
-  - IPv4 forwarding enabled
-  - A default route through AS1
-  - NAT masquerading out `Uni-eth1`
-  - Permissive default iptables filter policies
+3. What I discovered about the network
 
-- ACM service address `198.82.0.1` was reachable through AS1.
-  - ICMP worked.
-  - HTTP and HTTPS GET worked from Uni and later from User.
-  - The ACM web server does not support HEAD and returns `501 Unsupported method ('HEAD')`, but GET returns `HTTP/1.1 200 OK`.
+- Uni’s stable loopback address is `128.173.0.1/32`.
 
-- AS1 later confirmed that `198.82.0.1/32` is legitimately ACM-originated and authorized via AS2, not EveLink.
+- Uni is directly connected to:
+  - User over `10.0.6.0/30`
+  - AS1 over `10.0.1.0/30`
 
-- The original failure was not caused by a Uni firewall/NAT block, because no security policy was changed and the service became reachable.
+- Uni’s forwarding is enabled:
+  - `net.ipv4.ip_forward = 1`
+
+- Uni’s routing state was correct:
+  - Default Internet transit goes to AS1 via `10.0.1.2`.
+  - User’s stable loopback `128.173.10.1` is reachable via `10.0.6.1`.
+
+- AS1’s stable loopback is `4.2.2.1/32`.
+
+- AS1 provides transit to:
+  - AS2 `154.54.1.1/32`
+  - ACM `198.82.0.1/32` and `198.82.0.254/32`
+  - EveLink `91.214.0.1/32`
+
+- Uni could successfully reach, sourced from `128.173.0.1`:
+  - AS1 `4.2.2.1`
+  - AS2 `154.54.1.1`
+  - ACM `198.82.0.1`
+  - ACM `198.82.0.254`
+  - EveLink `91.214.0.1`
+  - User `128.173.10.1`
+
+- Uni’s packet filter state showed default ACCEPT policies and no local rule explaining the web refusal.
+
+- Uni’s NAT table included:
+  - `MASQUERADE all -- * Uni-eth1 0.0.0.0/0 0.0.0.0/0`
+  This means traffic exiting toward AS1 may be NATed, but tests did not show that this caused the ACM refusal.
+
+- acm.org resolved to `198.82.0.1`.
+
+- During investigation, acm.org HTTP and HTTPS returned `HTTP/1.1 200 OK` from both Uni and the original User source.
+
+- The original failure mode was TCP “Connection refused” on ports 80 and 443 while ICMP still worked. That pattern indicates the path to the host existed, but the web listener or a policy near the service was refusing TCP connections at that time.
+
+- ACM found:
+  - Current service healthy.
+  - Routing and forwarding correct.
+  - No boundary firewall rule causing refusal.
+  - No confirmed current source-specific block against Uni/User.
+  - No boundary routing or firewall fix was applied.
+  - The transient refusal was consistent with a brief ACM-side service listener availability interruption, but ACM could not confirm a more specific root cause.
 
 4. Coordination with other agents
 
 - Coordinated with User:
-  - Exchanged route advertisements.
-  - Received the initial KP WHY report about acm.org.
-  - Requested User-side verification after Uni-side testing.
-  - Sent final FIX/RESOLVED diagnosis.
-  - Sent a later follow-up after AS1 clarified the authorized ACM path.
+  - Advertised Uni’s stable loopback and gateway role.
+  - Received the original KP WHY request about acm.org.
+  - Requested that User re-run DNS and HTTP/HTTPS tests from source `128.173.10.1`.
+  - Received verification that the original symptom had cleared.
+  - Sent final and updated status reports for the owner.
 
 - Coordinated with AS1:
-  - Advertised Uni’s stable loopback and User/customer prefix.
-  - Received AS1’s stable loopback and reachable Internet/customer prefixes.
-  - Installed appropriate routes via AS1.
-  - Received confirmation that AS1 accepted `128.173.10.1/32` via Uni.
-  - Received route-status validation that ACM’s `198.82.0.1/32` is authorized via AS2.
-  - Acknowledged that validation and continued using AS1 transit for ACM reachability.
+  - Advertised Uni’s stable loopback `128.173.0.1/32`.
+  - Received AS1’s loopback `4.2.2.1/32` and transit information.
+  - Verified AS1-requested reachability to AS2, ACM, and EveLink.
+  - Reported successful reachability results back to AS1.
+  - Used AS1 as a relay path to ACM through AS2.
+
+- Coordinated indirectly with ACM via AS1/AS2:
+  - Sent a WHY request asking ACM to investigate the earlier acm.org TCP refusals.
+  - Sent updates after User’s re-test showed the issue had cleared.
+  - Received ACM interim and final responses.
+  - Relayed ACM’s conclusions to User.
+
+Final outcome: the incident was closed as resolved/no current fault. No Uni-side routing, firewall, or NAT change was made. The most specific available conclusion is that the earlier failure was a transient ACM-side service availability event affecting the web listener, but ACM could not confirm a more detailed root cause from available evidence.

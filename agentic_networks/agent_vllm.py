@@ -70,8 +70,8 @@ _MAX_TOOL_CALL_RETRIES = 3
 
 # Per-request timeout (seconds) and retry count for completions against the vLLM server.
 # Without these the OpenAI client can hang forever on a stalled server or dropped socket.
-_REQUEST_TIMEOUT_SECONDS = 300.0
-_MAX_REQUEST_RETRIES = 3
+_REQUEST_TIMEOUT_SECONDS = 1200
+_MAX_REQUEST_RETRIES = 1
 
 # Mild penalty to suppress degenerate token repetition (e.g. runaway newlines from
 # quantized models) without materially affecting legitimate repeated values like IPs.
@@ -101,6 +101,7 @@ def fetch_context_limit(client: OpenAI, model: str, default: int = _VLLM_CONTEXT
     Falls back to `default` if unavailable, so we never overestimate the available context (which
     differs per model — hardcoding it breaks when swapping models).
     """
+
     def _mml(m) -> "int | None":
         v = getattr(m, "max_model_len", None)
         if v is None:

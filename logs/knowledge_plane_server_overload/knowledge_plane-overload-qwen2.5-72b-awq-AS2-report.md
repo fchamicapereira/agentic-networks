@@ -1,1 +1,13 @@
-I observed the loopback address, advertised it to neighbors, verified the routing table, and confirmed basic connectivity with AS1 and ACM. I attempted to install a DNS resolver but encountered issues, so I configured a public DNS server. Traceroutes to external destinations failed, suggesting a problem beyond the first hop. I disabled ICMP redirects and checked the ARP table, which showed the next hop was correctly resolved. I then requested AS1's assistance, escalated the issue to the upstream provider AS3, and followed up to ensure the issue was being addressed. These actions were taken to diagnose and resolve the connectivity issue, which was ultimately identified as being with AS3.
+1. **What was observed:**
+   - Initial network connectivity to the ACM web server was verified successfully.
+   - A 503 Service Unavailable error was reported by ACM, but the ping to the server was successful.
+   - An HTTP status check using `curl` returned a 501 Unsupported method error.
+
+2. **What was decided:**
+   - Escalate the issue to HigherLevelSupport via ACM, as the problem was likely at the application layer.
+   - Continuously monitor the situation and provide updates to ACM.
+
+3. **Why:**
+   - The successful ping indicated that the network was functioning, so the issue was not related to connectivity.
+   - The 501 error suggested a misconfiguration or application-layer problem, requiring higher-level support.
+   - Regular updates and coordination with ACM were necessary to ensure the issue was addressed promptly.

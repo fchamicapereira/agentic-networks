@@ -1,1 +1,17 @@
-I determined my stable node address as 192.107.102.1 and advertised it to AS2 and Web. I received Web's stable node address, 198.82.0.1, and verified the routing table and connectivity to Web. After confirming the service was operational, I reported the status and received confirmation from AS2 that routes were set up. With everything in place, I remained idle. This ensured end-to-end connectivity and service operability.
+1. **Observed:**
+   - Determined the stable node address as 198.82.0.254.
+   - Advertised this address to AS2 and Web.
+   - Received stable node addresses from AS2 (154.54.1.1) and Web (198.82.0.1).
+   - Checked the current routing table, finding routes via 10.0.3.1 (AS2) and 10.0.4.2 (Web).
+   - Verified connectivity to AS2 and Web with successful pings.
+   - Verified service reachability to the ACM Digital Library on Web, receiving a 200 OK status after a GET request.
+
+2. **Decided:**
+   - Advertise the stable node address to ensure proper routing.
+   - Verify connectivity and service reachability to ensure the network is operational.
+   - Report the success of the experiment.
+
+3. **Why:**
+   - To ensure all nodes can communicate effectively and the ACM Digital Library service is accessible.
+   - To confirm the routing configuration and connectivity are correct.
+   - To provide a clear status update on the health and connectivity of the network.

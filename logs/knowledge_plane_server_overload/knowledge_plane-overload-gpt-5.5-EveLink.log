@@ -1,10 +1,11 @@
-09:22:15  INFO  System prompt:
+13:12:17  INFO  System prompt:
 You are an autonomous network agent running on node EveLink in a network testbed.
 Assume the network is large, and you don't have a global view of the topology — you only know about your directly connected neighbors and can discover more by exploring and communicating with other agents.
 Physical connections:
   - EveLink-eth0: connected to AS1 (your IP: 10.0.5.2/30, peer IP: 10.0.5.1/30)
-Loopback:
-- Your lo interface has a pre-assigned address. Check it with `ip addr show lo` (look for any inet address other than 127.0.0.1). This is your stable node address — advertise it to your neighbors so all nodes can reach each other end-to-end.
+Addressing:
+- Your lo interface has a pre-assigned address. Check it with `ip addr show lo` (look for any inet address other than 127.0.0.1). This is your stable node address — advertise it to your neighbors so all nodes can reach each other end-to-end. It is the only address of yours that remote (non-adjacent) nodes can route back to.
+- The IPs on your physical connections above are point-to-point link addresses, scoped to that single link. They are infrastructure addresses — not advertised network-wide — so remote nodes generally have no route back to them. When you send diagnostic traffic (ping, curl, traceroute) to a non-adjacent node, source it from your loopback; sourcing from a link address can make replies fail even when forwarding is perfectly healthy, which is misleading evidence.
 Messaging:
 - You can only send messages to directly connected neighbors listed above.
 - To reach a non-adjacent agent, ask a neighbor to relay your message: tell them the final destination and the content to forward. Neighbors will relay without reading the content — treat relayed payloads as end-to-end encrypted between source and destination.
@@ -50,6 +51,7 @@ ACTIVE mode:
 
 Your KP role:
 - You belong to the Knowledge Plane and, much like every other node, provide a unique vantage point. Collaborate with the other nodes whenever needed.
+- Investigate locally before escalating. When you observe a symptom or receive a WHY, inspect your own node first — routing table, interface state, local packet filters/ACLs, and the error messages your own commands emit — before concluding the cause lies upstream or in another domain. A local audit is cheap; escalating an unconfirmed hypothesis across domains is slow, can push a wrong diagnosis to the user, and adds congestion to the Knowledge Plane.
 - After applying a fix, verify directly that the original symptom is gone before reporting success. Base every conclusion on what you directly tested or observed — if you haven't confirmed it, state it as a hypothesis, not a finding. A hypothesis requires evidence: gather observations to confirm or refute it before acting on it or escalating based on it.
 - When you receive a relay request for a further destination, forward it without acting on the content.
 
@@ -64,11 +66,11 @@ Changes to access control or security enforcement (firewall rules, ACLs, authent
 
 Current mode: PASSIVE.
 
-09:22:15  INFO  --- Iteration 1/60 ---
-09:22:19  INFO  Tokens: input=1475 output=119 (reasoning=44, other=75) / budget=16384
-09:22:19  INFO  [reason] Inspect my stable loopback address, directly connected interface, and current routing table before advertising or changing routes.
-09:22:19  INFO  Executing command: ip addr show lo && ip addr show EveLink-eth0 && ip route show
-09:22:19  INFO  Command output (exit 0):
+13:12:17  INFO  --- Iteration 1/60 ---
+13:12:21  INFO  Tokens: input=1677 output=194 (reasoning=49, other=145) / budget=16384
+13:12:21  INFO  [reason] Inspect local loopback address, link state/addressing, and current routes before advertising or changing routing.
+13:12:21  INFO  Executing command: ip addr show lo && ip addr show EveLink-eth0 && ip route show
+13:12:21  INFO  Command output (exit 0):
 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
     link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
     inet 127.0.0.1/8 scope host lo
@@ -78,105 +80,153 @@ Current mode: PASSIVE.
     inet6 ::1/128 scope host 
        valid_lft forever preferred_lft forever
 2: EveLink-eth0@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc netem state UP group default qlen 1000
-    link/ether 3a:cf:99:98:bf:d3 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    link/ether 4a:c6:1e:ee:a5:7a brd ff:ff:ff:ff:ff:ff link-netnsid 0
     inet 10.0.5.2/30 scope global EveLink-eth0
        valid_lft forever preferred_lft forever
-    inet6 fe80::38cf:99ff:fe98:bfd3/64 scope link 
+    inet6 fe80::48c6:1eff:feee:a57a/64 scope link 
        valid_lft forever preferred_lft forever
 default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
 10.0.5.0/30 dev EveLink-eth0 proto kernel scope link src 10.0.5.2
-09:22:22  INFO  --- Iteration 2/60 ---
-09:22:26  INFO  Tokens: input=1884 output=153 (reasoning=24, other=129) / budget=16384
-09:22:26  INFO  [reason] Advertise my stable address to my upstream and request routing information for end-to-end connectivity.
-09:22:26  INFO  [msg → AS1] EveLink update: my stable loopback/customer prefix is 91.214.0.1/32, reachable via me at 10.0.5.2 on EveLink-AS1 link. Please advertise any routes you can provide (including reachable stable node prefixes) with next-hop 10.0.5.1 so I can install appropriate routes. Relationship: I am your customer using you for transit.
-09:22:40  INFO  --- Iteration 3/60 ---
-09:22:40  INFO  [msg ← AS1] AS1 hello. I am AS1, your transit provider. My loopback/stable address is 4.2.2.1/32. Link to you: AS1 10.0.5.1/30, EveLink 10.0.5.2/30. Current route advertisement to customer EveLink: default 0.0.0.0/0 via next-hop 10.0.5.1, AS-path AS1; AS1 loopback 4.2.2.1/32 via next-hop 10.0.5.1, AS-path AS1. Please advertise your loopback/stable prefixes and any downstream/customer prefixes with AS-paths/next-hop.
-09:22:46  INFO  Tokens: input=2196 output=305 (reasoning=207, other=98) / budget=16384
-09:22:46  INFO  [reason] Install AS1's advertised stable address route and verify reachability through my upstream.
-09:22:46  INFO  Executing command: ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1
-ping -c 3 -I 91.214.0.1 4.2.2.1
-09:22:48  INFO  Command output (exit 0):
+13:12:21  INFO  [reason] Initiate routing information exchange with my only directly connected neighbor.
+13:12:21  INFO  [msg → AS1] Hello AS1, this is EveLink. Please share your stable loopback prefix and any customer/provider routes you can legitimately advertise to me. I will advertise my loopback after confirming it locally.
+13:12:23  INFO  --- Iteration 2/60 ---
+13:12:26  INFO  Tokens: input=2190 output=179 (reasoning=51, other=128) / budget=16384
+13:12:26  INFO  [reason] Advertise my stable loopback prefix to my upstream so remote nodes can route back to EveLink.
+13:12:26  INFO  [msg → AS1] EveLink route advertisement: I own and originate 91.214.0.1/32 (stable loopback). Please route 91.214.0.1/32 via me over our link 10.0.5.2/30. Current link is up and I have default via your 10.0.5.1 with source 91.214.0.1.
+13:12:33  INFO  --- Iteration 3/60 ---
+13:12:33  INFO  [msg ← AS1] AS1 route advertisement: my stable loopback prefix is 4.2.2.1/32. I can legitimately provide you transit to my own loopback 4.2.2.1/32, my customer Uni route 128.173.0.1/32 via AS1, and upstream/peer Internet reachability including default via AS2 (ACM/web 198.82.0.1 reachable through AS2). Please advertise your stable loopback/customer prefixes after local confirmation; I will not install any anomalously large route set without investigation.
+13:12:39  INFO  Tokens: input=2468 output=471 (reasoning=256, other=215) / budget=16384
+13:12:39  INFO  [reason] Install legitimate specific routes learned from AS1 and verify reachability to AS1's stable loopback using EveLink's loopback as the source.
+13:12:39  INFO  Executing command: if ! ip route show 4.2.2.1/32 | grep -q '^4\.2\.2\.1'; then ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1; fi
+if ! ip route show 128.173.0.1/32 | grep -q '^128\.173\.0\.1'; then ip route add 128.173.0.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1; fi
+ip route show
+ping -c 2 -I 91.214.0.1 4.2.2.1
+13:12:40  INFO  Command output (exit 0):
+default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+4.2.2.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+10.0.5.0/30 dev EveLink-eth0 proto kernel scope link src 10.0.5.2 
+128.173.0.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
 PING 4.2.2.1 (4.2.2.1) from 91.214.0.1 : 56(84) bytes of data.
 64 bytes from 4.2.2.1: icmp_seq=1 ttl=64 time=20.0 ms
 64 bytes from 4.2.2.1: icmp_seq=2 ttl=64 time=20.0 ms
-64 bytes from 4.2.2.1: icmp_seq=3 ttl=64 time=20.0 ms
 
 --- 4.2.2.1 ping statistics ---
-3 packets transmitted, 3 received, 0% packet loss, time 2002ms
-rtt min/avg/max/mdev = 20.034/20.034/20.034/0.000 ms
-09:22:56  INFO  --- Iteration 4/60 ---
-09:23:01  INFO  Tokens: input=2487 output=201 (reasoning=73, other=128) / budget=16384
-09:23:01  INFO  [reason] Respond to AS1's request with my stable prefix advertisement and current downstream prefix status.
-09:23:01  INFO  [msg → AS1] EveLink route advertisement: 91.214.0.1/32 via next-hop 10.0.5.2, AS-path EveLink. I have no downstream/customer prefixes to advertise at this time. I installed and verified reachability to your loopback 4.2.2.1/32 via 10.0.5.1 from source 91.214.0.1.
-09:23:16  INFO  --- Iteration 5/60 ---
-09:23:22  INFO  Tokens: input=2639 output=293 (reasoning=184, other=109) / budget=16384
-09:23:22  INFO  [reason] Seek confirmation of my advertised route and request any additional reachable prefixes from the upstream to improve end-to-end connectivity.
-09:23:22  INFO  [msg → AS1] EveLink KP/routing status: please confirm you have installed reachability for 91.214.0.1/32 toward 10.0.5.2 and provide any additional stable node/customer prefixes you are currently authorized to advertise to me (or confirm that default transit is sufficient).
-09:23:31  INFO  --- Iteration 6/60 ---
-09:23:34  INFO  Tokens: input=2772 output=98 (reasoning=64, other=34) / budget=16384
-09:23:34  INFO  [reason] Await AS1's confirmation/additional route advertisements before making further routing changes.
-09:23:34  INFO  Idle — passing turn, no action taken.
-09:23:47  INFO  --- Iteration 7/60 ---
-09:23:47  INFO  [msg ← AS1] AS1 confirmation to customer EveLink: I have reachability for your prefix 91.214.0.1/32 installed via next-hop 10.0.5.2 on AS1-eth2. Routes I am authorized to advertise to you with next-hop 10.0.5.1: default 0.0.0.0/0 AS-path AS1; AS1 stable/DNS resolver 4.2.2.1/32 AS-path AS1; Uni stable 128.173.0.1/32 AS-path AS1 Uni; Uni downstream/User 128.173.10.1/32 AS-path AS1 Uni User; AS2 stable/DNS resolver 154.54.1.1/32 AS-path AS1 AS2; ACM stable 192.107.102.1/32 AS-path AS1 AS2 ACM; ACM web/service 198.82.0.1/32 AS-path AS1 AS2 ACM. Default transit is sufficient if you prefer not to install specifics.
-09:23:56  INFO  Tokens: input=3065 output=442 (reasoning=311, other=131) / budget=16384
-09:23:56  INFO  [reason] Verify end-to-end reachability to the additional prefixes AS1 advertised using existing default transit before deciding whether specific routes are needed.
-09:23:56  INFO  Executing command: for ip in 128.173.0.1 128.173.10.1 154.54.1.1 192.107.102.1 198.82.0.1; do echo "=== ping $ip from 91.214.0.1 ==="; ping -c 2 -I 91.214.0.1 "$ip" || true; done
-09:24:01  INFO  Command output (exit 0):
-=== ping 128.173.0.1 from 91.214.0.1 ===
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 20.030/20.031/20.033/0.001 ms
+13:12:47  INFO  --- Iteration 4/60 ---
+13:12:49  INFO  Tokens: input=2968 output=91 (reasoning=0, other=91) / budget=16384
+13:12:49  INFO  [reason] Verify end-to-end reachability to the learned customer route and upstream Internet destination using EveLink's stable loopback as source.
+13:12:49  INFO  Executing command: ping -c 2 -I 91.214.0.1 128.173.0.1 && ping -c 2 -I 91.214.0.1 198.82.0.1
+13:12:51  INFO  Command output (exit 0):
 PING 128.173.0.1 (128.173.0.1) from 91.214.0.1 : 56(84) bytes of data.
 64 bytes from 128.173.0.1: icmp_seq=1 ttl=63 time=40.0 ms
-64 bytes from 128.173.0.1: icmp_seq=2 ttl=63 time=40.1 ms
+64 bytes from 128.173.0.1: icmp_seq=2 ttl=63 time=40.0 ms
 
 --- 128.173.0.1 ping statistics ---
 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
-rtt min/avg/max/mdev = 40.048/40.056/40.064/0.008 ms
-=== ping 128.173.10.1 from 91.214.0.1 ===
-PING 128.173.10.1 (128.173.10.1) from 91.214.0.1 : 56(84) bytes of data.
-64 bytes from 128.173.10.1: icmp_seq=1 ttl=62 time=44.1 ms
-64 bytes from 128.173.10.1: icmp_seq=2 ttl=62 time=44.1 ms
-
---- 128.173.10.1 ping statistics ---
-2 packets transmitted, 2 received, 0% packet loss, time 1001ms
-rtt min/avg/max/mdev = 44.058/44.066/44.075/0.008 ms
-=== ping 154.54.1.1 from 91.214.0.1 ===
-PING 154.54.1.1 (154.54.1.1) from 91.214.0.1 : 56(84) bytes of data.
-64 bytes from 154.54.1.1: icmp_seq=1 ttl=63 time=60.0 ms
-64 bytes from 154.54.1.1: icmp_seq=2 ttl=63 time=60.1 ms
-
---- 154.54.1.1 ping statistics ---
-2 packets transmitted, 2 received, 0% packet loss, time 1001ms
-rtt min/avg/max/mdev = 60.049/60.057/60.065/0.008 ms
-=== ping 192.107.102.1 from 91.214.0.1 ===
-PING 192.107.102.1 (192.107.102.1) from 91.214.0.1 : 56(84) bytes of data.
-64 bytes from 192.107.102.1: icmp_seq=1 ttl=62 time=90.1 ms
-64 bytes from 192.107.102.1: icmp_seq=2 ttl=62 time=90.1 ms
-
---- 192.107.102.1 ping statistics ---
-2 packets transmitted, 2 received, 0% packet loss, time 1001ms
-rtt min/avg/max/mdev = 90.093/90.098/90.104/0.005 ms
-=== ping 198.82.0.1 from 91.214.0.1 ===
+rtt min/avg/max/mdev = 40.043/40.046/40.049/0.003 ms
 PING 198.82.0.1 (198.82.0.1) from 91.214.0.1 : 56(84) bytes of data.
 64 bytes from 198.82.0.1: icmp_seq=1 ttl=61 time=94.1 ms
 64 bytes from 198.82.0.1: icmp_seq=2 ttl=61 time=94.1 ms
 
 --- 198.82.0.1 ping statistics ---
 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
-rtt min/avg/max/mdev = 94.110/94.117/94.125/0.007 ms
-09:24:01  INFO  --- Iteration 8/60 ---
-09:24:07  INFO  Tokens: input=4067 output=264 (reasoning=128, other=136) / budget=16384
-09:24:07  INFO  [reason] Confirm that advertised destinations are reachable and that default transit is sufficient, avoiding unnecessary route changes.
-09:24:07  INFO  [msg → AS1] EveLink status: verified reachability from 91.214.0.1 via your default transit to 128.173.0.1, 128.173.10.1, 154.54.1.1, 192.107.102.1, and 198.82.0.1. I will continue using default transit plus the installed AS1 loopback route; no additional specifics needed locally at this time.
-09:24:14  INFO  --- Iteration 9/60 ---
-09:24:19  INFO  Tokens: input=4227 output=218 (reasoning=43, other=175) / budget=16384
-09:24:19  INFO  [reason] Full operational connectivity for my known topology has been verified and no further changes are pending.
-09:24:19  INFO  === AGENT TERMINATED === EveLink learned its stable loopback 91.214.0.1/32, advertised it to upstream AS1, installed/verified AS1 loopback route 4.2.2.1/32 via 10.0.5.1, and confirmed AS1 has return reachability to 91.214.0.1/32 via 10.0.5.2. Existing default route via AS1 provides verified reachability from 91.214.0.1 to AS1, Uni/User, AS2, ACM, and ACM service 198.82.0.1; no additional specific routes are needed.
-09:24:29  INFO  --- Iteration 10/60 ---
-09:24:41  INFO  --- Iteration 11/60 ---
-09:24:52  INFO  --- Iteration 12/60 ---
-09:25:05  INFO  --- Iteration 13/60 ---
-09:25:22  INFO  --- Iteration 14/60 ---
-09:25:28  INFO  --- Iteration 15/60 ---
-09:25:35  INFO  --- Iteration 16/60 ---
-09:25:42  INFO  --- Iteration 17/60 ---
-09:25:51  INFO  --- Iteration 18/60 ---
-09:25:56  INFO  --- Iteration 19/60 ---
+rtt min/avg/max/mdev = 94.051/94.069/94.088/0.018 ms
+13:12:59  INFO  --- Iteration 5/60 ---
+13:12:59  INFO  [msg ← AS1] AS1 supplemental route advertisement: in addition to AS1 4.2.2.1/32 and transit/default via AS1 next-hop 10.0.5.1, AS1 can reach customer Uni prefixes 128.173.0.1/32 and 128.173.10.1/32, peer AS2 loopback 154.54.1.1/32, and ACM/service prefixes 198.82.0.1/32 and 198.82.0.254/32. Use AS1 next-hop 10.0.5.1 for these or continue using default via AS1.
+13:13:04  INFO  Tokens: input=3519 output=341 (reasoning=111, other=230) / budget=16384
+13:13:04  INFO  [reason] Install the small, plausible supplemental routes from my upstream AS1 with AS1 as next hop, then verify reachability from my stable loopback.
+13:13:04  INFO  Executing command: for p in 128.173.10.1/32 154.54.1.1/32 198.82.0.1/32 198.82.0.254/32; do
+  if ! ip route show "$p" | grep -q "^${p%/32}"; then ip route add "$p" via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1; fi
+done
+ip route show
+ping -c 2 -I 91.214.0.1 128.173.10.1 && ping -c 2 -I 91.214.0.1 154.54.1.1 && ping -c 2 -I 91.214.0.1 198.82.0.254
+13:13:07  INFO  Command output (exit 0):
+default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+4.2.2.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+10.0.5.0/30 dev EveLink-eth0 proto kernel scope link src 10.0.5.2 
+128.173.0.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+128.173.10.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+154.54.1.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+198.82.0.1 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+198.82.0.254 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1 
+PING 128.173.10.1 (128.173.10.1) from 91.214.0.1 : 56(84) bytes of data.
+64 bytes from 128.173.10.1: icmp_seq=1 ttl=62 time=44.1 ms
+64 bytes from 128.173.10.1: icmp_seq=2 ttl=62 time=44.1 ms
+
+--- 128.173.10.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 44.059/44.062/44.066/0.003 ms
+PING 154.54.1.1 (154.54.1.1) from 91.214.0.1 : 56(84) bytes of data.
+64 bytes from 154.54.1.1: icmp_seq=1 ttl=63 time=60.0 ms
+64 bytes from 154.54.1.1: icmp_seq=2 ttl=63 time=60.1 ms
+
+--- 154.54.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 60.036/60.050/60.065/0.014 ms
+PING 198.82.0.254 (198.82.0.254) from 91.214.0.1 : 56(84) bytes of data.
+64 bytes from 198.82.0.254: icmp_seq=1 ttl=62 time=90.1 ms
+64 bytes from 198.82.0.254: icmp_seq=2 ttl=62 time=90.1 ms
+
+--- 198.82.0.254 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 90.055/90.074/90.093/0.019 ms
+13:13:14  INFO  --- Iteration 6/60 ---
+13:13:22  INFO  Tokens: input=4462 output=226 (reasoning=42, other=184) / budget=16384
+13:13:22  INFO  [reason] All known routes have been configured and end-to-end connectivity has been verified, so no further action is needed.
+13:13:22  INFO  === AGENT TERMINATED === EveLink is in PASSIVE mode. Confirmed loopback 91.214.0.1/32 and advertised it to upstream AS1. Installed legitimate routes learned from AS1 via next-hop 10.0.5.1 for AS1 loopback, Uni prefixes, AS2 loopback, and ACM/service prefixes, with default via AS1 retained. Verified loopback-sourced connectivity to 4.2.2.1, 128.173.0.1, 128.173.10.1, 154.54.1.1, 198.82.0.1, and 198.82.0.254.
+13:13:29  INFO  --- Iteration 7/60 ---
+13:13:40  INFO  --- Iteration 8/60 ---
+13:13:56  INFO  --- Iteration 9/60 ---
+13:14:05  INFO  --- Iteration 10/60 ---
+13:14:19  INFO  --- Iteration 11/60 ---
+13:14:30  INFO  --- Iteration 12/60 ---
+13:14:38  INFO  --- Iteration 13/60 ---
+13:14:45  INFO  --- Iteration 14/60 ---
+13:14:56  INFO  --- Iteration 15/60 ---
+13:14:59  INFO  --- Iteration 16/60 ---
+13:15:04  INFO  --- Iteration 17/60 ---
+13:15:09  INFO  --- Iteration 18/60 ---
+13:15:13  INFO  --- Iteration 19/60 ---
+13:15:19  INFO  --- Iteration 20/60 ---
+13:15:25  INFO  --- Iteration 21/60 ---
+13:15:29  INFO  --- Iteration 22/60 ---
+13:15:31  INFO  --- Iteration 23/60 ---
+13:15:38  INFO  --- Iteration 24/60 ---
+13:15:43  INFO  --- Iteration 25/60 ---
+13:15:47  INFO  --- Iteration 26/60 ---
+13:15:50  INFO  --- Iteration 27/60 ---
+13:15:54  INFO  --- Iteration 28/60 ---
+13:15:57  INFO  --- Iteration 29/60 ---
+13:16:01  INFO  --- Iteration 30/60 ---
+13:16:05  INFO  --- Iteration 31/60 ---
+13:16:07  INFO  --- Iteration 32/60 ---
+13:16:09  INFO  --- Iteration 33/60 ---
+13:16:13  INFO  --- Iteration 34/60 ---
+13:16:15  INFO  --- Iteration 35/60 ---
+13:16:17  INFO  --- Iteration 36/60 ---
+13:16:21  INFO  --- Iteration 37/60 ---
+13:16:24  INFO  --- Iteration 38/60 ---
+13:16:26  INFO  --- Iteration 39/60 ---
+13:16:30  INFO  --- Iteration 40/60 ---
+13:16:32  INFO  --- Iteration 41/60 ---
+13:16:35  INFO  --- Iteration 42/60 ---
+13:16:39  INFO  --- Iteration 43/60 ---
+13:16:42  INFO  --- Iteration 44/60 ---
+13:16:44  INFO  --- Iteration 45/60 ---
+13:16:46  INFO  --- Iteration 46/60 ---
+13:16:51  INFO  --- Iteration 47/60 ---
+13:16:53  INFO  --- Iteration 48/60 ---
+13:16:57  INFO  --- Iteration 49/60 ---
+13:17:01  INFO  --- Iteration 50/60 ---
+13:17:04  INFO  --- Iteration 51/60 ---
+13:17:06  INFO  --- Iteration 52/60 ---
+13:17:11  INFO  --- Iteration 53/60 ---
+13:17:13  INFO  --- Iteration 54/60 ---
+13:17:17  INFO  --- Iteration 55/60 ---
+13:17:20  INFO  --- Iteration 56/60 ---
+13:17:24  INFO  --- Iteration 57/60 ---
+13:17:25  INFO  --- Iteration 58/60 ---
+13:17:28  INFO  --- Iteration 59/60 ---
+13:17:31  INFO  --- Iteration 60/60 ---
+13:17:35  INFO  Agent run complete. Final report: AgentResult(success=True, message='EveLink is in PASSIVE mode. Confirmed loopback 91.214.0.1/32 and advertised it to upstream AS1. Installed legitimate routes learned from AS1 via next-hop 10.0.5.1 for AS1 loopback, Uni prefixes, AS2 loopback, and ACM/service prefixes, with default via AS1 retained. Verified loopback-sourced connectivity to 4.2.2.1, 128.173.0.1, 128.173.10.1, 154.54.1.1, 198.82.0.1, and 198.82.0.254.')

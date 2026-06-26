@@ -1,63 +1,72 @@
-**Observed**: Successful pings to 81.2.0.1 and 88.99.0.1 via loopback, no unexpected routes added via provider A, stable emergency reroute path for 81.2.0.0/32.  
-**Decided**: Confirm route configurations, acknowledge A’s emergency message, and maintain policy-compliant routing.  
-**Why**: Ensured reliable traffic delivery (via ping success), adhered to route-filtering policies (no unintended prefixes), and stabilized emergency routing while upholding revenue-maximizing goals.
+**Observed**: Existing route for 81.2.0.1/32 in routing table, successful ping via 185.60.0.1, A's policy-driven route retraction, and duplicate report_done error.  
+**Decided**: Add new routes from A's advertisements, delete retracted routes, correct tool syntax, and confirm changes via messages.  
+**Why**: Prevent route conflicts, comply with policy updates, ensure connectivity, and avoid blackholes by maintaining accurate routing.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **Loopback Identification**:  
-  - Ran `ip addr show lo` to identify loopback address `185.60.0.1/32`.  
-- **Default Route Configuration**:  
-  - Set default route via provider A with `ip route add default via 10.1.1.2`.  
-  - Verified routes with `ip route show`, confirming upstream paths (e.g., `81.2.0.1 via 10.1.1.2`).  
-- **Reachability Testing**:  
-  - Tested connectivity to A’s prefixes using `ping -c 3 -I 185.60.0.1 <dest>` for `81.2.0.1` and `88.99.0.1`, both showing 0% packet loss.  
-- **Route Validation**:  
-  - Used `ip route show | grep 'via 10.1.1.2'` to ensure no unexpected routes were installed via A.  
-- **Emergency Reroute Handling**:  
-  - After A’s emergency message, ran `ip route show | grep '81.2.0.0'` to confirm the prioritized path.  
-  - Re-tested `81.2.0.1` ping post-reroute, which remained stable (0% loss).  
-- **Communication**:  
-  - Sent messages to A to advertise the loopback, confirm setup, and acknowledge emergency reroute.  
+1. **Initial Route Configuration**  
+   - Added a specific route for A's primary prefix `81.2.0.1/32` via A's interface (`10.1.1.2` on `S-eth0`).  
+   - When this failed due to an existing route (`RTNETLINK: File exists`), verified the routing table with `ip route show`, confirming the route was already present.  
+   - Sent a confirmation message to A acknowledging receipt and installation of their primary prefix.  
+
+2. **Connectivity Verification**  
+   - Ran `ping -c 3 -I 185.60.0.1 81.2.0.1` (using loopback as source) to validate reachability to A’s primary address.  
+
+3. **Handling New Advertisements from A**  
+   - When A advertised three new prefixes (`203.0.10.0/24`, `203.0.20.0/24`, `203.0.30.0/24`), added routes for each via A’s gateway (`10.1.1.2`).  
+   - Tested reachability to one prefix (e.g., `203.0.10.0/24`) with `ping` from the loopback.  
+
+4. **Route Retraction Handling**  
+   - After A retracted the `203.x.x.x` routes due to policy conflicts, deleted them using `ip route del` commands to avoid invalid paths.  
+
+5. **Loopback Re-Advertisement Handling**  
+   - Acknowledged A’s re-advertisement of their loopback (`81.2.0.1/32`), confirming it was already active and reachable.  
+
+6. **Completion**  
+   - Called `report_done` to signal successful configuration and verification of routes.  
 
 ---
 
-### **2. Justifications**  
-- **Loopback & Default Route**:  
-  - Essential for stable node identification and upstream connectivity. Ensures all traffic exits via A (the sole provider), aligning with revenue goals and policy (no transit for peers/providers).  
-- **Reachability Tests**:  
-  - Verified functional upstream paths and reliability, critical for SLA compliance.  
-- **Route Validation**:  
-  - Prevents accepting excessive or suspicious prefixes from A, avoiding policy violations (e.g., transit for peers).  
-- **Emergency Reroute Handling**:  
-  - Ensured compliance with A’s directive while maintaining reliability. Proactive monitoring avoids service disruption.  
-- **Communication with A**:  
-  - Advertised loopback to enable end-to-end connectivity. Acknowledged A’s changes to foster trust and coordinate troubleshooting.  
+### **2. Justification for Decisions**  
+1. **Specific Route for A’s Primary Prefix**  
+   - Ensured traffic to A’s management/control plane followed the instructed path, prioritizing reliability.  
+
+2. **Route Verification After Conflict**  
+   - Avoided redundant configuration and confirmed existing routes to prevent errors.  
+
+3. **Adding New Advertisements**  
+   - Expanded reachability as per A’s instructions, enabling transit to their networks while adhering to provider relationships.  
+
+4. **Deleting Retracted Routes**  
+   - Prevented routing loops or blackholes caused by stale routes, maintaining compliance with A’s policy constraints.  
+
+5. **Loopback Acknowledgment**  
+   - Maintained synchronization with A’s state without unnecessary changes, ensuring mutual operational awareness.  
+
+6. **Loopback Source for Pings**  
+   - Followed rules to avoid using link-local IPs (non-routable), ensuring replies could return via stable paths.  
 
 ---
 
-### **3. Network Discoveries**  
-- **Upstream Stability**:  
-  - A’s prefixes (e.g., `81.2.0.1`, `88.99.0.1`) are reachable with consistent low latency (10–50 ms) and no packet loss.  
-- **Provider Behavior**:  
-  - A dynamically reroutes traffic during emergencies (e.g., prioritizing `81/32` over peers). This suggests A’s backbone is reliable under stress.  
-- **Route Integrity**:  
-  - No anomalous routes were detected via A, indicating compliance with policies (A does not advertise extraneous prefixes).  
-- **Latency Variance**:  
-  - Slight differences in RTT (e.g., `81.2.0.1` at 10 ms vs. `88.99.0.1` at 30–50 ms) suggest path diversity in A’s network.  
+### **3. Discoveries About the Network**  
+- **Provider A’s Role**: A acts as a transit provider offering both its own prefixes (e.g., `81.2.0.1/32`) and routes learned from peers (e.g., `203.x.x.x`), but enforces strict policy on advertising peer-originated routes.  
+- **Route Stability**: A’s advertisements can change dynamically (e.g., retraction due to policy reviews), requiring proactive route management.  
+- **Redundancy Risks**: Duplicate route configurations (e.g., initial `81.2.0.1/32` attempt) highlight the need for rigorous state checks before altering routes.  
+- **Policy Enforcement**: A’s withdrawal of peer-originated routes (`203.x.x.x`) underscores the importance of adhering to contractual terms and avoiding transit for non-customer traffic.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **Initial Setup**:  
-  - Informed A of loopback advertisement (`185.60.0.1/32`) to ensure reachability.  
-- **Emergency Reroute**:  
-  - Acknowledged A’s message and confirmed stable connectivity on the new path. Requested clarity on whether the reroute was temporary or required configuration changes.  
-- **Policy Compliance**:  
-  - No communication with non-provider nodes (no customers/peers), adhering to privacy constraints.  
+- **Messaging with A**:  
+  - Confirmed receipt of advertisements (e.g., "Installed routes for your advertised networks...").  
+  - Acknowledged retracted routes and loopback advertisements to maintain alignment with A’s state.  
+  - Provided reachability test results to validate configuration changes.  
+- **No Coordination with Others**: No interactions with peers or customers, as S has none per setup constraints.  
 
 ---
 
-**Conclusion**:  
-The setup achieved reliable upstream connectivity through A while adhering to policy constraints. Proactive testing and communication ensured resilience during A’s emergency reroute, maintaining revenue and SLA goals. No security risks or misconfigurations were detected.
+**Final State**:  
+- All routes from A are managed compliantly, with only valid, policy-permitted prefixes installed.  
+- Connectivity is verified end-to-end via loopback tests, ensuring reliability for revenue-generating traffic.

@@ -1,156 +1,204 @@
-Experiment report for Uni gateway agent
+Experiment report for node Uni
 
 1. Actions taken
 
-- Inspected local interface and routing state:
-  - Ran `ip addr show lo`, `ip addr show Uni-eth0`, and `ip addr show Uni-eth1`.
-  - Confirmed Uni’s stable loopback address is `128.173.0.1/32`.
-  - Confirmed direct links:
-    - `Uni-eth0`: `10.0.6.2/30` connected to User at `10.0.6.1/30`.
-    - `Uni-eth1`: `10.0.1.1/30` connected to AS1 at `10.0.1.2/30`.
-  - Ran `ip route show`.
-  - Observed default route already present:
-    - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Observed route to User stable address:
-    - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
-  - Ran `sysctl net.ipv4.ip_forward`.
-  - Confirmed IP forwarding was enabled: `net.ipv4.ip_forward = 1`.
+- Inspected Uni’s local addressing, interfaces, routes, and forwarding state:
+  - Ran:
+    - `ip addr show lo`
+    - `ip addr show`
+    - `ip route show`
+    - `sysctl net.ipv4.ip_forward`
+  - Found Uni’s stable loopback address: `128.173.0.1/32`.
+  - Confirmed directly connected links:
+    - `Uni-eth0` to User: Uni `10.0.6.2/30`, peer `10.0.6.1/30`
+    - `Uni-eth1` to AS1: Uni `10.0.1.1/30`, peer `10.0.1.2/30`
+  - Confirmed IPv4 forwarding was enabled:
+    - `net.ipv4.ip_forward = 1`
+  - Observed initial routing:
+    - Default route via AS1: `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - Downstream User route: `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
 
-- Verified direct neighbor connectivity:
-  - Ran `ping -c 2 10.0.6.1`.
-  - Ran `ping -c 2 10.0.1.2`.
-  - Both directly connected neighbors responded successfully.
+- Advertised Uni’s stable loopback and known downstream reachability:
+  - Sent AS1 a route update advertising:
+    - Uni loopback `128.173.0.1/32`
+    - downstream campus node `128.173.10.1/32` reachable via Uni
+  - Sent User a route update advertising:
+    - Uni loopback `128.173.0.1/32`
+    - Uni’s role as the upstream/default gateway for campus traffic
 
-- Advertised Uni routing information to neighbors:
-  - Sent User a route advertisement for Uni loopback `128.173.0.1/32` reachable via `10.0.6.2`.
-  - Sent AS1 a route advertisement for Uni loopback `128.173.0.1/32` reachable via `10.0.1.1`.
-  - Later advertised downstream User prefix `128.173.10.1/32` to AS1 with AS-path `Uni User`.
+- Verified basic connectivity:
+  - Ran:
+    - `ping -c 3 -I 128.173.0.1 128.173.10.1`
+    - `ping -c 3 10.0.1.2`
+    - `ping -c 3 10.0.6.1`
+  - Verified:
+    - User loopback `128.173.10.1` was reachable from Uni’s loopback
+    - AS1 link peer `10.0.1.2` was reachable
+    - User link peer `10.0.6.1` was reachable
 
-- Processed AS1 route advertisements:
+- Audited local packet filtering and NAT state:
+  - Ran:
+    - `nft list ruleset`
+    - `iptables -S`
+    - `iptables -t nat -S`
+  - Found:
+    - Filter policies were ACCEPT
+    - NAT had outbound masquerade:
+      - `-A POSTROUTING -o Uni-eth1 -j MASQUERADE`
+
+- Requested route information from neighbors:
+  - Asked AS1 to advertise its stable loopback and reachable upstream/service prefixes.
+  - Asked User to advertise its loopback and any campus prefixes, and to confirm default routing via Uni.
+
+- Installed AS1-advertised upstream/service routes:
   - AS1 advertised:
-    - Default `0.0.0.0/0` via `10.0.1.2`, AS-path `AS1`.
-    - AS1 loopback/DNS resolver `4.2.2.1/32` via `10.0.1.2`, AS-path `AS1`.
-  - Installed AS1 loopback route:
+    - AS1 loopback `4.2.2.1/32`
+    - AS2 loopback `154.54.1.1/32`
+    - ACM service prefixes `198.82.0.1/32` and `198.82.0.254/32`
+    - EveLink `91.214.0.1/32`
+  - Installed missing routes with:
     - `ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Verified reachability:
-    - `ping -c 2 4.2.2.1`
-  - AS1 later advertised additional authorized specifics:
-    - `91.214.0.1/32` via `10.0.1.2`, AS-path `AS1 EveLink`.
-    - `154.54.1.1/32` via `10.0.1.2`, AS-path `AS1 AS2`.
-    - `192.107.102.1/32` via `10.0.1.2`, AS-path `AS1 AS2 ACM`.
-    - `198.82.0.1/32` via `10.0.1.2`, AS-path `AS1 AS2 ACM`.
-  - Installed/confirmed these specific routes via AS1:
-    - `ip route add 91.214.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
     - `ip route add 154.54.1.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `ip route add 192.107.102.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
     - `ip route add 198.82.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 198.82.0.254/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 91.214.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - Verified resulting routing table included:
+    - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `4.2.2.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `91.214.0.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `154.54.1.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `198.82.0.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `198.82.0.254 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
 
-- Investigated User’s `acm.org` problem:
+- Investigated User’s KP report that `acm.org` failed to load:
   - User reported:
-    - DNS resolved `acm.org` to `198.82.0.1`.
-    - ICMP to `198.82.0.1` succeeded.
-    - TCP and TLS succeeded.
-    - HTTP and HTTPS both returned `503 Service Unavailable` from `nginx/1.18.0`.
-  - Reproduced from Uni:
-    - `ping -c 2 198.82.0.1` succeeded.
-    - Initial `curl http://acm.org/` failed due to local Uni resolver issue, because `/etc/resolv.conf` used `nameserver 127.0.0.1`.
-    - Used explicit resolution to bypass local DNS:
-      - `curl --resolve acm.org:80:198.82.0.1 http://acm.org/`
-      - `curl -k --resolve acm.org:443:198.82.0.1 https://acm.org/`
-    - Confirmed HTTP and HTTPS initially returned `503 Service Unavailable`.
+    - DNS resolved `acm.org` to `198.82.0.1`
+    - ICMP to `198.82.0.1` succeeded
+    - TCP to ports 80 and 443 succeeded
+    - TLS completed successfully
+    - HTTP and HTTPS both returned `HTTP/1.1 503 Service Unavailable`
+  - From Uni, I reproduced the symptom:
+    - Ran:
+      - `ping -c 3 -I 128.173.0.1 198.82.0.1`
+      - HTTP GET using `nc` with source `128.173.0.1`
+      - HTTPS GET using `curl` with source `128.173.0.1`
+    - HTTP test returned:
+      - `HTTP/1.1 503 Service Unavailable`
+      - `Server: nginx/1.18.0`
+      - body: `503 Service Unavailable`
+    - HTTPS test returned the same 503 response.
 
-- Escalated the KP WHY request upstream:
-  - Sent AS1 a KP WHY request for `acm.org` / `198.82.0.1`.
-  - Included User and Uni evidence showing DNS/IP/TCP/TLS worked but application HTTP/HTTPS returned 503.
-  - Asked AS1 to investigate and forward toward AS2/ACM as needed.
+- Escalated the KP investigation upstream:
+  - Sent AS1 a KP WHY request describing the local findings and User’s observations.
+  - Asked AS1 to investigate or relay to ACM/responsible domain.
+  - Did not report a final answer to User until AS1/ACM returned a definitive response.
 
-- Continued verification during the KP investigation:
-  - AS1 reported it saw HTTP/HTTPS `200 OK` from its vantage and forwarded the issue to AS2.
-  - Retested from Uni with timestamped evidence:
-    - At `2026-06-24 09:24:24 UTC`, ping to `198.82.0.1` succeeded.
-    - HTTP with Host `acm.org` returned `HTTP/1.1 200 OK`.
-    - HTTPS with SNI/Host `acm.org` returned `HTTP/1.1 200 OK`.
-  - Sent this evidence to AS1 for forwarding to AS2/ACM.
-  - Periodically retested:
-    - At `2026-06-24 09:25:33 UTC`, HTTP and HTTPS both returned `200 OK`.
+- Followed up with AS1 while the investigation was pending:
+  - Sent a KP follow-up to AS1 after User requested status.
+  - AS1 later confirmed it reproduced the same 503 from outside the university network and had relayed the request via AS2 to ACM.
 
-- Requested User-side confirmation without prematurely closing the case:
-  - Asked User to retest the original browser/curl symptom and report exact DNS, HTTP, and HTTPS evidence.
-  - Did not send a final diagnosis until a definitive upstream FIX/CANNOT was received.
+- Delivered final diagnosis to User:
+  - After AS1 relayed ACM’s definitive response, I sent User the conclusion:
+    - `CANNOT pending ACM administrator action`
+  - Explained that no Uni, AS1, or AS2 routing/DNS/TCP/TLS/firewall/NAT change was indicated.
 
-- Processed final KP response:
-  - AS1 relayed ACM’s responsible-domain result:
-    - The earlier `503` was a transient ACM service-side degradation.
-    - It was not caused by DNS, IP routing, TCP/TLS, AS1 transit, or AS2 transit.
-    - ACM completed an internal service fix.
-    - Detailed internal application/reverse-proxy/backend RCA could not be disclosed externally without admin approval, so detailed RCA was `CANNOT pending admin approval`.
-  - Performed final Uni verification:
-    - At `2026-06-24 09:25:50 UTC`:
-      - `ping -c 2 198.82.0.1` succeeded.
-      - HTTP to `acm.org` at `198.82.0.1` returned `200 OK`.
-      - HTTPS to `acm.org` at `198.82.0.1` returned `200 OK`.
-  - Reported final result to User:
-    - Customer-visible FIX complete.
-    - ACM-side transient service issue fixed.
-    - Detailed RCA unavailable pending admin approval.
-    - No Uni or AS1 routing/transit fix was required.
+- Performed final verification:
+  - Ran:
+    - `curl -4 -sk --interface 128.173.0.1 --resolve acm.org:443:198.82.0.1 -D /tmp/acm_final_headers -o /tmp/acm_final_body https://acm.org/`
+  - Confirmed the symptom persisted:
+    - `HTTP/1.1 503 Service Unavailable`
+    - body: `503 Service Unavailable`
 
 2. Justification behind decisions
 
-- I inspected local addresses and routing first because Uni has no global topology view and must base decisions on direct observations.
-- I verified IP forwarding because Uni is the campus gateway and must route traffic for downstream users.
-- I advertised only Uni’s stable loopback and known downstream User stable prefix, because routing information should be exchanged explicitly and conservatively.
-- I accepted AS1’s small, role-consistent route advertisements because AS1 is Uni’s upstream provider and the advertised prefixes were limited and had plausible AS-paths. The update was not anomalously large.
-- I installed specific host routes for AS1/AS2/ACM-related stable and service addresses to improve explicit reachability while keeping the existing default route through AS1.
-- I did not use routing daemons; all route changes used `ip route add`, as required.
-- I reproduced the `acm.org` symptom locally before escalating because KP conclusions must be evidence-based.
-- I bypassed Uni’s local DNS resolver with `curl --resolve` after observing that Uni’s local name resolution failed, while User had already confirmed DNS resolution. This isolated the application/service path from the local resolver issue.
-- I escalated the WHY request to AS1 because the confirmed failure was beyond Uni’s authority and appeared to involve a remote service at `198.82.0.1`.
-- I did not report an intermediate hypothesis to User as a final answer because KP policy required waiting for a definitive FIX or CANNOT.
-- I requested User retesting and performed repeated Uni retests to verify whether the original symptom persisted.
-- I waited for ACM’s responsible-domain response before closing the issue.
-- I performed final direct Uni verification after ACM reported a fix, because policy required verifying that the original symptom was gone before reporting success.
-- I did not attempt any firewall, ACL, NAT, or security-policy changes because the evidence did not indicate a Uni-side policy fault, and such changes would require administrator approval.
+- I inspected local state first because Uni is the campus gateway and the KP policy requires local investigation before escalating. Routing, interface state, forwarding, firewall, and NAT are all possible causes of user connectivity failures.
 
-3. Discoveries about the network
+- I used Uni’s loopback address `128.173.0.1` as the source for non-adjacent diagnostics because link addresses are point-to-point infrastructure addresses and may not be routable remotely.
 
-- Uni’s stable loopback is `128.173.0.1/32`.
-- User’s stable loopback is `128.173.10.1/32`, reachable via `10.0.6.1` on `Uni-eth0`.
-- AS1’s stable loopback/DNS resolver is `4.2.2.1/32`, reachable via `10.0.1.2` on `Uni-eth1`.
-- Uni’s upstream default route is through AS1:
-  - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`.
-- IP forwarding on Uni is enabled.
-- Direct links to both User and AS1 are operational.
-- AS1 provides transit to AS2 and ACM-related prefixes.
-- ACM service address `198.82.0.1/32` is reachable through AS1/AS2/ACM.
-- The `acm.org` failure was not a reachability problem:
-  - ICMP worked.
-  - TCP worked.
-  - TLS worked.
-  - HTTP/HTTPS initially returned application-layer `503`.
-- The `acm.org` issue was ultimately confirmed as a transient ACM service-side degradation.
-- After ACM’s fix, HTTP and HTTPS returned `200 OK` from Uni, AS1, AS2, and ACM-side vantages.
-- Uni’s local DNS configuration used `127.0.0.1` as resolver and failed to resolve `acm.org` during one local test, but this was not the cause of the User’s reported problem because User DNS resolution succeeded and direct `--resolve` testing reproduced the service-layer issue.
+- I advertised only stable loopback and downstream campus reachability, not point-to-point `/30` infrastructure links, because the link addresses are local to each physical connection and should not be advertised network-wide.
+
+- I accepted AS1’s small route advertisement because it contained a limited, plausible set of upstream/service loopback prefixes consistent with AS1’s role as Uni’s upstream ISP. It was not anomalously large.
+
+- I installed routes using only `ip route add`, as required. I did not use FRR, vtysh, bgpd, zebra, ospfd, or any routing daemon.
+
+- I audited firewall/NAT state but did not change it. Firewall and security enforcement changes require administrator approval, and the observed rules did not indicate a local block.
+
+- I did not report an early conclusion to User after only local reproduction. The KP policy requires waiting for a definitive FIX or CANNOT once a WHY request has been escalated.
+
+- I escalated to AS1 because the observed failure was beyond Uni’s local domain: DNS, ICMP, TCP, and TLS worked, while the remote web server returned HTTP 503. That strongly indicated a service/application-side issue.
+
+- I reported CANNOT only after ACM, via AS1 and AS2, confirmed that durable remediation required ACM administrator-approved action.
+
+3. What was discovered about the network
+
+- Uni’s stable address is `128.173.0.1/32`.
+
+- User’s stable address is `128.173.10.1/32`.
+
+- AS1’s stable address is `4.2.2.1/32`.
+
+- Uni has two direct neighbors:
+  - User over `10.0.6.0/30`
+  - AS1 over `10.0.1.0/30`
+
+- Uni is correctly configured as a gateway:
+  - IPv4 forwarding is enabled.
+  - Default route points to AS1 at `10.0.1.2`.
+  - User loopback route points to User at `10.0.6.1`.
+
+- Uni’s filtering/NAT state is permissive for forwarding:
+  - Filter policies are ACCEPT.
+  - NAT masquerades traffic outbound on `Uni-eth1`.
+
+- AS1 provides upstream reachability to:
+  - `4.2.2.1/32`
+  - `154.54.1.1/32`
+  - `198.82.0.1/32`
+  - `198.82.0.254/32`
+  - `91.214.0.1/32`
+  - default Internet transit
+
+- The `acm.org` issue was not caused by:
+  - Uni routing
+  - User default routing
+  - AS1 routing
+  - DNS resolution
+  - ICMP reachability
+  - TCP connectivity
+  - TLS negotiation
+  - Uni firewall or NAT
+
+- The confirmed issue was that ACM’s public web service at `198.82.0.1` was returning:
+  - `HTTP/1.1 503 Service Unavailable`
+  - from `nginx/1.18.0`
+  - for both HTTP and HTTPS requests to `acm.org`
 
 4. Coordination with other agents
 
 - Coordinated with User:
-  - Received User’s stable loopback advertisement: `128.173.10.1/32`.
-  - Received User’s detailed `acm.org` failure report.
-  - Asked User to retest while the KP investigation was ongoing.
-  - Sent User the final KP result after receiving ACM’s definitive FIX/CANNOT and verifying from Uni.
+  - Received User’s route update:
+    - User loopback `128.173.10.1/32`
+    - default route confirmed via Uni at `10.0.6.2`
+  - Received User’s KP investigation request for `acm.org`.
+  - Later received follow-up test results from User confirming persistent HTTP 503.
+  - Sent final diagnosis to User:
+    - `CANNOT pending ACM administrator action`
 
 - Coordinated with AS1:
-  - Exchanged route advertisements.
-  - Advertised Uni loopback `128.173.0.1/32`.
-  - Advertised downstream User prefix `128.173.10.1/32`.
-  - Received AS1’s route advertisements for default, AS1 loopback, AS2, EveLink, and ACM-related prefixes.
-  - Sent AS1 the KP WHY request for `acm.org`.
-  - Sent AS1 Uni’s timestamped retest evidence.
-  - Requested updated AS1/AS2/ACM KP status while waiting.
-  - Received final ACM responsible-domain result via AS1.
+  - Sent route advertisement for Uni and campus reachability.
+  - Received AS1 route advertisement and confirmation that AS1 had installed routes back to Uni and User.
+  - Sent KP WHY request for the ACM service failure.
+  - Sent follow-up requests while waiting for a definitive answer.
+  - Received AS1’s interim diagnosis:
+    - AS1 reproduced the HTTP 503 outside Uni.
+    - AS1 escalated to ACM via AS2.
+  - Received AS1’s definitive relay from ACM:
+    - ACM confirmed the service-side 503.
+    - ACM attempted low-risk remediation.
+    - Durable fix requires ACM administrator approval.
+    - Final status: CANNOT pending admin action.
 
-- Indirect coordination through AS1 with AS2 and ACM:
-  - AS1 forwarded the KP WHY to AS2.
-  - AS2 tested reachability and service status toward ACM.
-  - ACM confirmed the transient service-side degradation, completed the fix, and reported that detailed internal RCA required admin approval.
+Final outcome
+
+Uni’s routing and gateway function were working correctly. The user-visible failure loading `acm.org` was traced to ACM’s own service returning HTTP/HTTPS 503. No Uni-side fix was appropriate or authorized. The final KP result was CANNOT pending ACM administrator action.

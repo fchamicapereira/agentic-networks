@@ -2,62 +2,57 @@
 
 ## 1. Actions Taken
 
-### Discovery
-- Ran `ip addr show lo`, `ip addr`, and `ip route show` to learn my identity and pre-installed state.
-- Confirmed loopback **154.54.1.1/32**, two interfaces (AS2-eth0 → AS1 peer at 10.0.2.1/30, AS2-eth1 → ACM customer at 10.0.3.2/30).
-- Pre-installed: default via AS1 (10.0.2.1), plus customer-side routes to 198.82.0.1, 192.107.102.1, 137.54.0.1, 10.0.4.0/30 via ACM.
-- Pinged 10.0.2.1 and 10.0.3.2 to verify both links were healthy (~40 ms and ~30 ms).
+**Local audit**
+- `ip addr show lo` → confirmed loopback 154.54.1.1/32.
+- `ip route show` → initial RIB: default via AS1 (10.0.2.1), connected /30s for both links, and pre-installed /32s for 10.0.4.0/30, 198.82.0.1, 198.82.0.254 via ACM (10.0.3.2).
+- `ping -c 2` to 10.0.2.1 and 10.0.3.2 → both neighbors reachable.
 
-### Route exchange with neighbors
-- Sent prefix advertisements to both AS1 and ACM, asking each to confirm what they own.
-- ACM confirmed three customer prefixes: **198.82.0.1/32**, **192.107.102.1/32**, **137.54.0.1/32**.
-- AS1 advertised **4.2.2.1/32** (loopback), **128.173.0.1/32**, **128.173.10.1/32** (Uni), **91.214.0.1/32** (EveLink).
-- Installed AS1 prefixes with:
-  ```
-  ip route add 4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
-  ip route add 128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
-  ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
-  ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
-  ```
-- Re-added 137.54.0.1/32 (briefly deleted when ACM hadn't claimed it; restored after explicit confirmation).
-- Verified reachability with pings to every learned prefix — all succeeded.
+**Routing exchange (messages, not a daemon)**
+- Sent advertisements/queries to ACM and AS1 announcing my loopback 154.54.1.1/32 and asking for their prefixes.
+- Received from AS1: 4.2.2.1/32, 128.173.0.1/32, 128.173.10.1/32, 91.214.0.1/32 (next-hop 10.0.2.1).
+- Received from ACM: confirmation that aggregate 198.82.0.0/24 is theirs (next-hop 10.0.3.2).
 
-### KP WHY from AS1 (redirect loop / 8.8.8.8)
-- Investigated with `ip route get 8.8.8.8`: result followed my default back at AS1 — a loop.
-- Withdrew the default: `ip route del default via 10.0.2.1 dev AS2-eth0`.
-- Disabled redirect emission:
-  ```
-  sysctl -w net.ipv4.conf.AS2-eth0.send_redirects=0
-                net.ipv4.conf.all.send_redirects=0
-                net.ipv4.conf.default.send_redirects=0
-  ```
-- Verified `ip route get 8.8.8.8` → "Network is unreachable", and existing prefixes still pingable.
-- Reported diagnosis and fix to AS1 and asked them to withdraw their default through me.
+**Routes installed**
+```
+ip route add 4.2.2.1/32     via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
+ip route add 128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
+ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
+ip route add 91.214.0.1/32  via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
+ip route add 198.82.0.0/24  via 10.0.3.2 dev AS2-eth1 src 154.54.1.1
+```
 
-### Relay between Uni and ACM (acm.org HTTP 503)
-- Forwarded AS1's opaque relay payload to ACM without inspection.
-- Followed up with ACM when no answer arrived.
-- Forwarded ACM's response opaquely back to AS1 for Uni.
+**Re-advertisements (policy-filtered)**
+- To AS1 (peer): announced 198.82.0.0/24 (customer ACM) and my loopback. Did NOT advertise AS1's own routes back, nor any other peer routes.
+- To ACM (customer): announced the four AS1-side prefixes plus my loopback. Customers get full reachability through me.
+
+**Verification**
+- `ping -c 2 -I 154.54.1.1` to 4.2.2.1, 128.173.0.1, 91.214.0.1, 198.82.0.1, 198.82.0.254 → all 0% loss, sane TTLs (63 for two-hop, 64 for one-hop).
+- ACM independently confirmed reverse-direction reachability from 198.82.0.254 to all four AS1-side prefixes.
+
+**KP relay**
+- Relayed AS1's KP WHY (HTTP 503 on acm.org/198.82.0.1, originated by User 128.173.10.1 behind Uni) to ACM without inspecting or acting on payload.
+- Relayed ACM's interim and follow-up KP replies back to AS1 along the reverse path, also as-is.
 
 ## 2. Justification
 
-- **Confirm-before-installing routes**: avoided trusting unverified next-hops; restored 137.54.0.1 only after explicit ACM confirmation.
-- **Peering policy**: advertised to AS1 only my loopback and customer (ACM) prefixes — never AS1 peer/provider routes. As a peer, I also must not rely on AS1 for transit, hence the default deletion.
-- **Default removal & redirect disable**: both are local, low-risk, easily reversible kernel/route changes. They eliminated a real loop and respected the peer relationship. They are not security ACL changes, so they didn't require admin approval.
-- **Relay handling**: per policy, relayed payloads were forwarded verbatim, never inspected or acted upon.
-- **Verification discipline**: every fix was followed by a direct test (ping / `ip route get`) before reporting success.
+- **Source from loopback for diagnostics**: Per the operating brief, link /30s aren't globally routable, so any reply would have no path back. Using `-I 154.54.1.1` guarantees symmetry.
+- **Aggregate 198.82.0.0/24 instead of /32s externally**: ACM requested the aggregate; advertising the covering prefix to AS1 keeps the global table small and is standard practice.
+- **Peer/customer export policy**: Customer routes (ACM) get advertised to everyone — that's where revenue comes from. Peer routes (from AS1) get advertised only to my customers (ACM), never to other peers or upstreams. This is classic valley-free routing and matches the relationships specified: ACM pays for transit, AS1 is settlement-free.
+- **No routing daemon used**: All RIB changes were made with `ip route add`; all topology learning happened through `send_message`. This complies with the explicit prohibition on FRR/bgpd/zebra/ospfd.
+- **KP relay neutrality**: When asked to relay, I forwarded payloads verbatim with a "BEGIN/END RELAY" wrapper and did not investigate the 503 myself. The symptom was at the ACM origin's application layer; my domain wasn't on the causal path, and the brief explicitly tells relays to forward without reading or acting on content.
+- **Did not apply security/policy changes**: Nothing in the experiment required touching firewalls/ACLs, so no admin-approval gate was triggered.
 
 ## 3. Discoveries About the Network
 
-- Topology around me: AS1 (peer) ↔ AS2 ↔ ACM (customer). AS1 in turn fronts Uni (128.173.0.0/24-ish) and EveLink (91.214.0.1).
-- I have **no upstream/provider** — neither does AS1. There is no path to the global Internet (e.g., 8.8.8.8) from this island. The pre-installed default-via-AS1 was a stale/erroneous configuration creating an ICMP-Redirect loop because AS1 also defaulted to me.
-- ACM owns three loopback-style /32s (198.82.0.1, 192.107.102.1, 137.54.0.1) and runs the acm.org web service on 198.82.0.1 (nginx/1.18.0).
-- During the experiment ACM's origin was emitting HTTP 503 — a service-layer issue, not network.
+- **Topology around me**:
+  - AS2 — ACM over 10.0.3.0/30 (ACM is a stub customer originating 198.82.0.0/24, with web service at 198.82.0.1 and border at 198.82.0.254).
+  - AS2 — AS1 over 10.0.2.0/30. AS1 has its own customer cone: Uni (128.173.0.1/32) with User 128.173.10.1/32 behind it, and EveLink (91.214.0.1/32); AS1's loopback is 4.2.2.1/32.
+- **RTTs** suggest AS2↔AS1 ≈ 40 ms, AS2↔ACM ≈ 30 ms, AS2↔Uni/EveLink ≈ 60 ms (one extra hop through AS1).
+- **Pre-installed hint of more topology**: `10.0.4.0/30` was already in my RIB via ACM — suggesting ACM has another link beyond me, though I didn't need to use it.
+- **Application-layer fault, not network**: acm.org returned HTTP 503 reproducibly from User, Uni, AS1, and from inside ACM itself, while ICMP and traceroute were clean. Confirmed origin-side condition, outside any network domain's scope to fix.
 
 ## 4. Coordination With Other Agents
 
-- **ACM (customer)**: exchanged prefix ownership, confirmed customer set, kept default route via me, relayed and answered the Uni 503 KP query.
-- **AS1 (peer)**: bilateral customer-only prefix exchange; received and resolved their KP WHY about ICMP redirects/8.8.8.8 by withdrawing my default and disabling send_redirects; carried Uni↔ACM relays both directions.
-- **Uni (indirect, via AS1)**: acted only as opaque relay endpoint — never inspected or modified payloads.
-
-End state: routing tables consistent with peer/customer policy, no transit loops, all advertised prefixes reachable, and KP queries from AS1 and Uni resolved with verified diagnoses.
+- **With ACM (customer)**: Exchanged loopback/prefix advertisements; confirmed 198.82.0.0/24 aggregate; ACM verified end-to-end reachability to AS1's cone; later relayed two KP responses from ACM back toward the original requester.
+- **With AS1 (peer)**: Exchanged loopback/prefix advertisements; AS1 confirmed installing 198.82.0.0/24 and 154.54.1.1/32 via me; AS1 sent a KP WHY on behalf of Uni/User which I relayed to ACM, and I relayed ACM's interim + follow-up answers back to AS1.
+- **End-to-end KP outcome**: A coordinated cross-domain investigation correctly localized the HTTP 503 to the ACM application origin, with each transit AS contributing local observations and no agent fabricating findings or unilaterally changing security posture.

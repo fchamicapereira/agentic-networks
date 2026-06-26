@@ -1,43 +1,46 @@
-# Experiment Report: Investigating acm.org Reachability Failure
+# Experiment Report: Investigating acm.org Unreachability
 
 ## 1. Actions Taken
 
-**Initial reconnaissance (local state):**
-- `ip addr show` — discovered my loopback 128.173.10.1/32 and link address 10.0.6.1/30 on User-eth0.
-- `ip route show` — confirmed default route via 10.0.6.2 (Uni) was already installed; no route changes were required during the experiment.
+**Phase 1 — Local state gathering:**
+- `ip addr show lo` — to discover my stable node address (found 128.173.10.1/32 on lo).
+- `ip route show` — to confirm I had a working default route (default via 10.0.6.2 dev User-eth0).
+- `getent hosts acm.org` — to test DNS resolution (returned 198.82.0.1).
 
-**Reproducing the failure:**
-- `getent hosts acm.org` and `nslookup acm.org` — resolved acm.org to 198.82.0.1, but nslookup returned a "REFUSED" status, which I flagged as suspicious.
-- `ping -c 2 -W 2 acm.org` — 100% packet loss to 198.82.0.1.
-- `ping -c 2 -W 2 10.0.6.2` — gateway reachable (~4ms, 0% loss), proving the local link was healthy.
-- Later: `ping -c 2 -W 2 128.173.0.1` — confirmed Uni's loopback was reachable end-to-end.
+**Phase 2 — Reachability tests:**
+- `ping -c 3 -W 2 -I 128.173.10.1 198.82.0.1` — 100% packet loss to the resolved target.
+- `curl -sS -m 10 --interface 128.173.10.1 http://acm.org/` — connection timed out after 10s (HTTP 000).
+- `ping -c 2 -W 2 -I 128.173.10.1 10.0.6.2` — confirmed my next-hop (Uni) was healthy (~4ms, 0% loss).
 
-**Coordination with the Knowledge Plane (via Uni):**
-- Sent Uni my loopback (128.173.10.1/32) in response to its hello, so it could confirm reachability.
-- Reported the technical findings to the KP: the suspicious DNS answer, the 100% loss to 198.82.0.1 contrasted with a healthy gateway, and the installed default route.
-- Sent two polite follow-up nudges when the KP went quiet, asking for status.
-- Once the KP returned a definitive CANNOT, relayed the diagnosis faithfully to the owner and called `report_done`.
+**Phase 3 — Escalation to Knowledge Plane:**
+- Sent a structured technical report to Uni (my local KP contact) describing the symptom and all five objective observations, asking for path-level investigation.
+- Waited (idle) for KP response.
+
+**Phase 4 — Reporting back:**
+- Received KP diagnosis: explicit iptables DROP rules on Uni's FORWARD and OUTPUT chains targeting 198.82.0.0/24, with confirmed packet-counter increment from my probes. Resolution: CANNOT, already escalated to admins.
+- Reported to the owner in plain language, with workaround suggestion (non-campus connection), and noted no action was required on their part.
 
 ## 2. Justification for Each Decision
 
-- **Gather objective observations before reporting**: the owner's description ("page failed to load") was vague. The KP needs facts, not paraphrase. So I reproduced the failure with `ping` and DNS lookups before opening a ticket.
-- **Test both the target and the gateway**: distinguishing "my link is broken" from "the destination is unreachable" is essential to a useful bug report. Gateway-OK + target-FAIL pointed clearly to a problem upstream of me.
-- **Flagging the nslookup REFUSED**: even though the IP turned out to be correct, reporting an anomaly rather than silently trusting it gave the KP something concrete to verify (which it did, ruling out poisoning).
-- **No route changes**: the default route was already correct and the gateway was reachable. Adding/removing routes would have been noise.
-- **Idle while waiting**: the KP explicitly said investigation was open. Polling the network repeatedly would not have accelerated upstream diagnosis; brief, polite check-ins at long intervals were appropriate.
-- **Faithful relay to the owner**: the KP said it had escalated to administrators. I told the owner exactly that — including that they do not need to contact anyone — rather than giving them homework.
+- **Sourcing diagnostics from loopback (128.173.10.1):** The instructions explicitly warn that link-local IPs (10.0.6.1) are not routable across the network, so replies could be lost even if forwarding is fine. Loopback gives a clean test.
+- **DNS check before connectivity check:** Cheapest way to rule out a name-resolution failure, which is a common cause of "page failed to load."
+- **Pinging next-hop first:** To distinguish a local-link problem from an upstream problem before bothering the KP.
+- **Not paraphrasing the user's complaint to the KP:** The owner is non-technical; the KP needs measurable evidence (loss rates, exit codes, source addresses), not "page failed to load."
+- **Trusting the KP's CANNOT verdict:** The diagnosis was internally consistent with my observations (matching packet counts, same /24, same drop behavior), so there was no inconsistency to push back on.
+- **Not adding or removing any routes:** The default route was correct and the failure was a policy drop, not a routing problem. Touching routes would have been wrong.
 
-## 3. What I Discovered About the Network
+## 3. Network Discoveries
 
-- My node sits on a /30 point-to-point link (10.0.6.0/30) to the Uni gateway, with my stable identity advertised as loopback 128.173.10.1/32.
-- Uni (10.0.6.2, loopback 128.173.0.1/32) is the default gateway and my contact point for the Knowledge Plane. The campus prefix is 128.173.0.0/16.
-- The upstream topology (revealed by the KP, not by me directly) is User → Uni → AS1 → AS2 → ACM. AS1 has a loopback at 4.2.2.1; ACM's web server is 198.82.0.1 (Virginia Tech address space, 198.82.0.0/24).
-- **Root cause of the outage**: two iptables DROP rules on the Uni gateway itself — one in FORWARD and one in OUTPUT — blocking all traffic to 198.82.0.0/24. Drop counters incremented exactly per probe, confirming the block was local to Uni, not an upstream routing/return-path problem (which had initially been the KP's hypothesis).
-- DNS for acm.org is legitimate; the path beyond Uni (AS1, AS2, ACM) was verified healthy by upstream tcpdump and reverse pings to the campus loopbacks.
-- Fixing this requires Uni network administrator authorization, since it is a deliberate security policy rule. The KP escalated rather than acting unilaterally.
+- My stable node address is **128.173.10.1/32** (a Virginia Tech-style public prefix), assigned to lo.
+- I have a single point-to-point uplink (User-eth0, 10.0.6.0/30) to **Uni** at 10.0.6.2, which serves as both my default gateway and my KP contact.
+- The campus gateway (Uni) enforces a **firewall policy that drops all traffic to 198.82.0.0/24** in both FORWARD and OUTPUT chains. This is administrative, not a fault.
+- DNS resolution works end-to-end (acm.org → 198.82.0.1 was returned), so the blocked prefix happens to host acm.org but the resolver itself was reachable.
+- The KP overlay is functional: it can inspect rule sets and packet counters on intermediate nodes (Uni reported "10 pkts / 672 bytes" matching my probe traffic) and correlate them with the source's complaint.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-- **Uni (direct neighbor, KP contact)**: exchanged loopback information for end-to-end reachability confirmation; submitted my plain-language problem description with technical observations; received two interim status updates and one definitive CANNOT. Sent two follow-up nudges during long quiet periods.
-- **AS1, AS2, ACM (indirect, via KP)**: I had no direct contact with these agents. The KP relayed WHY queries upstream on my behalf. AS1 confirmed the DNS mapping and ran tcpdump on the AS1↔AS2 link; AS2 confirmed prefix installation and pinged campus loopbacks; ACM confirmed the server was alive. The KP later corrected its own interim hypothesis (it had initially blamed AS2/ACM return path) once a local capture on Uni proved the drop was on Uni itself.
-- **Owner**: received one final consolidated report explaining the cause (local firewall block on 198.82.0.0/24), the fact that DNS and the rest of the Internet path are fine, and that administrators have already been notified — so no action is required from them.
+Only one peer was directly involved: **Uni**.
+
+- I sent one structured diagnostic request to Uni (acting as KP entry point), enumerating my five test results and asking for a path-level diagnosis.
+- Uni (via the KP) responded with a definitive finding: iptables DROP rules on 198.82.0.0/24, confirmed by matching counter increments against my probe traffic, with resolution CANNOT and confirmation that campus admins were already notified.
+- No relay-through-Uni messaging to other agents was needed, no routes were exchanged, and no routing daemons were touched. All coordination fit a single request/response with the local KP contact.

@@ -1,160 +1,260 @@
-Experiment report — Uni gateway router
+Experiment report — Uni node
 
 1. Actions taken
 
-- Inspected local addressing and routing:
-  - Ran: `ip addr show && ip route show`
-  - Found Uni loopback stable address: `128.173.0.1/32`
-  - Found directly connected links:
-    - `Uni-eth0`: `10.0.6.2/30` to User `10.0.6.1`
-    - `Uni-eth1`: `10.0.1.1/30` to AS1 `10.0.1.2`
-  - Found current routes:
-    - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-    - `10.0.1.0/30 dev Uni-eth1`
-    - `10.0.6.0/30 dev Uni-eth0`
-    - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
-
-- Verified forwarding state:
-  - Ran: `sysctl net.ipv4.ip_forward`
-  - Confirmed IPv4 forwarding was enabled: `net.ipv4.ip_forward = 1`
-
-- Advertised routes to directly connected neighbors:
-  - Sent AS1 a route advertisement for:
-    - Uni loopback `128.173.0.1/32`
-    - User/customer loopback `128.173.10.1/32`
-  - Sent User a route advertisement for:
-    - Uni loopback `128.173.0.1/32`
-    - Default/Internet path via Uni toward AS1
-
-- Investigated User’s KP diagnostic request for `acm.org`:
-  - User reported `acm.org` resolved to `10.0.0.99`, ping failed, curl failed, and TTL exceeded came from AS1 `10.0.1.2`.
+- Inspected Uni local state before making changes:
   - Ran:
-    - `ip route get 10.0.0.99`
-    - `ping -c 3 -W 1 -I 128.173.0.1 10.0.0.99 || true`
-    - `traceroute -n -m 8 -w 1 10.0.0.99 || true`
-  - Confirmed Uni would send `10.0.0.99` via AS1:
-    - `10.0.0.99 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Ping to `10.0.0.99` failed.
-  - Traceroute showed path instability/loop symptoms involving AS1 and upstream addresses.
+    - `ip addr show lo`
+    - `ip addr show`
+    - `ip route show`
+    - `sysctl net.ipv4.ip_forward`
+  - Found Uni stable loopback address: `128.173.0.1/32`
+  - Confirmed physical interfaces:
+    - `Uni-eth0`: `10.0.6.2/30`, connected to User at `10.0.6.1`
+    - `Uni-eth1`: `10.0.1.1/30`, connected to AS1 at `10.0.1.2`
+  - Confirmed forwarding was enabled:
+    - `net.ipv4.ip_forward = 1`
+  - Observed existing routes:
+    - Default route via AS1: `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - User route: `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
 
-- Escalated the unresolved upstream path problem to AS1:
-  - Sent AS1 a KP WHY request for destination `acm.org / 10.0.0.99`.
-  - Included User symptoms and Uni’s observation that the route to `10.0.0.99` used AS1 as next hop.
+- Exchanged routing information with neighbors:
+  - Sent AS1 Uni’s stable loopback prefix:
+    - `128.173.0.1/32`
+  - Sent User Uni’s stable loopback prefix:
+    - `128.173.0.1/32`
+  - Asked both neighbors to advertise their stable loopbacks and reachable prefixes.
 
-- Re-advertised the User route explicitly to AS1:
-  - Sent AS1 an explicit route advertisement:
-    - `128.173.10.1/32 reachable via Uni next-hop 10.0.1.1`
-  - This ensured return traffic to the reporting User would not be confused with the forward-path failure.
-
-- Checked AS1’s stale-DNS hypothesis from Uni:
+- Verified direct neighbor reachability using Uni’s loopback as source:
   - Ran:
-    - `getent hosts acm.org || true`
-    - `ping -c 3 -W 1 -I 128.173.0.1 198.82.0.1 || true`
-    - `ip route get 198.82.0.1`
-  - Confirmed `198.82.0.1` was reachable from Uni via AS1:
-    - Ping succeeded with 0% packet loss.
-    - Route was `198.82.0.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`.
+    - `ping -c 2 -I 128.173.0.1 10.0.1.2`
+    - `ping -c 2 -I 128.173.0.1 10.0.6.1`
+  - Both succeeded, confirming direct link health to AS1 and User.
 
-- Forwarded additional User traceroute evidence to AS1:
-  - User reported a persistent loop alternating between AS1 `10.0.1.2` and AS2 `154.54.1.1`.
-  - Sent that evidence to AS1 for incorporation into the KP investigation.
+- Installed AS1 stable loopback route:
+  - After AS1 advertised `4.2.2.1/32`, ran:
+    - `ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - Verified:
+    - `ping -c 2 -I 128.173.0.1 4.2.2.1`
+  - Ping succeeded.
 
-- Reported definitive diagnosis to User after AS1 responded:
-  - Sent User the final KP result:
-    - Status: `CANNOT pending AS1 administrator approval/action`
-    - Root cause: AS1 DNS resolver `4.2.2.1` had a static dnsmasq override causing `acm.org` to resolve to unreachable `10.0.0.99`.
-    - Correct ACM address `198.82.0.1` was reachable.
-    - The TTL loop was a secondary symptom caused by traffic toward the bogus address.
+- Installed additional AS1-advertised stable prefixes:
+  - Ran:
+    - `ip route add 91.214.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 154.54.1.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 198.82.0.1/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+    - `ip route add 198.82.0.254/32 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - These represented EveLink, AS2, and ACM/server prefixes learned from AS1.
+  - The update volume was small and consistent with AS1’s upstream/transit role, so it was not treated as anomalous.
 
-- Sent later addenda to User when AS1/AS2 provided more confirmation:
-  - AS2 confirmed it had only a default route for `10.0.0.99` back to AS1.
-  - AS1 defaulted `10.0.0.99` to AS2, and AS2 defaulted it back to AS1.
-  - This confirmed the forwarding-loop condition.
-  - Final status remained `CANNOT` because fixing DNS policy or installing reject/blackhole routes required administrator approval.
+- Advertised User’s stable prefix upstream:
+  - After User confirmed `128.173.10.1/32`, sent AS1 a routing advertisement for:
+    - `128.173.10.1/32` via Uni
+  - AS1 later confirmed it installed routes for both:
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
 
-- No routing rules were changed locally.
-  - I did not run any `ip route add` or `ip route del` commands.
-  - Existing local routing was correct, and the fault was outside Uni’s administrative control.
+- Investigated User’s KP problem report for acm.org:
+  - User reported:
+    - `acm.org` and `www.acm.org` resolved to `10.0.0.99`
+    - HTTP and HTTPS curl attempts to `10.0.0.99` failed with “No route to host”
+    - User route to destination used default via Uni
+  - Per KP policy, I audited Uni locally before escalating.
 
-2. Justification behind each decision
+- Checked forwarding decisions for User-originated traffic:
+  - Initial local-source route checks failed because `128.173.10.1` is not local to Uni:
+    - `ip route get 10.0.0.99 from 128.173.10.1`
+    - `ip route get 198.82.0.1 from 128.173.10.1`
+    - These returned “Network is unreachable”
+  - Corrected the test by specifying ingress interface:
+    - `ip route get 10.0.0.99 from 128.173.10.1 iif Uni-eth0`
+    - `ip route get 198.82.0.1 from 128.173.10.1 iif Uni-eth0`
+    - `ip route get 198.82.0.254 from 128.173.10.1 iif Uni-eth0`
+  - Results showed traffic from User would be forwarded via:
+    - `10.0.1.2 dev Uni-eth1`
+  - This confirmed Uni had a forwarding path toward AS1.
 
-- I first inspected local interfaces, loopback, routes, and forwarding because Uni is the campus gateway and needed to verify its own state before diagnosing or escalating.
+- Audited Uni firewall/NAT state:
+  - Ran:
+    - `iptables -S`
+    - `iptables -t nat -S`
+    - `nft list ruleset`
+  - Findings:
+    - Filter policies were ACCEPT:
+      - `INPUT ACCEPT`
+      - `FORWARD ACCEPT`
+      - `OUTPUT ACCEPT`
+    - NAT rule:
+      - `-A POSTROUTING -o Uni-eth1 -j MASQUERADE`
+    - `nft` was not installed.
+  - This showed Uni firewall policy was not blocking User’s traffic.
 
-- I advertised Uni’s loopback and the User prefix because stable loopback reachability is required for end-to-end communication between KP agents, and AS1 needed the User prefix for return traffic.
+- Tested Uni reachability to ACM and the bad DNS-returned address:
+  - Ran:
+    - `ping -c 2 -I 128.173.0.1 198.82.0.1`
+    - `ping -c 2 -I 128.173.0.1 198.82.0.254`
+    - `ping -c 2 -I 128.173.0.1 10.0.0.99`
+  - Results:
+    - `198.82.0.1` reachable
+    - `198.82.0.254` reachable
+    - `10.0.0.99` failed, with ICMP TTL exceeded from `154.54.1.1`
+  - This indicated ACM advertised prefixes were reachable, but the private address returned by DNS was not.
 
-- I did not install or delete routes because Uni already had:
-  - A valid default route to AS1.
-  - A valid route back to User.
-  - Enabled IPv4 forwarding.
-  The observed failure was not caused by a missing Uni route.
+- Checked Uni DNS resolution:
+  - Ran:
+    - `getent hosts acm.org`
+    - `getent hosts www.acm.org`
+    - `cat /etc/resolv.conf`
+  - Found:
+    - Both names resolved to `10.0.0.99`
+    - Uni used local resolver `127.0.0.1`
 
-- I tested `10.0.0.99` directly from Uni because the User’s symptom involved that destination, and I needed local evidence before escalating.
+- Compared HTTP behavior:
+  - Ran:
+    - `curl -4 -m 5 --interface 128.173.0.1 -v http://198.82.0.1/`
+    - `curl -4 -m 5 --interface 128.173.0.1 -v http://10.0.0.99/`
+  - Results:
+    - HTTP to `198.82.0.1` succeeded and returned ACM Digital Library content.
+    - HTTP to `10.0.0.99` failed with “No route to host.”
+  - This confirmed the service was reachable at the expected ACM address, but not at the DNS-returned private address.
 
-- I escalated to AS1 because Uni’s route to `10.0.0.99` correctly pointed upstream to AS1, and the observed TTL exceeded messages implicated the upstream path.
+- Inspected DNS processes and configuration:
+  - Ran:
+    - `ps -ef | grep '[d]nsmasq'`
+    - `find /etc -maxdepth 3 \( -iname '*dnsmasq*' -o -iname '*hosts*' -o -iname 'resolv.conf' \) -type f -print -exec sed -n '1,160p' {} \;`
+  - Found Uni’s DNS stub:
+    - `dnsmasq --no-resolv --no-hosts --server=4.2.2.1 --listen-address=127.0.0.1 --listen-address=128.173.0.1 ...`
+  - Found User’s DNS stub:
+    - `dnsmasq --no-resolv --no-hosts --server=4.2.2.1 --listen-address=127.0.0.1 --listen-address=128.173.10.1 ...`
+  - Found AS1 resolver instance on `4.2.2.1`:
+    - `dnsmasq ... --local=/acm.org/ --address=/acm.org/10.0.0.99 --listen-address=4.2.2.1 ...`
+  - Found AS2 resolver instance on `154.54.1.1`:
+    - `dnsmasq ... --local=/acm.org/ --address=/acm.org/198.82.0.1 --listen-address=154.54.1.1 ...`
 
-- I withheld a final reply to User until AS1 provided a definitive result, following the Knowledge Plane rule that intermediate hypotheses should not be reported as final answers.
+- Queried resolvers directly:
+  - Ran:
+    - `dig +short acm.org @4.2.2.1`
+    - `dig +short www.acm.org @4.2.2.1`
+    - `dig +short acm.org @154.54.1.1`
+    - `dig +short www.acm.org @154.54.1.1`
+    - `dig +short acm.org @198.82.0.254`
+    - `dig +short www.acm.org @198.82.0.254`
+  - Results:
+    - AS1 resolver `4.2.2.1` returned `10.0.0.99`
+    - AS2 resolver `154.54.1.1` returned `198.82.0.1`
+    - ACM resolver `198.82.0.254` also returned `10.0.0.99` in this local process view, but AS1 later reported AS2 independently confirmed the intended ACM service at `198.82.0.1`
+  - The clearest confirmed root cause was AS1’s resolver override returning `10.0.0.99`.
 
-- I tested `198.82.0.1` because AS1 suggested that it was the real reachable ACM web address. The successful ping helped distinguish a general routing failure from a stale-DNS-specific problem.
+- Escalated through the Knowledge Plane:
+  - Sent AS1 a WHY request after local Uni checks showed:
+    - Uni forwarding was working.
+    - Uni firewall was not blocking.
+    - ACM server prefix `198.82.0.1` was reachable.
+    - DNS was returning `10.0.0.99`, which failed/looped.
+  - Forwarded additional User traceroute evidence to AS1:
+    - Hop 1: `128.173.0.1`
+    - Hop 2: `10.0.1.2`
+    - Hop 3: `154.54.1.1`
+    - Hop 4: `10.0.1.2`
+    - Then repeated between AS1 and AS2.
+  - Asked User for local DNS details, without requesting configuration changes.
 
-- I did not attempt to change firewall, DNS, ACL, or route-reject behavior because such changes affect security or customer-visible network policy and require administrator approval.
+- Reported definitive diagnosis to User:
+  - After AS1 confirmed root cause, sent User:
+    - `CANNOT pending AS1 admin action`
+  - Explained that AS1 resolver `4.2.2.1` had an explicit local dnsmasq override:
+    - `--local=/acm.org/ --address=/acm.org/10.0.0.99`
+  - Explained that `10.0.0.99` is private/unadvertised and loops/fails between AS1 and AS2.
+  - Stated proposed fix:
+    - AS1 DNS administrators must remove the bad override or replace it with intended address such as `198.82.0.1`, then restart/reload the resolver and retest.
+  - Did not apply the fix because it is outside Uni authority and affects DNS resolver policy/security boundaries.
 
-- I reported `CANNOT pending admin action` because AS1 and AS2 confirmed the required fixes were outside autonomous KP authority.
+2. Justification behind decisions
 
-3. What I discovered about the network
+- I inspected local routes, interfaces, forwarding, firewall, NAT, and DNS before escalating, because KP policy requires local investigation before blaming another domain.
+- I sourced diagnostic traffic from Uni’s loopback `128.173.0.1` because link addresses are infrastructure-only and may not be routable from non-adjacent nodes.
+- I installed AS1-advertised stable prefixes because they were limited in number, consistent with AS1’s role as upstream/transit, and needed for stable loopback reachability.
+- I advertised User’s stable loopback upstream because remote nodes need stable loopback routes for end-to-end diagnostic and service reachability.
+- I did not treat AS1’s prefix update as anomalous because it contained a small set of expected stable prefixes: AS1, EveLink, AS2, and ACM/server addresses.
+- I corrected my route lookup method by using `iif Uni-eth0` after realizing that `128.173.10.1` is not local to Uni. This gave the actual forwarding decision for packets arriving from User.
+- I did not change firewall, ACL, NAT, or DNS policy because such changes can affect users and security boundaries and require administrator approval.
+- I escalated to AS1 only after confirming that Uni forwarding and firewall state were not responsible.
+- I did not reply to User with a final answer until AS1 provided a confirmed diagnosis.
+- I continued idling after the final CANNOT because the required fix is in AS1’s administrative domain and no Uni-side remediation was authorized.
 
-- Uni’s stable loopback is `128.173.0.1/32`.
+3. Discoveries about the network
 
-- User’s stable loopback is `128.173.10.1/32`, reachable from Uni via `10.0.6.1` on `Uni-eth0`.
+- Uni stable loopback:
+  - `128.173.0.1/32`
 
-- AS1’s peer address is `10.0.1.2`, and its stable loopback/resolver is `4.2.2.1/32`.
+- User stable loopback:
+  - `128.173.10.1/32`
 
-- Uni has a working default route to AS1:
+- AS1 stable loopback / resolver:
+  - `4.2.2.1/32`
+
+- AS2 loopback / resolver:
+  - `154.54.1.1/32`
+
+- EveLink stable prefix:
+  - `91.214.0.1/32`
+
+- ACM/server prefixes advertised by AS1:
+  - `198.82.0.1/32`
+  - `198.82.0.254/32`
+
+- Uni’s final relevant routes included:
   - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - `4.2.2.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - `91.214.0.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
+  - `154.54.1.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - `198.82.0.1 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
+  - `198.82.0.254 via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
 
-- IPv4 forwarding on Uni is enabled.
-
-- AS1 installed the return route for User:
-  - `128.173.10.1/32 via 10.0.1.1`
-
-- The User-visible `acm.org` failure was not caused by Uni routing.
-
-- AS1’s resolver `4.2.2.1` was configured with a stale/static dnsmasq override:
-  - `acm.org -> 10.0.0.99`
-
-- `10.0.0.99` was not a valid advertised ACM destination and was unreachable.
-
-- The reachable ACM web address was confirmed as:
+- Uni forwarding was enabled and functioning.
+- Uni firewall was permissive for forwarding:
+  - `FORWARD ACCEPT`
+- Uni NAT was configured:
+  - `POSTROUTING -o Uni-eth1 -j MASQUERADE`
+- The ACM web service was reachable at:
   - `198.82.0.1`
-
-- Uni could reach `198.82.0.1` through AS1 successfully.
-
-- The TTL exhaustion was a secondary routing-loop symptom:
-  - AS1 defaulted traffic for `10.0.0.99` toward AS2.
-  - AS2 had only a default route for `10.0.0.99` back to AS1.
-  - Packets looped between AS1 and AS2 until TTL expired.
+- The broken DNS-returned address was:
+  - `10.0.0.99`
+- Traffic to `10.0.0.99` failed and looped between AS1 and AS2:
+  - User traceroute showed repeated hops involving `10.0.1.2` and `154.54.1.1`.
+  - Uni ping to `10.0.0.99` received TTL exceeded from `154.54.1.1`.
+- Root cause:
+  - AS1’s resolver `4.2.2.1` had a local override mapping `acm.org` and `www.acm.org` to `10.0.0.99`.
+  - This was not caused by User or Uni DNS host files or local overrides.
+- Required fix:
+  - AS1 administrators must remove or correct the resolver override and reload/restart DNS.
+  - This was not applied autonomously because it changes DNS resolver policy/configuration for customers.
 
 4. Coordination with other agents
 
-- Coordinated with User:
-  - Received the original KP diagnostic request.
-  - Received User route advertisement for `128.173.10.1/32`.
-  - Received additional tracepath evidence showing the AS1-AS2 loop.
-  - Sent User the definitive diagnosis and later addenda.
-
 - Coordinated with AS1:
-  - Advertised Uni and User stable prefixes.
-  - Received AS1 route/resolver information.
-  - Sent KP WHY request for `acm.org / 10.0.0.99`.
-  - Sent additional User traceroute evidence.
-  - Received AS1’s definitive finding that the root cause was a stale DNS override.
-  - Received AS1’s final `CANNOT pending admin approval/action`.
+  - Exchanged stable loopback routes.
+  - Received AS1 route advertisements for AS1, EveLink, AS2, and ACM prefixes.
+  - Advertised Uni and User stable prefixes upstream.
+  - Sent KP WHY request about acm.org failure after local Uni audit.
+  - Forwarded User traceroute and DNS evidence.
+  - Received AS1 confirmation that:
+    - It had route reachability to Uni/User and other stable prefixes.
+    - Its resolver was returning `10.0.0.99` because of a local dnsmasq override.
+    - It could not apply the fix autonomously because AS1 DNS policy/config changes require administrator approval.
+  - Received final AS1/AS2 confirmation of the diagnosis.
 
-- AS1 coordinated with AS2:
-  - AS1 queried AS2/ACM to verify authoritative/reachable ACM addressing.
-  - AS2 confirmed its resolver returned `198.82.0.1`.
-  - AS2 confirmed the default-route-back-to-AS1 behavior for `10.0.0.99`.
-  - AS2 declined autonomous route-policy changes and reported `CANNOT pending admin approval`.
+- Coordinated with User:
+  - Exchanged stable loopback information.
+  - Received the original acm.org problem report.
+  - Requested User DNS resolver details without asking for changes.
+  - Received confirmation that User’s dnsmasq stub forwards to AS1 resolver `4.2.2.1` and has no local acm.org override.
+  - Reported final diagnosis and CANNOT status to User.
+  - Sent final confirmation update after AS1/AS2 independently confirmed the root cause.
 
-Final outcome
-
-The experiment concluded with a confirmed diagnosis but no autonomous fix. Uni’s routing and forwarding were correct. The root cause was AS1’s stale DNS resolver override for `acm.org`, which directed users to unreachable `10.0.0.99`. A secondary AS1-AS2 forwarding loop existed for that bogus destination. Required remediation is an AS1 administrator-approved DNS configuration change, with optional administrator-approved reject/blackhole policy for `10.0.0.99` or similar unrouted destinations.
+Final status:
+- Diagnosis complete.
+- Root cause is AS1 DNS resolver override for `acm.org`.
+- Uni has no authorized local fix.
+- Status reported to User: `CANNOT`, pending AS1 administrator action.

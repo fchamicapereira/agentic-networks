@@ -1,1 +1,14 @@
-I observed a DNS resolution issue with `acm.org` and confirmed it using `nslookup`. I decided to inform Uni and escalate the issue to the upstream ISP (AS1) for further investigation. I waited for Uni's response and reported the escalation to the owner. After receiving a final update from Uni, I verified the DNS resolution again but found it still failing, suggesting the issue might not be fully resolved.
+1. **What was observed:**
+   - Traceroute to `acm.org` showed traffic reaching Uni (128.173.0.1) but failing to progress further.
+   - Uni was unresponsive initially, leading to follow-up messages.
+   - AS1 was involved but slow to respond, while AS2 was brought in for additional diagnostics.
+
+2. **What was decided:**
+   - Reported traceroute findings to Uni and followed up for updates.
+   - Kept the owner informed about the status and actions taken.
+   - Idled to allow Uni time to investigate and respond.
+
+3. **Why:**
+   - To diagnose the network issue and identify the point of failure.
+   - To ensure Uni was actively working on the problem and to expedite resolution.
+   - To maintain transparency and manage expectations with the owner.

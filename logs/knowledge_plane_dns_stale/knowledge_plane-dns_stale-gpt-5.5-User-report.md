@@ -1,139 +1,168 @@
-Experiment report
+Experiment report: acm.org website failure investigation
 
 1. Actions taken
 
-- Checked local interface and routing state:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show User-eth0`
-    - `ip route show`
-  - Observed:
-    - Stable loopback: `128.173.10.1/32`
-    - Direct link to Uni: `User-eth0` with local IP `10.0.6.1/30`, peer `10.0.6.2/30`
-    - Default route: `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+- Checked local addressing, routes, resolver configuration, and interface state:
+  - `ip addr show lo`
+  - `ip route show`
+  - `cat /etc/resolv.conf`
+  - `ip addr show User-eth0 || ip addr show eth0`
 
-- Reproduced the reported website failure locally:
-  - Ran:
-    - `getent hosts acm.org || true`
-    - `ping -c 3 acm.org || true`
-    - `curl -I --max-time 10 http://acm.org || true`
-    - `curl -I --max-time 10 https://acm.org || true`
-  - Observed:
-    - `acm.org` resolved to `10.0.0.99`
-    - Ping to `10.0.0.99` failed with 100% packet loss
-    - Received an ICMP `Time to live exceeded` from `10.0.1.2`
-    - HTTP and HTTPS attempts failed with `No route to host`
+- Confirmed the laptop’s stable loopback address:
+  - Found `128.173.10.1/32` on `lo`.
 
-- Contacted the Knowledge Plane through the directly connected Uni agent:
-  - Sent Uni a diagnostic request describing the human’s complaint and my objective observations:
-    - DNS resolution result
-    - Ping failure
-    - HTTP/HTTPS failure
-    - Local addressing and default route
+- Confirmed local connectivity to the directly connected neighbor Uni:
+  - `ping -c 3 10.0.6.2`
+  - Result: 0% packet loss, about 4 ms RTT.
 
-- Processed Uni’s route advertisement:
-  - Uni advertised:
-    - `128.173.0.1/32` reachable via `10.0.6.2`
-    - Default/Internet route via Uni toward AS1
-  - Installed an explicit route to Uni’s stable loopback:
-    - `ip route add 128.173.0.1/32 via 10.0.6.2 dev User-eth0 src 128.173.10.1`
-  - Advertised my own stable loopback to Uni:
-    - `128.173.10.1/32` reachable via `10.0.6.1`
+- Tested DNS resolution for the reported site:
+  - `getent ahosts acm.org`
+  - Python `socket.getaddrinfo()` for `acm.org` and `www.acm.org`
+  - Result: both resolved to `10.0.0.99`.
 
-- Gathered additional path diagnostics:
-  - Ran:
-    - `tracepath -n 10.0.0.99 || traceroute -n 10.0.0.99 || true`
-  - Observed:
-    - Hop 1: `128.173.0.1`
-    - Hop 2: `10.0.1.2`
-    - Hop 3: `154.54.1.1`
-    - Then a repeated loop alternating between `10.0.1.2` and `154.54.1.1` until TTL exhaustion
-  - Sent this traceroute evidence to Uni for the Knowledge Plane investigation.
+- Reproduced the website failure using the stable loopback as source:
+  - `curl -4 -v --connect-timeout 5 --max-time 15 --interface 128.173.10.1 http://acm.org/`
+  - `curl -4 -vk --connect-timeout 5 --max-time 15 --interface 128.173.10.1 https://acm.org/`
+  - Result: both failed with `No route to host` when connecting to `10.0.0.99` on ports 80 and 443.
 
-- Verified the Knowledge Plane’s diagnosis:
-  - After Uni reported that AS1’s resolver was returning a stale address for `acm.org`, I ran:
-    - `getent hosts acm.org || true`
-    - `ping -c 3 198.82.0.1 || true`
-    - `curl -I --max-time 10 --resolve acm.org:443:198.82.0.1 https://acm.org/ || true`
-    - `curl -I --max-time 10 --resolve acm.org:80:198.82.0.1 http://acm.org/ || true`
-  - Observed:
-    - Local DNS still returned `10.0.0.99` for `acm.org`
-    - The real ACM address `198.82.0.1` was reachable by ping
-    - HTTP/HTTPS connections to `198.82.0.1` using an explicit host resolution override reached a web server, confirming that connectivity to the real destination worked when DNS was bypassed.
+- Advertised my stable loopback to Uni:
+  - Sent message to Uni stating that `128.173.10.1/32` is reachable via `10.0.6.1`.
 
-- Reported the diagnosis back to the laptop owner and marked the investigation complete.
+- Sent the initial technical failure report to Uni/KP with:
+  - Owner’s original symptom.
+  - Local loopback and default route.
+  - DNS result.
+  - Curl failures.
+  - Confirmation that the direct link to Uni was healthy.
+
+- Gathered path-level diagnostics:
+  - `ip route get 10.0.0.99 from 128.173.10.1`
+  - `ping -c 3 -I 128.173.10.1 10.0.0.99`
+  - `traceroute -n -s 128.173.10.1 -w 2 -q 1 10.0.0.99`
+  - Result: route lookup used default via `10.0.6.2`; ping received TTL-exceeded from `10.0.1.2`; traceroute showed a loop involving `10.0.1.2` and `154.54.1.1`.
+
+- Reported the routing-loop evidence to Uni/KP.
+
+- Responded to KP’s request to inspect local DNS resolver/forwarder configuration without making changes:
+  - Checked `/etc/resolv.conf`.
+  - Searched `/etc/hosts` and related files for `acm.org`, `www.acm.org`, and `10.0.0.99`.
+  - Searched dnsmasq and NetworkManager-related configuration for DNS overrides.
+  - Checked listening DNS processes with `ss -lntup '( sport = :53 )'`.
+  - Checked dnsmasq process details:
+    - `ps -fp 264`
+    - `tr '\0' ' ' < /proc/264/cmdline`
+  - Found dnsmasq running with:
+    - `--no-resolv`
+    - `--no-hosts`
+    - `--server=4.2.2.1`
+    - `--listen-address=127.0.0.1`
+    - `--listen-address=128.173.10.1`
+
+- Queried local DNS directly:
+  - `dig acm.org A`
+  - `dig @127.0.0.1 acm.org A`
+  - `dig www.acm.org A`
+  - `dig @127.0.0.1 www.acm.org A`
+  - Result: local dnsmasq returned `10.0.0.99` for both names.
+
+- Reported the DNS forwarder findings to Uni/KP.
+
+- Did not configure or modify any routes.
+  - No `ip route add` or `ip route del` commands were used.
+  - The observed routing state already had a default route via Uni:
+    - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+
+- Reported the KP diagnosis back to the owner and marked the investigation complete.
 
 2. Justification behind each decision
 
-- I first inspected local addresses and routes to establish the laptop’s own network state before blaming the wider network. This confirmed that the laptop had a valid link to Uni and a default route through Uni.
+- I first inspected local state because the owner’s browser symptom was non-specific. I needed objective evidence about whether the failure was caused by local addressing, routing, DNS, or remote service reachability.
 
-- I reproduced the browser failure with command-line tools rather than forwarding the owner’s non-technical description directly. DNS, ping, and curl gave concrete evidence about whether the failure was due to name resolution, reachability, or the web service itself.
+- I used the loopback address `128.173.10.1` as the source for diagnostic traffic because it is the stable node address that remote nodes can route back to. The point-to-point link address `10.0.6.1` is only infrastructure-scoped and could have caused misleading reply failures.
 
-- I contacted Uni because the laptop is not itself part of the Knowledge Plane and Uni is the local Knowledge Plane contact. Since the failure appeared to involve routing beyond the local machine, the Knowledge Plane was the appropriate system to investigate the wider network.
+- I tested the direct link to Uni to confirm that the laptop’s immediate network attachment was healthy before escalating to the Knowledge Plane.
 
-- I installed the route to Uni’s stable loopback because Uni explicitly advertised `128.173.0.1/32`, and this maintained direct reachability to the local KP contact using the required `ip route add` mechanism.
+- I tested DNS resolution separately from HTTP/HTTPS connectivity to determine whether the browser failure was a name-resolution problem, a routing problem, or a web-service problem.
 
-- I advertised my own loopback `128.173.10.1/32` to Uni because the experiment instructions required stable node addresses to be advertised so nodes could reach each other end-to-end.
+- I used `curl` to both HTTP and HTTPS because browsers commonly try HTTPS, but either protocol should have shown whether TCP connectivity to the resolved address worked.
 
-- I ran `tracepath` after seeing a TTL exceeded error from `10.0.1.2`. That error suggested a possible forwarding loop, and tracepath was the appropriate next test to identify where packets were circulating.
+- I sent the findings to Uni rather than directly acting on the wider network because User is not part of the Knowledge Plane and does not have global topology visibility.
 
-- I did not install any large or suspicious route set, and I did not use any routing daemon. Route management was limited to the explicit Uni loopback route using `ip route add`, as required.
+- I collected traceroute and ping evidence after the initial curl failures because `No route to host` alone did not identify where the failure occurred. Traceroute showed a likely routing loop, which was important evidence for the KP.
 
-- I verified the KP diagnosis independently before reporting back. The KP claimed that the bad result was DNS-related and that the real ACM address was reachable; testing `198.82.0.1` directly confirmed that the problem was the stale DNS mapping rather than a general inability to reach ACM.
+- I did not change DNS or routing configuration when KP requested inspection only. The goal at that point was diagnosis, not local workaround or uncoordinated repair.
 
-3. What was discovered about the network
+- I inspected dnsmasq command-line options specifically because `/etc/resolv.conf` pointed to `127.0.0.1`, meaning the laptop was using a local DNS forwarder. The command line revealed the real upstream resolver, `4.2.2.1`.
 
-- The laptop’s local network configuration was correct:
-  - Stable loopback: `128.173.10.1/32`
-  - Uni link: `10.0.6.1/30` to `10.0.6.2/30`
-  - Default route through Uni: `10.0.6.2`
+3. What I discovered about the network
 
-- `acm.org` incorrectly resolved to `10.0.0.99` from this environment.
+- User’s stable loopback address is:
+  - `128.173.10.1/32`
 
-- `10.0.0.99` was not a valid reachable ACM web destination.
+- User is directly connected to Uni over:
+  - User side: `10.0.6.1/30`
+  - Uni side: `10.0.6.2/30`
 
-- Traffic to `10.0.0.99` entered a forwarding loop beyond Uni:
-  - The observed loop alternated between `10.0.1.2` and `154.54.1.1`.
-  - The Knowledge Plane later clarified that this was caused by AS1 defaulting traffic for `10.0.0.99` toward AS2, while AS2 defaulted it back toward AS1.
+- User’s default route is:
+  - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- The real ACM web address was identified as `198.82.0.1`.
+- The local link to Uni is healthy.
 
-- `198.82.0.1` was reachable from the laptop:
-  - Ping to `198.82.0.1` succeeded with 0% packet loss.
-  - HTTP/HTTPS tests using curl with `--resolve acm.org:...:198.82.0.1` reached a web server.
+- User’s local DNS resolver is dnsmasq listening on:
+  - `127.0.0.1:53`
+  - `128.173.10.1:53`
 
-- The root cause was AS1’s DNS resolver configuration:
-  - AS1 resolver `4.2.2.1` was running dnsmasq with a static override:
-    - `acm.org -> 10.0.0.99`
-  - That stale override caused clients to use an unreachable address instead of the reachable ACM address.
+- Local dnsmasq is configured not to use local hosts or resolv.conf:
+  - `--no-resolv`
+  - `--no-hosts`
 
-- The required primary fix is administrative:
-  - AS1 administrators must remove or replace the stale dnsmasq override so `acm.org` resolves to `198.82.0.1`.
-  - AS1 must restart or flush dnsmasq after the change.
+- Local dnsmasq forwards upstream DNS queries to:
+  - `4.2.2.1`
 
-- A secondary network hygiene issue was also identified:
-  - AS1 and AS2 can loop traffic for the bogus destination `10.0.0.99`.
-  - AS1 or AS2 administrators may choose to install a reject, blackhole, or policy route for that kind of unrouted/private destination, but that is a forwarding-policy change and was not applied autonomously.
+- `acm.org` and `www.acm.org` resolved to:
+  - `10.0.0.99`
+
+- `10.0.0.99` is not the intended ACM web address. KP later confirmed it is a private/non-advertised address created by a bad AS1 resolver override.
+
+- Traffic from User to `10.0.0.99` fails and appears to loop between AS1 and AS2 default paths. Traceroute showed repeated appearances of:
+  - `10.0.1.2`
+  - `154.54.1.1`
+
+- KP confirmed the root cause:
+  - AS1 resolver `4.2.2.1` has a bad local dnsmasq override:
+    - `--local=/acm.org/`
+    - `--address=/acm.org/10.0.0.99`
+
+- KP also confirmed:
+  - AS2 resolver returns the intended ACM address `198.82.0.1`.
+  - ACM HTTP service at `198.82.0.1` is reachable.
+  - The problem is not User’s local routing, Uni’s local routing, or the laptop’s local DNS stub.
+  - The required fix is for AS1 administrators to remove or correct the bad DNS override and reload/restart the AS1 resolver.
 
 4. Coordination with other agents
 
-- Coordinated only with the directly connected Uni agent, as required by the messaging rules.
-
-- Sent Uni:
-  - Initial diagnostic observations about the `acm.org` failure.
-  - My stable loopback advertisement: `128.173.10.1/32`.
-  - Additional tracepath evidence showing the loop toward `10.0.0.99`.
-  - A final verification note confirming that DNS still returned `10.0.0.99` while `198.82.0.1` was reachable.
+- Coordinated only with directly connected neighbor Uni, which is User’s Knowledge Plane contact.
 
 - Received from Uni:
-  - A route advertisement for Uni’s stable loopback `128.173.0.1/32`.
-  - Confirmation that default/Internet routing goes via Uni toward AS1.
-  - The Knowledge Plane diagnosis:
-    - AS1’s resolver had a stale dnsmasq override for `acm.org`.
-    - The real ACM address `198.82.0.1` was reachable.
-    - The fix required AS1 administrator approval.
-  - Final addenda:
-    - AS1 confirmed the laptop’s return route `128.173.10.1/32` was installed.
-    - AS2 confirmed the secondary AS1-AS2 default-route loop for `10.0.0.99`.
-    - AS1 and AS2 administrators had been notified where appropriate.
-    - No autonomous configuration change was made because the needed fixes require administrator approval.
+  - Uni’s stable loopback advertisement:
+    - `128.173.0.1/32` reachable via `10.0.6.2`
+  - Confirmation that Uni already had User’s loopback route:
+    - `128.173.10.1/32 via 10.0.6.1`
+
+- Sent Uni:
+  - User’s stable loopback advertisement:
+    - `128.173.10.1/32 via 10.0.6.1`
+  - Initial objective failure report for acm.org.
+  - Additional traceroute/ping evidence showing a routing loop.
+  - DNS resolver inspection results showing local dnsmasq forwarded to `4.2.2.1`.
+
+- Received KP diagnosis through Uni:
+  - Status: `CANNOT`, pending AS1 administrator action.
+  - Root cause: AS1 DNS resolver override incorrectly maps `acm.org` and `www.acm.org` to `10.0.0.99`.
+  - AS1 administrators had already been notified.
+
+- Received final KP confirmation through Uni:
+  - AS2 independently confirmed the diagnosis.
+  - AS2 resolver returns intended address `198.82.0.1`.
+  - Traffic to bad address `10.0.0.99` loops/fails because it is private/non-advertised.
+  - Status remains pending AS1 administrator approval/action.

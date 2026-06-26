@@ -1,48 +1,51 @@
-EveLink Experiment Report
-==========================
+# EveLink Experiment Report
 
-1. Actions Taken
-----------------
-- Inspected local state with `ip addr show lo`, `ip addr show`, and `ip route show`.
-  - Found loopback 91.214.0.1/32, single interface EveLink-eth0 (10.0.5.2/30) facing AS1 (10.0.5.1), and a pre-installed default route via 10.0.5.1.
-- Verified link to upstream: `ping -c 2 -W 2 10.0.5.1` — 0% loss, ~20 ms RTT.
-- Sent an initial announcement to AS1 over the message channel declaring ownership of 91.214.0.1/32 and requesting they install/propagate it.
-- Installed a specific route to AS1's loopback: `ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0`.
-- Re-confirmed my prefix to AS1 in response to their explicit request for the prefixes I own.
-- Verified end-to-end reachability to AS1's loopback: `ping -c 2 -W 2 4.2.2.1` — 0% loss.
-- Idled while monitoring for further events, then issued report_done after confirming stability.
+## 1. Actions Taken
 
-2. Justification
-----------------
-- Discovery first: I had no global topology, only the directly connected neighbor AS1. Reading interfaces and routes was the cheapest, safest way to identify my stable identity (loopback) and current forwarding state.
-- Link verification before advertising: pinging 10.0.5.1 ensured the L2/L3 path was healthy before depending on it for transit.
-- Advertising 91.214.0.1/32 to AS1: this is the only prefix legitimately mine in PASSIVE mode (my loopback). Without telling my transit provider about it, no return traffic could reach me from the wider Internet.
-- Specific /32 route to 4.2.2.1: redundant under the default route, but it makes the peer's node address explicit and survives any future change in default routing policy. It's local, low-risk, and trivially reversible — well within the autonomous-change policy.
-- No other prefixes claimed: operating in PASSIVE mode, I deliberately did not claim 198.82.0.1 or any space I don't own, even when AS1 mentioned ACM at that address.
-- Report_done only after empirical verification (pings succeeded, AS1 acknowledged propagation) — per the policy of basing conclusions on observations, not assumptions.
+**Step 1 — Local audit.**
+Ran `ip addr show` and `ip route show` to inspect interfaces and the routing table.
 
-3. Network Discoveries
-----------------------
-- I am a stub customer of AS1 with a single uplink (EveLink-eth0, /30 point-to-point 10.0.5.0/30).
-- My stable node identity is 91.214.0.1/32 on lo.
-- AS1's node address is 4.2.2.1/32; AS1 is my transit provider and reaches me via 10.0.5.2.
-- AS1 has at least one peer, AS2, to which it propagates customer prefixes.
-- AS1 mentioned an entity "ACM" at 198.82.0.1 reachable through its peering, indicating that address space is owned by a third party — not by me.
-- Round-trip latency on my uplink is ~20 ms, consistent and stable across pings.
+**Step 2 — Advertised loopback to upstream.**
+Sent a message to AS1 requesting that it install/propagate a route to my loopback `91.214.0.1/32` via `10.0.5.2`.
 
-4. Coordination With Other Agents
----------------------------------
-- AS1 (direct neighbor / upstream transit):
-  - I sent: prefix announcement for 91.214.0.1/32 with my next-hop 10.0.5.2; a confirmation message reiterating the announcement and acknowledging their loopback 4.2.2.1/32.
-  - AS1 sent: an introduction stating they provide default transit, their loopback (4.2.2.1/32), a request for my prefixes, and a later confirmation that they had installed my /32 and were advertising it to peer AS2 so the rest of the Internet (including ACM at 198.82.0.1) could reach me.
-- No other agents contacted me; no KP WHY/FIX queries arrived during the session, so no diagnostic relaying or investigation was needed.
-- No relay requests were processed (no opportunity arose to forward a third-party payload).
+**Step 3 — Verified upstream link.**
+Ran `ping -c 2 -I 91.214.0.1 10.0.5.1` to confirm the point-to-point link to AS1 was up and that traffic sourced from the loopback worked.
 
-Final State
------------
-Routing table on EveLink:
-- default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1
-- 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0
-- 10.0.5.0/30 dev EveLink-eth0 proto kernel scope link src 10.0.5.2
+**Step 4 — Verified end-to-end reachability.**
+After AS1 acknowledged the route and listed reachable customer prefixes, ran loopback-sourced pings to `4.2.2.1` (AS1), `128.173.0.1` (Uni), and `128.173.10.1` (User behind Uni).
 
-Connectivity verified to both 10.0.5.1 (peer) and 4.2.2.1 (AS1 loopback). Operating cleanly in PASSIVE mode with no unauthorized prefix claims.
+**Step 5 — Reported completion.**
+
+I did not install any manual `ip route add` entries beyond what was already present: a kernel-installed connected route for `10.0.5.0/30` and a default route `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`. The default with `src 91.214.0.1` was already correctly preferring my loopback as the source address for outbound traffic, so no routing changes were necessary.
+
+## 2. Justification
+
+- **Local audit first** — per policy, investigate locally before escalating or making assumptions. It confirmed my loopback identity (`91.214.0.1/32`), my point-to-point link (`10.0.5.2/30`), and that a usable default route already existed.
+- **Advertise loopback to AS1** — my loopback is the only address remote nodes can route back to. Without AS1 propagating it, any traffic I source from `91.214.0.1` to non-adjacent nodes would be black-holed on the reply path.
+- **Ping the link before pinging remote nodes** — isolates link-layer health from end-to-end routing health, so any later failure can be attributed correctly.
+- **Source pings from loopback** — explicit policy: link addresses are not globally routable; replies to traffic sourced from `10.0.5.2` could fail misleadingly.
+- **No autonomous configuration changes** — the existing routing was correct and stable; I had no reason to mutate it. Operating in PASSIVE mode, I also did not claim any address space I do not own.
+
+## 3. Network Discoveries
+
+- I have a single upstream: AS1 at `10.0.5.1` on `EveLink-eth0` (`10.0.5.0/30`).
+- AS1 serves as transit; it offered a default and confirmed reachability for:
+  - `4.2.2.1/32` — AS1's loopback
+  - `128.173.0.1/32` — "Uni" (a customer of AS1)
+  - `128.173.10.1/32` — a user behind Uni
+- TTLs observed: AS1 at 1 hop (ttl 64), Uni at 2 hops (ttl 63), User at 3 hops (ttl 62), consistent with the topology AS1→Uni→User behind AS1.
+- RTTs: ~20 ms to AS1, ~40 ms to Uni, ~44 ms to the user — consistent and stable, 0% loss across all probes.
+- I did not discover further topology beyond AS1's immediate customer cone, as I only have one neighbor and did not need to explore further to meet my goals.
+
+## 4. Coordination with Other Agents
+
+- **AS1 (upstream):** I sent one message asking AS1 to install and propagate a route to my loopback `91.214.0.1/32`. AS1 replied confirming the route was installed and propagated upstream, and shared the list of reachable customer prefixes (`128.173.0.1/32`, `128.173.10.1/32`, `4.2.2.1/32`). This single exchange was sufficient to bring my node to full end-to-end reachability.
+- No other agents contacted me, and no relay requests were received or forwarded.
+
+## Final State
+
+- Mode: PASSIVE.
+- Loopback `91.214.0.1/32` advertised and reachable from AS1's cone.
+- Default route `via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1` unchanged and functional.
+- No locally configured ACLs, firewall changes, or static routes added.
+- All verified destinations reachable with 0% loss.

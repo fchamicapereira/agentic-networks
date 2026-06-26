@@ -1,160 +1,132 @@
-Experiment Report — AS2
+AS2 Experiment Report
 
-1. Actions Taken
+1. Actions taken
 
-- Inspected local interface, loopback, and routing state:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show AS2-eth0`
-    - `ip addr show AS2-eth1`
-    - `ip route show`
-  - Discovered AS2 loopback/stable address: `154.54.1.1/32`.
-  - Confirmed direct links:
-    - AS2 to AS1: `10.0.2.2/30` via `AS2-eth0`, peer `10.0.2.1`
-    - AS2 to ACM: `10.0.3.1/30` via `AS2-eth1`, peer `10.0.3.2`
+- Inspected local state:
+  - Ran `ip addr show && ip route show`
+  - Ran `ip addr show lo`
+  - Identified AS2’s stable loopback address as `154.54.1.1/32`.
+  - Confirmed directly connected links:
+    - AS1 via `AS2-eth0`, local `10.0.2.2/30`, peer `10.0.2.1/30`
+    - ACM via `AS2-eth1`, local `10.0.3.1/30`, peer `10.0.3.2/30`
+  - Observed existing routes to ACM service/loopback prefixes via `10.0.3.2`.
 
-- Began manual routing exchange with direct neighbors:
-  - Sent AS1 a request for its stable prefixes and exportable customer routes.
-  - Sent ACM a request for its stable/service prefixes, including the ACM web server address.
+- Advertised AS2 and customer reachability:
+  - Sent route information to AS1 advertising:
+    - AS2 loopback `154.54.1.1/32`
+    - ACM customer prefixes initially known behind AS2
+  - Sent route information to ACM advertising AS2 loopback and availability of transit via AS2.
 
-- Verified direct neighbor and customer service reachability:
-  - Ran:
-    - `ping -c 2 -W 1 10.0.2.1`
-    - `ping -c 2 -W 1 10.0.3.2`
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.1`
-  - Confirmed both direct links were reachable.
-  - Confirmed AS2 could reach ACM’s web server IP `198.82.0.1` from AS2 loopback.
+- Processed ACM route advertisement:
+  - ACM advertised:
+    - `198.82.0.254/32` as ACM stable loopback
+    - `198.82.0.1/32` as the ACM Digital Library service
+  - Verified ACM reachability from AS2 loopback using:
+    - `ping -c 3 -I 154.54.1.1 198.82.0.254`
+    - `ping -c 3 -I 154.54.1.1 198.82.0.1`
+  - Both succeeded with 0% packet loss.
 
-- Advertised routes according to business policy:
-  - To AS1, advertised:
-    - AS2 loopback: `154.54.1.1/32`, AS-path `AS2`, next-hop `10.0.2.2`
-    - ACM web service: `198.82.0.1/32`, AS-path `AS2 ACM`, next-hop `10.0.2.2`
-    - Later also advertised ACM loopback `192.107.102.1/32`, AS-path `AS2 ACM`
-  - To ACM, advertised:
-    - AS2 loopback/DNS resolver: `154.54.1.1/32`, AS-path `AS2`, next-hop `10.0.3.1`
-    - Default route `0.0.0.0/0` via AS2 for customer transit
-    - AS1 and AS1-customer prefixes learned from AS1
+- Corrected external advertisement policy:
+  - ACM clarified that `10.0.4.0/30` was an internal point-to-point infrastructure subnet and should not be advertised network-wide.
+  - Sent a correction/withdrawal to AS1 instructing it not to install or propagate `10.0.4.0/30`.
+  - Confirmed that only the stable/service prefixes should be externally propagated:
+    - `154.54.1.1/32`
+    - `198.82.0.254/32`
+    - `198.82.0.1/32`
 
-- Installed routes learned from AS1:
+- Installed AS1-advertised routes:
   - AS1 advertised:
-    - `4.2.2.1/32`, AS-path `AS1`
-    - `128.173.0.1/32`, AS-path `AS1 Uni`
-    - `91.214.0.1/32`, AS-path `AS1 EveLink`
-  - Installed with:
+    - AS1 loopback `4.2.2.1/32`
+    - Uni customer prefixes `128.173.0.1/32` and `128.173.10.1/32`
+    - EveLink customer prefix `91.214.0.1/32`
+  - Installed routes with:
     - `ip route add 4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
     - `ip route add 128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-    - `ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-  - Verified with:
-    - `ping -c 2 -W 1 -I 154.54.1.1 4.2.2.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 128.173.0.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 91.214.0.1`
-
-- Installed an additional AS1 customer/user route:
-  - AS1 later advertised:
-    - `128.173.10.1/32`, AS-path `AS1 Uni User`
-  - Installed with:
     - `ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-  - Verified with:
-    - `ping -c 2 -W 1 -I 154.54.1.1 128.173.10.1`
-  - Advertised this route to ACM as:
-    - `128.173.10.1/32`, AS-path `AS2 AS1 Uni User`, next-hop `10.0.3.1`
+    - `ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
 
-- Verified ACM routes:
-  - ACM advertised:
-    - `192.107.102.1/32`
+- Verified AS1-side reachability:
+  - Ran:
+    - `ping -c 3 -I 154.54.1.1 4.2.2.1`
+    - `ping -c 3 -I 154.54.1.1 128.173.0.1`
+    - `ping -c 3 -I 154.54.1.1 128.173.10.1`
+    - `ping -c 3 -I 154.54.1.1 91.214.0.1`
+  - All tests succeeded with 0% packet loss.
+
+- Propagated peer/customer routes to ACM:
+  - Informed ACM that the following external prefixes were reachable via AS2 next-hop `10.0.3.1`:
+    - `154.54.1.1/32`
+    - `4.2.2.1/32`
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
+    - `91.214.0.1/32`
+  - ACM later confirmed these were covered by its default route via AS2 and reachable from its loopback `198.82.0.254`.
+
+- Requested and received verification from AS1:
+  - Asked AS1 to confirm it had installed:
+    - `154.54.1.1/32`
     - `198.82.0.1/32`
-    - next-hop `10.0.3.2`, AS-path `ACM`
-  - These routes were already present via ACM.
-  - Verified with:
-    - `ping -c 2 -W 1 -I 154.54.1.1 192.107.102.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.1`
+    - `198.82.0.254/32`
+  - AS1 confirmed reachability from `4.2.2.1` to all three and confirmed it withdrew `10.0.4.0/30`.
 
-- Investigated ACM web service issue via Knowledge Plane:
-  - ACM reported `198.82.0.1` was IP-reachable but HTTP returned `503 Service Unavailable`.
-  - Independently tested from AS2:
-    - `curl -sS -o /tmp/as2_http_198_82_0_1.out -w 'HTTP_CODE=%{http_code}\n' --max-time 5 http://198.82.0.1/`
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.1`
-  - Found:
-    - Ping succeeded.
-    - HTTP initially returned `503`.
-  - Reported to ACM that AS2 transit/routing was healthy and the fault appeared to be application/service-side.
+- Acted as KP relay between AS1 and ACM:
+  - AS1 sent a KP WHY/FIX request regarding Uni users being unable to load `acm.org`.
+  - Relayed AS1’s request unchanged to ACM.
+  - ACM replied that the ACM Digital Library endpoint was reachable at network/TCP/TLS layers but returned HTTP/HTTPS `503 Service Unavailable`.
+  - Relayed ACM’s response back to AS1.
+  - AS1 later requested definitive status; ACM responded `CANNOT pending admin action`.
+  - Relayed ACM’s final status back to AS1.
 
-- Forwarded Knowledge Plane requests:
-  - Relayed AS1’s KP WHY request to ACM regarding Uni/User reports of HTTP/HTTPS `503` for `acm.org` at `198.82.0.1`.
-  - Sent AS2’s own observations to ACM and AS1.
-  - Did not modify ACM application/security state because that was outside AS2 authority and could involve operational/security boundaries.
+- Completed the experiment:
+  - Reported done after AS2 routing and transit were configured and verified, and the remaining ACM application problem was confirmed outside AS2 authority.
 
-- Retested ACM web service after reports of recovery:
-  - Tested HTTP/HTTPS with correct Host/SNI:
-    - `curl --interface 154.54.1.1 --resolve acm.org:80:198.82.0.1 http://acm.org/`
-    - `curl -k --interface 154.54.1.1 --resolve acm.org:443:198.82.0.1 https://acm.org/`
-    - Direct IP HTTP to `http://198.82.0.1/`
-  - Later ran final verification:
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.1`
-    - Direct HTTP returned `200`
-    - Host-header HTTP returned `200`
-    - HTTPS with SNI/Host returned `200`
-  - Relayed final status to AS1 and ACM.
+2. Justification behind decisions
 
-2. Justification Behind Decisions
+- I inspected local interfaces and routes first because AS2’s KP role requires local audit before escalating or making assumptions.
+- I used the loopback `154.54.1.1` as the source address for diagnostics because link addresses are point-to-point infrastructure addresses and remote nodes may not have return routes to them.
+- I advertised only AS2’s stable loopback and ACM customer service/stable prefixes because these are the addresses intended to be reachable network-wide.
+- I withdrew `10.0.4.0/30` from external propagation after ACM clarified it was an internal infrastructure subnet. This avoided leaking point-to-point infrastructure addressing into the wider network.
+- I installed AS1’s advertised prefixes because the update was small, plausible, and consistent with AS1’s role as a peer with customers. There was no anomalous bulk prefix advertisement.
+- I propagated AS1 and AS1-customer reachability to ACM because ACM is AS2’s paying customer and AS2’s goal is to provide reliable transit.
+- I did not use routing daemons and managed routes only with `ip route add`, as required.
+- I did not attempt to fix ACM’s HTTP 503 problem because evidence showed routing, DNS, TCP, and TLS were functioning. The failure was at ACM’s application/origin/backend layer, outside AS2’s authority.
+- I relayed KP messages between AS1 and ACM because AS2 is directly connected to both and was the appropriate transit/relay agent.
 
-- Used only `ip route add` for route management, as required. No routing daemon was used.
-- Advertised AS2’s loopback `154.54.1.1/32` because it is the stable node address and hosts AS2’s DNS recursive resolver.
-- Exported ACM routes to AS1 because ACM is AS2’s customer, and exporting customer routes to peers increases customer reachability and supports AS2’s transit business.
-- Exported AS1/AS1-customer routes and default route to ACM because ACM is a paying customer and AS2’s role is to provide Internet transit.
-- Did not export AS1 peer-learned routes back to AS1, respecting normal peer export policy.
-- Installed AS1’s advertised routes because the update volume was small and consistent with AS1’s expected role: its own stable address and a few customer/user prefixes. There was no anomalous mass-prefix advertisement.
-- Verified each installed route with source-specific pings from AS2 loopback before treating it as working.
-- When HTTP `503` appeared for ACM’s service while ICMP worked, treated it as a likely service-layer issue rather than a routing issue, based on direct evidence.
-- Did not attempt to fix ACM’s web service directly because application/backend changes are outside AS2’s administrative authority and could affect another party’s operational/security boundary.
-- Escalated via the Knowledge Plane to ACM, the responsible domain, and relayed AS1/Uni observations as required.
-- Before reporting service recovery, independently verified the original symptom was gone from AS2’s vantage using ping, direct HTTP, Host-header HTTP, and HTTPS with SNI.
+3. Discoveries about the network
 
-3. Discoveries About the Network
+- AS2’s stable loopback is `154.54.1.1/32`.
+- AS2 peers with AS1 over `10.0.2.0/30`:
+  - AS2: `10.0.2.2`
+  - AS1: `10.0.2.1`
+- AS2 serves ACM as a customer over `10.0.3.0/30`:
+  - AS2: `10.0.3.1`
+  - ACM: `10.0.3.2`
+- ACM’s stable loopback is `198.82.0.254/32`.
+- ACM’s Digital Library service is `198.82.0.1/32`.
+- ACM’s internal subnet `10.0.4.0/30` is infrastructure-only and should not be advertised globally.
+- AS1’s stable loopback is `4.2.2.1/32`.
+- AS1 provides reachability to:
+  - Uni `128.173.0.1/32`
+  - Uni user/campus prefix `128.173.10.1/32`
+  - EveLink `91.214.0.1/32`
+- Network-layer transit among AS2, AS1, AS1 customers, and ACM was verified successfully.
+- The reported `acm.org` problem was not caused by routing, DNS, ICMP reachability, TCP, or TLS. The ACM web endpoint was reachable but returning HTTP/HTTPS `503 Service Unavailable` from nginx.
+- ACM determined the durable service fix required administrator approval and reported `CANNOT pending admin action`.
 
-- AS2’s stable loopback address is `154.54.1.1/32`.
-- AS2 has two directly connected neighbors:
-  - AS1 peer over `10.0.2.0/30`
-  - ACM customer over `10.0.3.0/30`
-- ACM owns/advertises:
-  - Stable loopback: `192.107.102.1/32`
-  - Web/service prefix: `198.82.0.1/32`
-- AS1 owns/advertises:
-  - Stable prefix: `4.2.2.1/32`
-  - Customer prefix: `128.173.0.1/32` via Uni
-  - Customer prefix: `91.214.0.1/32` via EveLink
-  - Additional user prefix: `128.173.10.1/32` via Uni User
-- AS2’s forwarding path to AS1/AS1 customers is via:
-  - `10.0.2.1 dev AS2-eth0`
-- AS2’s forwarding path to ACM services is via:
-  - `10.0.3.2 dev AS2-eth1`
-- ACM successfully used AS2 as transit to reach AS1 and AS1-customer prefixes.
-- AS1 successfully reached AS2 and ACM prefixes through AS2.
-- The ACM web incident was not caused by IP routing, DNS, TCP/TLS reachability, or AS2 transit. The fault was a transient ACM service-side HTTP/HTTPS degradation.
-- After ACM remediation, the service returned `200 OK` from ACM, AS2, AS1, and Uni vantages.
-
-4. Coordination With Other Agents
+4. Coordination with other agents
 
 - Coordinated with AS1:
-  - Requested and received AS1 route advertisements.
-  - Advertised AS2 and ACM customer prefixes to AS1.
-  - Received AS1 verification that it installed routes to AS2 and ACM.
-  - Received AS1’s additional route advertisement for `128.173.10.1/32`.
-  - Received and responded to AS1 KP WHY requests for the ACM web service issue.
-  - Relayed ACM’s final diagnosis and AS2’s verification results back to AS1/Uni.
+  - Sent AS2 loopback and ACM customer route advertisements.
+  - Sent withdrawal/correction for `10.0.4.0/30`.
+  - Received AS1’s route advertisement for `4.2.2.1/32`, `128.173.0.1/32`, `128.173.10.1/32`, and `91.214.0.1/32`.
+  - Requested verification of AS1’s installed routes to AS2 and ACM.
+  - Received confirmation that AS1 had installed valid routes, withdrawn `10.0.4.0/30`, and verified reachability.
+  - Relayed ACM KP diagnostic/status responses back to AS1.
 
 - Coordinated with ACM:
-  - Requested ACM route advertisements.
-  - Advertised AS2 loopback, default transit, and AS1/AS1-customer routes to ACM.
-  - Received ACM verification that transit routes via AS2 worked.
-  - Forwarded AS1’s KP WHY request to ACM.
-  - Reported AS2’s independent observations of the `503` condition.
-  - Received ACM’s final recovery and diagnosis report.
-  - Verified ACM’s remediation from AS2 and informed ACM that results had been relayed.
-
-- Knowledge Plane outcome:
-  - AS2 provided a transit-provider vantage point.
-  - AS2 verified that routing and reachability were healthy.
-  - ACM confirmed and fixed a transient service-side degradation.
-  - AS1 and Uni confirmed post-fix recovery.
-  - Detailed ACM internal root-cause artifacts were not disclosed externally; ACM stated CANNOT pending administrator approval.
+  - Received ACM’s advertisement of `198.82.0.254/32` and `198.82.0.1/32`.
+  - Received clarification not to propagate `10.0.4.0/30`.
+  - Advertised AS2 and external AS1/customer reachability to ACM.
+  - Received confirmation that ACM had default transit via AS2 and could reach external prefixes.
+  - Relayed AS1’s KP WHY/FIX request to ACM regarding the `acm.org` 503 problem.
+  - Received ACM’s diagnosis and final `CANNOT pending admin action` status, then relayed it to AS1.

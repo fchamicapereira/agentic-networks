@@ -2,159 +2,140 @@ Experiment report
 
 1. Actions taken
 
-- Checked local addressing, interface state, and routes:
-  - Ran: `ip addr show lo && ip addr show User-eth0 && ip route show`
+- Inspected local addressing and routing:
+  - Ran `ip addr show lo && ip addr show User-eth0 && ip route show`.
   - Found stable loopback address `128.173.10.1/32`.
-  - Found directly connected interface `User-eth0` with `10.0.6.1/30`, peer `10.0.6.2`.
-  - Found default route: `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`.
+  - Found point-to-point link to Uni on `User-eth0`:
+    - Local: `10.0.6.1/30`
+    - Peer: `10.0.6.2/30`
+  - Confirmed default route:
+    - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+  - No route changes were made, because the default route was already correctly installed.
 
-- Reproduced the reported acm.org failure with objective tests:
-  - Ran DNS lookup: `getent hosts acm.org`
-    - Result: `acm.org` resolved to `198.82.0.1`.
-  - Tested local neighbor reachability:
-    - Ran: `ping -c 3 10.0.6.2`
-    - Result: 3/3 successful, about 4 ms RTT.
-  - Tested reachability to acm.org:
-    - Ran: `ping -c 3 acm.org`
-    - Result: 3/3 successful to `198.82.0.1`, about 98 ms RTT.
-  - Tested HTTP and HTTPS application behavior:
-    - Ran: `curl -v --connect-timeout 10 --max-time 20 http://acm.org/`
-    - Ran: `curl -vk --connect-timeout 10 --max-time 20 https://acm.org/`
-    - Both TCP connections succeeded.
-    - HTTPS completed TLS successfully.
-    - Both HTTP and HTTPS returned `HTTP/1.1 503 Service Unavailable` from `nginx/1.18.0`.
+- Tested DNS resolution for the reported site:
+  - Ran `getent hosts acm.org`.
+  - Result: `acm.org` resolved to `198.82.0.1`.
 
-- Installed/confirmed a route to Uni’s stable loopback:
-  - Uni advertised stable loopback `128.173.0.1/32` via next hop `10.0.6.2`.
+- Tested local connectivity to Uni:
+  - Ran `ping -c 3 -I 128.173.10.1 10.0.6.2`.
+  - Result: 3/3 replies, about 4 ms latency.
+  - This confirmed the direct link to Uni was working when sourced from the stable loopback.
+
+- Tested network-layer reachability to acm.org:
+  - Ran `ping -c 3 -I 128.173.10.1 198.82.0.1`.
+  - Result: 3/3 replies, about 98 ms latency.
+  - This showed that DNS and IP routing to the destination were functional.
+
+- Tested HTTP access:
+  - Ran `curl -v --max-time 10 --interface 128.173.10.1 http://acm.org/`.
+  - TCP connection to `198.82.0.1:80` succeeded.
+  - Server responded with:
+    - `HTTP/1.1 503 Service Unavailable`
+    - `Server: nginx/1.18.0`
+    - Body: `503 Service Unavailable`
+
+- Tested HTTPS access:
+  - Ran `curl -vk --max-time 10 --interface 128.173.10.1 https://acm.org/`.
+  - TCP connection to `198.82.0.1:443` succeeded.
+  - TLS 1.3 handshake completed.
+  - Certificate was for `CN=acm.org`, `O=ACM Digital Library`, issued by `Testbed CA`.
+  - Server again responded with:
+    - `HTTP/1.1 503 Service Unavailable`
+    - `Server: nginx/1.18.0`
+
+- Re-tested HTTPS later with timing details:
   - Ran:
-    - `ip route show 128.173.0.1/32 || true`
-    - `ip route add 128.173.0.1/32 via 10.0.6.2 dev User-eth0 src 128.173.10.1 2>/dev/null || true`
-    - `ip route show 128.173.0.1/32`
-  - Final route present:
-    - `128.173.0.1 via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+    - `curl -sS -o /tmp/acm.out -w 'dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} firstbyte=%{time_starttransfer} total=%{time_total} http=%{http_code} remote=%{remote_ip}\n' --max-time 10 --interface 128.173.10.1 https://acm.org/ && cat /tmp/acm.out`
+  - Result:
+    - DNS: 0.025 s
+    - TCP connect: 0.123 s
+    - TLS: 0.258 s
+    - First byte: 0.356 s
+    - HTTP status: 503
+    - Remote IP: `198.82.0.1`
+    - Body: `503 Service Unavailable`
 
-- Reported findings to Uni, the local Knowledge Plane contact:
-  - Advertised my stable loopback `128.173.10.1/32`.
-  - Reported that DNS, ICMP, TCP, and TLS were working, but HTTP/HTTPS returned 503 from the acm.org server.
-  - Asked the Knowledge Plane to investigate the service-side failure.
-
-- Followed up with Uni after no immediate response:
-  - Sent a follow-up noting that the observed condition was successful DNS, ICMP, TCP, TLS, but HTTP/HTTPS 503 from nginx at `198.82.0.1`.
-
-- Retested acm.org while waiting:
-  - Ran:
-    - `curl -sS -D - --connect-timeout 10 --max-time 20 http://acm.org/`
-    - `curl -ksS -D - --connect-timeout 10 --max-time 20 https://acm.org/`
-  - Both returned `HTTP/1.1 200 OK` with the ACM Digital Library HTML page.
-
-- Responded to Uni’s request for precise retest data:
-  - Ran:
-    - `date -u '+%Y-%m-%dT%H:%M:%SZ'`
-    - `getent hosts acm.org`
-    - `curl -sS -D /tmp/acm_http_headers.now --connect-timeout 10 --max-time 20 http://acm.org/ -o /tmp/acm_http_body.now`
-    - `curl -ksS -D /tmp/acm_https_headers.now --connect-timeout 10 --max-time 20 https://acm.org/ -o /tmp/acm_https_body.now`
-  - Timestamp: `2026-06-24T09:24:56Z`
-  - DNS: `198.82.0.1 acm.org`
-  - HTTP: `200 OK`, nginx, ACM Digital Library HTML body.
-  - HTTPS: `200 OK`, nginx, ACM Digital Library HTML body.
-
-- Reported final result to the owner after Uni provided the Knowledge Plane’s final answer:
-  - Explained that the issue was a transient ACM service-side degradation.
-  - Confirmed it was not due to the laptop, DNS, routing, TCP/TLS, the university network, or upstream transit.
-  - Noted that ACM completed an internal service fix and that administrators had already been notified regarding nondisclosed internal RCA details.
+- Reported the final result to the laptop owner and closed the task with `report_done`.
 
 2. Justification behind each decision
 
-- I first checked local interface and route state because the laptop only has a local network view, and I needed to establish whether the direct link to Uni and the default route were configured correctly before blaming any remote service.
+- I first checked loopback and routing because the node instructions said that the loopback address is the stable address to advertise and to use as the source for diagnostic traffic to non-adjacent nodes. This avoided misleading results caused by sourcing traffic from point-to-point infrastructure addresses.
 
-- I checked the loopback address because it is the stable node identity that should be advertised to neighbors for end-to-end reachability.
+- I tested DNS resolution before deeper connectivity checks because the owner reported a website loading failure, and DNS failure is a common cause of browser errors.
 
-- I tested DNS resolution separately from ICMP and HTTP because a browser failure could be caused by name resolution, IP routing, transport failure, TLS failure, or an application/server error. Separating these layers made the diagnosis objective.
+- I pinged Uni first to confirm that the directly connected university neighbor was reachable and that the default next hop was operational.
 
-- I pinged `10.0.6.2` to verify the local link to Uni was healthy. Since this succeeded, the immediate local adjacency was not the cause.
+- I pinged `198.82.0.1` from `128.173.10.1` to distinguish network reachability problems from application-layer problems.
 
-- I pinged `acm.org` after DNS resolution to verify IP-level reachability to the resolved destination. Since pings succeeded, the problem was unlikely to be basic routing or remote host reachability.
+- I tested both HTTP and HTTPS because a browser may try either protocol or redirect between them, and the failure mode could differ between ports 80 and 443.
 
-- I used `curl` for both HTTP and HTTPS because the owner reported a browser page load failure, and curl provides precise application-layer status and protocol diagnostics. The 503 responses showed that the server was reachable but unavailable at the application layer.
+- I used `curl -v` and `curl -vk` to capture objective protocol-level evidence: TCP connection status, TLS handshake status, HTTP response code, server identity, and response body.
 
-- I added/confirmed the route to Uni’s stable loopback using only `ip route add`, as required. This ensured reliable communication with the local Knowledge Plane contact at `128.173.0.1/32`.
+- I did not change any routes because the default route via Uni was present and functional. There was no evidence of a local route problem.
 
-- I contacted Uni instead of trying to infer internal network or service state myself because the laptop is not part of the Knowledge Plane and only has local visibility. The KP is responsible for investigating the broader network and service path.
+- I contacted Uni/KP only after collecting local evidence. This followed the instruction not to simply relay the owner’s vague report, but to reproduce the problem and provide technical observations.
 
-- I did not install any large or suspicious route advertisements. Uni only advertised its own single stable loopback, which was consistent with its role as my direct KP contact.
-
-- I waited for Uni/KP responses because the upstream diagnosis required distributed investigation beyond the laptop’s local visibility.
-
-- I retested later because transient failures can resolve, and new measurements were needed to determine whether the condition persisted.
-
-- I waited for the KP’s final FIX/CANNOT result before giving the owner a final answer, because the developer instructions required engaging with the KP and reporting back only after a reliable answer.
+- I waited for KP confirmation before reporting back to the owner because the issue appeared to be remote service-side, and the KP could investigate beyond my local network view.
 
 3. What I discovered about the network
 
-- The laptop’s stable loopback address is `128.173.10.1/32`.
+- The User node’s stable loopback address is `128.173.10.1/32`.
 
-- The laptop is directly connected to Uni over:
-  - Local interface: `User-eth0`
-  - Local IP: `10.0.6.1/30`
-  - Peer IP: `10.0.6.2/30`
+- The User node is directly connected to Uni over `User-eth0`:
+  - User link address: `10.0.6.1/30`
+  - Uni peer address: `10.0.6.2/30`
 
-- The laptop’s default route is through Uni:
+- User’s default route already pointed to Uni:
   - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- Uni’s stable loopback is:
-  - `128.173.0.1/32`
-  - Reachable via `10.0.6.2`
+- Uni advertised its own stable loopback as `128.173.0.1/32`.
 
-- The route installed/confirmed for Uni was:
-  - `128.173.0.1 via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+- Uni provides upstream/default connectivity for campus via `10.0.6.2`.
 
-- DNS for `acm.org` resolved to:
-  - `198.82.0.1`
+- Point-to-point infrastructure prefixes are not advertised network-wide.
 
-- IP connectivity from the laptop to Uni and to `acm.org` was working:
-  - Uni ping: 3/3 successful, about 4 ms.
-  - acm.org ping: 3/3 successful, about 98 ms.
+- The path from User to `acm.org` was operational at several layers:
+  - DNS worked: `acm.org` resolved to `198.82.0.1`.
+  - ICMP worked: pings to `198.82.0.1` succeeded.
+  - TCP worked: connections to ports 80 and 443 succeeded.
+  - TLS worked: HTTPS handshake completed successfully.
+  - The failure was at the HTTP application layer: the nginx server returned `503 Service Unavailable`.
 
-- The original website failure was not caused by DNS, IP routing, TCP reachability, or TLS negotiation.
-  - TCP connections to ports 80 and 443 succeeded.
-  - HTTPS TLS handshake succeeded.
-  - The server itself returned `HTTP/1.1 503 Service Unavailable`.
+- The Knowledge Plane confirmed that Uni’s forwarding, routes, firewall, and NAT were not the cause. Uni had upstream routes via AS1, forwarding was enabled, packet filter policies were ACCEPT, and only outbound MASQUERADE NAT was present.
 
-- Later retests showed recovery:
-  - HTTP and HTTPS both returned `HTTP/1.1 200 OK`.
-  - The response body was the ACM Digital Library HTML page.
+- The problem was reproduced outside the university network by AS1, which ruled out a university-local network failure.
 
-- The Knowledge Plane final diagnosis was that the problem was a transient ACM service-side degradation. No Uni, AS1, AS2, DNS, routing, TCP/TLS, or transit fix was required.
+- ACM confirmed that the ACM Digital Library endpoint was reachable at network, TCP, and TLS layers but was returning HTTP/HTTPS 503 from the service itself.
+
+- The final diagnosis was `CANNOT pending ACM administrator action`: no local network fix was available, and ACM administrators had already been notified.
 
 4. Coordination with other agents
 
-- Coordinated with Uni, the directly connected Knowledge Plane contact.
+- Received a route update from Uni:
+  - Uni advertised stable loopback `128.173.0.1/32`.
+  - Uni stated it provides upstream/default connectivity via link peer `10.0.6.2`.
+  - Uni stated no point-to-point infrastructure prefixes are advertised.
 
-- Received a route advertisement from Uni:
-  - Uni stable loopback: `128.173.0.1/32`
-  - Next hop: `10.0.6.2`
-  - Uni also confirmed it had a route back to my stable address `128.173.10.1` via `10.0.6.1`.
+- Received a route request from Uni asking me to advertise my stable loopback and any reachable attached prefixes/devices, and to confirm my default route.
 
-- Sent Uni my stable loopback advertisement:
-  - `128.173.10.1/32`, reachable via `10.0.6.1`.
+- Sent Uni a route update:
+  - Advertised my stable loopback: `128.173.10.1/32`.
+  - Stated I had no additional directly attached campus prefixes/devices to advertise.
+  - Confirmed my default route:
+    - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- Sent Uni the initial technical report:
-  - Owner reported browser failure loading acm.org.
+- Sent Uni/KP an investigation request with my local findings:
+  - Owner reported browser failure for `acm.org`.
   - DNS resolved to `198.82.0.1`.
-  - Ping to Uni and acm.org succeeded.
-  - HTTP and HTTPS connected but returned 503 from nginx.
-  - Asked the KP to investigate and provide diagnosis plus FIX or CANNOT.
+  - ICMP succeeded.
+  - TCP to ports 80 and 443 succeeded.
+  - HTTPS TLS handshake succeeded.
+  - Both HTTP and HTTPS returned nginx `503 Service Unavailable`.
 
-- Sent Uni a follow-up while waiting:
-  - Restated that DNS, ICMP, TCP, and TLS were successful, but HTTP/HTTPS returned 503.
+- Sent follow-up messages to Uni/KP while waiting for a diagnosis, including a later repeated HTTPS test that again returned HTTP 503.
 
-- Responded to Uni’s request for exact retest data:
-  - Provided timestamp, DNS result, HTTP status/body, and HTTPS status/body.
-
-- Received final KP response from Uni:
-  - ACM performed an internal service fix.
-  - AS2, AS1, Uni, and User-side verification succeeded.
-  - Internal ACM application/reverse-proxy/backend RCA details are CANNOT pending admin approval.
-  - Admins had already been notified.
-
-- After receiving the final KP result, I reported the outcome to the owner and completed the experiment.
+- Received final KP diagnosis from Uni:
+  - `CANNOT pending ACM administrator action`.
+  - Uni, AS1, AS2, and ACM had investigated.
+  - ACM had already been notified.
+  - No routing, DNS, TCP, TLS, firewall, NAT, or local configuration change was indicated.

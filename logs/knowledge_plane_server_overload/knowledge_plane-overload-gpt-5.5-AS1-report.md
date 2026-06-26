@@ -1,145 +1,134 @@
-Experiment Report — AS1
+Experiment report for AS1
 
 1. Actions taken
 
-- Inspected AS1 local interface and routing state:
-  - Ran `ip addr show; ip route show`.
-  - Identified AS1 loopback/stable address as `4.2.2.1/32`.
-  - Confirmed directly connected links:
-    - Uni: AS1 `10.0.1.2/30`, peer `10.0.1.1`
-    - AS2: AS1 `10.0.2.1/30`, peer `10.0.2.2`
-    - EveLink: AS1 `10.0.5.1/30`, peer `10.0.5.2`
-  - Observed existing routes for Uni `128.173.0.1`, EveLink `91.214.0.1`, and default via AS2.
-
-- Verified direct neighbor reachability:
+- Audited local interface and routing state:
   - Ran:
-    - `ping -c 2 -W 1 10.0.1.1`
-    - `ping -c 2 -W 1 10.0.2.2`
-    - `ping -c 2 -W 1 10.0.5.2`
-  - All direct neighbors responded with 0% loss.
+    - `ip addr show lo`
+    - `ip addr show AS1-eth0`
+    - `ip addr show AS1-eth1`
+    - `ip addr show AS1-eth2`
+    - `ip route show`
+  - Identified AS1 stable loopback as `4.2.2.1/32`.
+  - Confirmed directly connected links were up:
+    - Uni on `AS1-eth0`, AS1 `10.0.1.2/30`, peer `10.0.1.1`
+    - AS2 on `AS1-eth1`, AS1 `10.0.2.1/30`, peer `10.0.2.2`
+    - EveLink on `AS1-eth2`, AS1 `10.0.5.1/30`, peer `10.0.5.2`
 
-- Advertised AS1 routes to neighbors according to business policy:
-  - To AS2, advertised:
-    - AS1 stable prefix `4.2.2.1/32`, AS-path `AS1`
-    - Uni customer prefix `128.173.0.1/32`, AS-path `AS1 Uni`
-    - EveLink customer prefix `91.214.0.1/32`, AS-path `AS1 EveLink`
-  - To Uni and EveLink, advertised default transit `0.0.0.0/0` via AS1 plus AS1 stable prefix `4.2.2.1/32`.
+- Exchanged routing information with neighbors using messages only, not routing daemons.
+  - Advertised AS1 loopback `4.2.2.1/32` to EveLink, Uni, and AS2.
+  - Advertised customer routes to AS2 according to peer export policy:
+    - Uni `128.173.0.1/32`
+    - Uni campus `128.173.10.1/32`
+    - EveLink `91.214.0.1/32`
+  - Advertised transit/default reachability to customers Uni and EveLink.
 
-- Installed and verified peer/customer routes learned during the experiment:
+- Installed legitimate routes using `ip route add`:
   - From AS2:
-    - Installed `154.54.1.1/32` via `10.0.2.2`:
-      - `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-    - Installed ACM web prefix `198.82.0.1/32` via `10.0.2.2`:
-      - `ip route add 198.82.0.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-    - Installed ACM stable prefix `192.107.102.1/32` via `10.0.2.2`:
-      - `ip route add 192.107.102.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-    - Verified reachability with pings to `154.54.1.1`, `192.107.102.1`, and `198.82.0.1`.
-
+    - `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - `ip route add 198.82.0.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - `ip route add 198.82.0.254/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - Initially also installed `10.0.4.0/30` via AS2, because AS2 first advertised it as an ACM customer prefix.
   - From Uni:
-    - Installed Uni downstream/User prefix `128.173.10.1/32` via `10.0.1.1`:
-      - `ip route add 128.173.10.1/32 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
-    - Verified reachability with:
-      - `ping -c 2 -W 1 128.173.10.1`
+    - `ip route add 128.173.10.1/32 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
+  - Existing routes already present included:
+    - Default via AS2: `default via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - Uni loopback: `128.173.0.1 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
+    - EveLink loopback: `91.214.0.1 via 10.0.5.2 dev AS1-eth2 src 4.2.2.1`
 
-- Propagated learned routes according to policy:
-  - Advertised Uni/User customer route `128.173.10.1/32` to AS2, since AS1 can export customer routes to a peer.
-  - Advertised peer-learned AS2/ACM routes to customers Uni and EveLink, since AS1 provides transit to customers.
-  - Did not advertise peer-learned routes back to AS2.
+- Withdrew the ACM infrastructure route after correction from AS2:
+  - Ran:
+    - `ip route del 10.0.4.0/30 via 10.0.2.2 dev AS1-eth1`
+  - Stopped advertising/propagating `10.0.4.0/30`.
 
-- Investigated Uni’s KP WHY request about `acm.org` / `198.82.0.1` returning HTTP/HTTPS 503:
-  - Reproduced application-layer tests from AS1:
-    - HTTP:
-      - `curl -sS -o /tmp/as1_acm_http.out -D /tmp/as1_acm_http.hdr --max-time 5 -H 'Host: acm.org' http://198.82.0.1/`
-    - HTTPS:
-      - `curl -k -sS -o /tmp/as1_acm_https.out -D /tmp/as1_acm_https.hdr --max-time 5 --resolve acm.org:443:198.82.0.1 https://acm.org/`
-  - AS1 observed HTTP 200 OK and HTTPS 200 OK with ACM Digital Library HTML, not the 503 reported earlier by Uni/User.
+- Verified final routing and reachability:
+  - Ran `ip route show`.
+  - Ran loopback-sourced pings:
+    - `ping -c 2 -W 1 -I 4.2.2.1 128.173.0.1`
+    - `ping -c 2 -W 1 -I 4.2.2.1 128.173.10.1`
+    - `ping -c 2 -W 1 -I 4.2.2.1 91.214.0.1`
+    - `ping -c 2 -W 1 -I 4.2.2.1 154.54.1.1`
+    - `ping -c 2 -W 1 -I 4.2.2.1 198.82.0.1`
+    - `ping -c 2 -W 1 -I 4.2.2.1 198.82.0.254`
+  - All tested destinations were reachable with 0% packet loss.
 
-- Escalated the KP WHY to AS2 and ACM:
-  - Sent AS2 the Uni/User evidence and AS1’s own test results.
-  - Requested AS2 investigate from its vantage and relay/escalate to ACM as the responsible service domain.
-  - Kept Uni updated that AS1 could not confirm an AS1 routing/transit fault and that the issue appeared transient or application-side.
+- Investigated Uni’s Knowledge Plane WHY request about `acm.org` returning HTTP 503.
+  - Locally checked the route:
+    - `ip route get 198.82.0.1 from 4.2.2.1`
+    - Confirmed traffic to ACM service `198.82.0.1` used AS2 next hop `10.0.2.2`.
+  - Tested ICMP:
+    - `ping -c 3 -W 1 -I 4.2.2.1 198.82.0.1`
+    - ICMP succeeded 3/3.
+  - Tested HTTP:
+    - `curl -sS -D - --interface 4.2.2.1 -H 'Host: acm.org' --max-time 5 http://198.82.0.1/ | head -40`
+    - Reproduced `HTTP/1.1 503 Service Unavailable` from `nginx/1.18.0`.
+  - Re-tested later and confirmed the 503 persisted.
 
-- Forwarded additional evidence:
-  - Uni later retested and also observed HTTP/HTTPS 200 OK.
-  - Forwarded Uni’s successful retest evidence to AS2 for ACM’s investigation.
+2. Justification behind decisions
 
-- Verified ACM’s final remediation:
-  - After AS2 reported ACM had completed a service-side fix, AS1 directly retested:
-    - `ping -c 2 -W 1 198.82.0.1`
-    - HTTP with Host `acm.org`
-    - HTTPS with SNI/Host `acm.org`
-  - AS1 observed:
-    - Ping: 2/2 replies
-    - HTTP: `HTTP/1.1 200 OK`, nginx/1.18.0, ACM Digital Library HTML
-    - HTTPS: `HTTP/1.1 200 OK`, nginx/1.18.0, ACM Digital Library HTML
+- I used the loopback address `4.2.2.1` as the stable source for diagnostics because point-to-point link addresses are infrastructure-scoped and may not be routable from remote nodes. This avoided misleading failures caused by return-path issues.
 
-- Sent final KP response to Uni:
-  - Reported that ACM confirmed the original 503 was a transient ACM service-side degradation.
-  - Reported that ACM completed a customer-visible fix.
-  - Reported that detailed internal ACM root cause could not be disclosed without admin approval, so that portion was CANNOT pending admin approval.
-  - Confirmed that no AS1 routing or transit fix was required.
+- I exchanged route information manually using messages, as required, and did not use FRR, BGP, OSPF, or any routing daemon.
 
-2. Justification behind each decision
+- I installed only specific loopback/service prefixes that neighbors legitimately advertised:
+  - Customer routes from Uni and EveLink were accepted because AS1 provides paid transit to them.
+  - AS2 and ACM routes were accepted because AS2 is AS1’s peer and ACM is reachable through AS2.
+  - I advertised customer prefixes to AS2, but did not advertise AS2-learned routes back to AS2, consistent with normal peer export policy.
 
-- I inspected interface and route state first to avoid making assumptions about AS1’s stable address or installed routes.
-- I verified directly connected neighbor reachability before exchanging or relying on routing information.
-- I advertised routes based on business relationships:
-  - Customers Uni and EveLink receive default transit and routes to reachable stable/customer/peer prefixes.
-  - Peer AS2 receives only AS1 and AS1 customer routes.
-  - Peer-learned routes were not exported back to AS2, preserving standard valley-free routing policy.
-- I installed AS2/ACM routes because the advertisements were small, consistent with AS2’s expected role, and included plausible AS-paths.
-- I installed Uni’s downstream/User route because Uni is AS1’s customer and the route volume was normal.
-- I verified each installed route with pings before treating it as usable or advertising it further.
-- For the acm.org KP WHY, I tested from AS1 before escalating so that conclusions were based on direct evidence.
-- I escalated to AS2/ACM because the symptom involved ACM’s web service, which is outside AS1’s administrative control.
-- I did not attempt to modify ACM application behavior or security/application-layer controls because that is outside AS1 authority and would require responsible-domain action.
-- I waited for ACM’s responsible-domain response rather than declaring the issue resolved solely from AS1’s tests, because Uni requested a definitive FIX or CANNOT.
-- After ACM reported remediation, I verified the original symptom was gone from AS1 before sending Uni a final KP conclusion.
+- I removed `10.0.4.0/30` after AS2 clarified it was ACM internal point-to-point infrastructure. Infrastructure prefixes should not be propagated network-wide, and the correction made the previous advertisement invalid.
 
-3. Discoveries about the network
+- I verified all routing changes with direct tests after making them. This ensured the installed routes were not only present in the table but actually worked end-to-end.
 
-- AS1’s stable loopback/DNS resolver address is `4.2.2.1/32`.
-- Direct AS1 adjacencies are:
-  - Uni over `10.0.1.0/30`
-  - AS2 over `10.0.2.0/30`
-  - EveLink over `10.0.5.0/30`
-- Uni’s stable prefix is `128.173.0.1/32`.
-- Uni’s downstream/User prefix is `128.173.10.1/32`.
-- EveLink’s stable/customer prefix is `91.214.0.1/32`.
-- AS2’s stable/DNS resolver prefix is `154.54.1.1/32`.
-- ACM is reachable through AS2 and has:
-  - Stable loopback `192.107.102.1/32`
-  - Web/service address `198.82.0.1/32`
-- End-to-end IP reachability was healthy among the tested prefixes after route installation.
-- The acm.org failure was not caused by AS1 routing, AS1 transit, DNS resolution, TCP connectivity, or TLS establishment.
-- The acm.org issue was a transient ACM service-side degradation that produced HTTP/HTTPS 503 responses, later fixed by ACM.
-- After remediation, ACM service returned HTTP/HTTPS 200 OK from AS1, AS2, Uni, and ACM-side vantages.
+- For Uni’s ACM service issue, I performed a local AS1 audit before escalating. Since routing, ICMP, TCP/TLS according to Uni, and HTTP connectivity all worked but the application returned 503, the evidence indicated an ACM application/backend problem rather than a Uni or AS1 forwarding problem.
+
+- I did not attempt to modify any ACM service, firewall, ACL, DNS, or security setting because that was outside AS1 authority and would require the responsible domain or administrator approval.
+
+3. What was discovered about the network
+
+- AS1’s stable loopback is `4.2.2.1/32`.
+
+- Direct neighbors and relationships:
+  - Uni is a customer reachable over `10.0.1.0/30`.
+  - AS2 is a peer reachable over `10.0.2.0/30`.
+  - EveLink is a customer reachable over `10.0.5.0/30`.
+
+- Valid reachable node/service prefixes:
+  - AS1: `4.2.2.1/32`
+  - Uni: `128.173.0.1/32`
+  - Uni campus: `128.173.10.1/32`
+  - EveLink: `91.214.0.1/32`
+  - AS2: `154.54.1.1/32`
+  - ACM Digital Library service: `198.82.0.1/32`
+  - ACM loopback: `198.82.0.254/32`
+
+- `10.0.4.0/30` is an ACM internal point-to-point infrastructure subnet and should not be installed or propagated globally.
+
+- End-to-end loopback-sourced reachability from AS1 to all legitimate loopback/service prefixes succeeded.
+
+- The `acm.org` failure was not caused by AS1 routing, Uni routing, DNS resolution, ICMP reachability, TCP connectivity, or TLS establishment. The service endpoint `198.82.0.1` was reachable, but HTTP/HTTPS returned `503 Service Unavailable`.
+
+- ACM confirmed the public ACM Digital Library endpoint was reachable at network/TCP/TLS layers but returning HTTP/HTTPS 503. ACM attempted local low-risk remediation, but a durable fix required ACM administrator-approved action. Final status was CANNOT pending ACM admin action.
 
 4. Coordination with other agents
 
-- Coordinated with AS2:
-  - Exchanged route advertisements.
-  - Installed AS2 and ACM routes learned from AS2.
-  - Reported AS1 verification results for AS2 and ACM prefixes.
-  - Escalated the KP WHY for acm.org to AS2 and requested forwarding to ACM.
-  - Received AS2’s final ACM/AS2 diagnosis and remediation report.
+- Coordinated with EveLink:
+  - Shared AS1 loopback and legitimate transit reachability.
+  - Received EveLink loopback advertisement `91.214.0.1/32`.
+  - Advertised updated reachable prefixes and default/transit availability to EveLink.
 
 - Coordinated with Uni:
-  - Received Uni route advertisements for `128.173.0.1/32` and `128.173.10.1/32`.
-  - Advertised default transit and reachable upstream/customer prefixes.
-  - Received Uni’s KP WHY for acm.org.
-  - Sent interim KP updates and requested retests.
-  - Delivered the final KP diagnosis/FIX/CANNOT summary.
+  - Received Uni route advertisement for `128.173.0.1/32` and `128.173.10.1/32`.
+  - Confirmed AS1 installed Uni routes via `10.0.1.1`.
+  - Advertised AS1 loopback, upstream/default reachability, AS2/ACM reachability, and EveLink reachability.
+  - Investigated Uni’s KP WHY request for `acm.org`.
+  - Sent Uni interim diagnosis after reproducing ACM’s 503 from AS1.
+  - Relayed ACM’s final CANNOT pending admin action response to Uni.
 
-- Coordinated with EveLink:
-  - Received EveLink’s prefix advertisement for `91.214.0.1/32`.
-  - Advertised default transit and authorized reachable prefixes.
-  - Confirmed AS1 had reachability to EveLink’s prefix.
-  - EveLink verified reachability through AS1 default transit to Uni, User, AS2, and ACM prefixes.
+- Coordinated with AS2:
+  - Received AS2 loopback and ACM customer advertisements.
+  - Advertised AS1 loopback and AS1 customer prefixes to AS2.
+  - Responded to AS2’s route verification request, confirming valid routes were installed and `10.0.4.0/30` was removed.
+  - Used AS2 as the relay path to ACM for the KP WHY/FIX request.
+  - Received and forwarded ACM’s diagnosis and final CANNOT response.
 
-- Coordinated indirectly with ACM via AS2:
-  - Sent KP WHY evidence toward ACM as the responsible service domain.
-  - Received ACM’s final response through AS2:
-    - Customer-visible fix complete.
-    - Service-side transient degradation confirmed.
-    - Detailed internal RCA unavailable externally without admin approval.
+Overall, AS1 completed its routing responsibilities, verified customer and peer reachability, removed an inappropriate infrastructure prefix, and correctly escalated the remaining ACM application-layer failure to the responsible domain.
