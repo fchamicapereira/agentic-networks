@@ -53,6 +53,17 @@ UNICODE_REPLACEMENTS = {
     "∈": "in",    # ∈ element of
     "§": "Sec.",  # § section
     "¹": "^1",    # ¹ superscript one
+    # Subscript digits (e.g. "AS₁" -> "AS1"). Reports use these as plain
+    # identifier suffixes, so map them to bare digits rather than "_1".
+    "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+    "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+    # Arabic-Indic digits: agents occasionally emit these (e.g. the firewall
+    # run's "٩/[...]" red herring). Fold them to the ASCII digits they denote.
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+    # Combining enclosing keycap: the trailing half of keycap emoji like
+    # "1️⃣" (the preceding VS-16 is stripped above). Drop it, leaving the digit.
+    "⃣": "",      # U+20E3 combining enclosing keycap
     "•": "*",     # • bullet
     "✓": "[OK]",  # ✓ check mark
     "✅": "[OK]",  # ✅ white heavy check mark
