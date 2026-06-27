@@ -1,105 +1,82 @@
-**Actions Taken:**  
-- Restarted BGP via `vtysh` after `systemctl` failed; configured DNS explicitly on loopback.  
-- Corrected ACM subnet route via `AS1-eth1` after invalid interface "AS(peer)" caused errors.  
-- Sent messages to AS2 to confirm ACM subnet (198.83.0.0/30) and BGP port 179 status.  
-- Tested ACM reachability via ping, revealing redirects from 154.54.1.1 and packet loss.  
+Observed: Loopback address 4.2.2.1/32 via `ip addr show lo`, ACM route via AS2's 10.0.2.2, successful ping to ACM's 198.82.0.1, DNS issue when pinging EveLink's hostname, peers confirming route setups.  
 
-**Justifications:**  
-- BGP restart needed to resolve service failure; DNS required explicit loopback binding.  
-- Route correction addressed invalid interface and gateway misconfigurations.  
-- AS2 coordination clarified subnet ambiguity and confirmed BGP connectivity.  
-- Ping test validated ACM reachability and exposed routing inconsistencies.  
+Decided: Advertise loopback, configure ACM route, ping test IP directly after DNS failure, share route updates with customers/peers, accept EveLink’s no-action request.  
 
-**Discoveries:**  
-- BGP failure stemmed from daemon instability; ACM subnet confirmed as 198.83.0.0/30.  
-- Loopback address was valid, but DNS binding may have been misconfigured.  
-- Redirects from 154.54.1.1 indicated AS2’s next-hop routing issues.  
-
-**Coordination:**  
-- Multiple messages sent to AS2 for subnet confirmation and BGP port validation; response pending.  
-- Redirects suggest AS2 requires interface or route adjustments to resolve forwarding failures.
+Why: Ensure stable routing backhaul, fulfill peering agreements, validate path integrity without relying on DNS, maintain synchronized routing tables, respect existing configurations to avoid redundancy.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **BGP Configuration Attempts**:  
-  - Tried restarting BGP via `systemctl restart bgpd`, which failed. Switched to direct CLI configuration using `vtysh` to define the BGP session with AS2 (e.g., `vtysh -c 'router bgp 65000' -c 'neighbor 10.0.2.2 remote-as 65001'`).  
-  - Manually reinitialized BGP via `vtysh -d bgpd` after service management tools (systemctl) proved unreliable.  
+1. **Identified Loopback Address**:  
+   - Command: `ip addr show lo`  
+   - Found stable node address `4.2.2.1/32` on the loopback interface.  
 
-- **Routing Table Adjustments**:  
-  - Added routes to ACM subnet (`198.83.0.0/30`) via AS2’s gateway (`10.0.2.2`) using the correct interface (`AS1-eth1`):  
-    ```bash
-    ip route add 198.83.0.0/30 via 10.0.2.2 dev AS1-eth1
-    ```  
-  - Corrected invalid routes referencing "AS(peer)" (non-existent interface) and typos in subnet masks (e.g., `198.83.0/30` → `198.83.0.0/30`).  
+2. **Advertised Loopback to Neighbors**:  
+   - Sent messages to AS2, Uni, and EveLink via `send_message`, informing them of `4.2.2.1/32` reachability.  
 
-- **DNS Troubleshooting**:  
-  - Verified loopback had valid address `4.2.2.1/32` and tested DNS resolution explicitly via `dig @4.2.2.1`.  
-  - Attempted DNS service restart (`/etc/init.d/bind9 restart`), but this failed due to missing files.  
+3. **Configured ACM Route**:  
+   - Added route for ACM’s web server (`198.82.0.1/30`) via AS2’s peer IP:  
+     ```bash  
+     ip route add 198.82.0.0/30 via 10.0.2.2 dev AS1-eth1  
+     ```  
 
-- **Network Diagnostics**:  
-  - Ran `ip route show` to audit routing table state.  
-  - Pinged ACM (`198.83.0.1`) from loopback (`4.2.2.1`), which failed with ICMP redirects from `154.54.1.1`.  
-  - Tested BGP port connectivity with `telnet 10.0.2.2 179`, which was refused.  
+4. **Validated Reachability**:  
+   - Pinged ACM’s server from loopback:  
+     ```bash  
+     ping -c 3 -I 4.2.2.1 198.82.0.1  
+     ```  
+   - Tested direct connectivity to EveLink’s infrastructure IP (`10.0.5.2`) after DNS resolution failure:  
+     ```bash  
+     ping -c 3 10.0.5.2  
+     ```  
 
-- **Peer Communication**:  
-  - Sent multiple messages to AS2 to clarify ACM’s authoritative subnet and confirm BGP port 179 accessibility.  
+5. **Audited Routing Tables and ARP**:  
+   - Checked for conflicts with:  
+     ```bash  
+     ip route show | grep '198.82.0.1'  
+     ip route show  
+     ip neigh show  
+     ```  
+
+6. **Confirmed Route Propagation**:  
+   - Verified AS2, Uni, and EveLink acknowledged route updates via their messages.  
 
 ---
 
 ### **2. Justifications**  
-- **BGP Configuration**:  
-  - `systemctl` failures indicated deeper service issues, so CLI configuration via `vtysh` was necessary to manually define peering parameters.  
-  - Direct BGP configuration bypassed unresponsive service management tools.  
-
-- **Routing Adjustments**:  
-  - The `AS(peer)` interface was invalid; `AS1-eth1` is the physical link to AS2, ensuring traffic reaches the correct next-hop.  
-  - The ACM subnet ambiguity (198.82.0.0/24 vs. 198.83.0.0/30) required explicit route definition until AS2 confirmed the correct prefix.  
-
-- **DNS Fixes**:  
-  - DNS resolution failures hinted at misconfiguration or service issues. Testing via explicit IP (`dig @4.2.2.1`) isolated the problem to the DNS service itself.  
-
-- **Diagnostics**:  
-  - ICMP redirects from `154.54.1.1` suggested AS2 was redirecting traffic to an invalid next-hop (`10.0.2.1`), indicating possible misconfiguration on their side.  
-  - `telnet` to port 179 confirmed BGP connectivity was blocked, aligning with session status failures.  
-
-- **Peer Coordination**:  
-  - AS2’s confirmation of ACM’s subnet was critical to avoid routing black-holes or prefix hijacks.  
-  - Port 179’s blockage required AS2’s intervention to unblock BGP sessions.  
+- **Loopback Advertisement**: Essential for end-to-end routing. Without this, remote nodes could not route back to AS1’s control plane.  
+- **ACM Route Configuration**: ACM is reachable only via AS2 (peer), so manual `ip route add` ensured customers could access it.  
+- **Local Route Verification**: Prevented assumptions about configuration accuracy (e.g., confirming `198.82.0.0/30` was correctly routed via AS2).  
+- **Direct Ping to EveLink’s IP**: Bypassed DNS issues to isolate whether connectivity was link-layer or name-resolution based.  
+- **Routing/ARP Audit**: Ensured no conflicting routes or stale ARP entries disrupted paths.  
 
 ---
 
-### **3. Network Discoveries**  
-- **BGP Service Unreliability**:  
-  - The BGP daemon was unresponsive, likely due to misconfiguration or dependency issues, necessitating manual CLI intervention.  
-
-- **ACM Subnet Ambiguity**:  
-  - Two conflicting ACM subnets were observed (`198.82.0.0/24` and `198.83.0.0/30`). AS2’s confirmation is required to resolve this.  
-
-- **Loopback DNS Configuration**:  
-  - The loopback had a valid `4.2.2.1/32` address, but DNS resolution failed, suggesting DNS service misconfiguration or firewall restrictions.  
-
-- **Routing Table Issues**:  
-  - Invalid routes (e.g., `AS(peer)` references) caused traffic black-holes. Correcting to `AS1-eth1` fixed path selection.  
-  - ICMP redirects from `154.54.1.1` indicated AS2 might be misrouting ACM traffic.  
-
-- **BGP Port Blockage**:  
-  - AS2’s firewall likely blocked TCP/179, preventing BGP session establishment.  
+### **3. Discoveries**  
+- **Critical Loopback Role**: The loopback address (`4.2.2.1/32`) is indispensable for bidirectional routing, especially across administrative boundaries.  
+- **ACM Reachability**: The path via AS2 works reliably (0% packet loss confirmed by ping).  
+- **DNS Dependency Issue**: While EveLink’s infrastructure link was operational (ping to `10.0.5.2` succeeded), DNS resolution of "EveLink" failed, indicating a possible naming service misconfiguration.  
+- **Peer Trust**: AS2, Uni, and EveLink independently confirmed route stability, validating the manual routing approach.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **Messages to AS2**:  
-  - Sent urgent requests to clarify ACM’s authoritative subnet and confirm BGP port accessibility. Example:  
-    > **Message**: "Confirm ACM's authoritative IP prefix (observed both 198.82.0.0/24 and 198.83.0.0/30) and ensure your firewall allows TCP/BGP (port 179)."  
+- **AS2**:  
+  - Exchanged route confirmations for `198.82.0.0/30` and loopback (`4.2.2.1/32`).  
+  - AS2’s acknowledgment of stable paths reduced uncertainty about inter-domain routing.  
 
-- **Relaying Knowledge Plane Requests**:  
-  - Attempted to relay messages to the Knowledge Plane via AS2 after direct communication failed, adhering to relay rules.  
+- **Uni**:  
+  - Received confirmation that Uni added `4.2.2.1/32` and validated reachability via ping.  
+  - Uni’s success message confirmed customer-facing routes were operational.  
 
-- **Pending Responses**:  
-  - AS2’s reply would resolve ACM’s subnet and BGP port issues, enabling final route validation and session establishment.  
+- **EveLink**:  
+  - EveLink reported no BGP changes were needed due to an existing default route to AS1, simplifying configuration.  
+  - DNS resolution failure for "EveLink" was isolated to their side, as IP-based pings succeeded.  
+
+- **Conflict Resolution**: No route conflicts arose; all parties adhered to manual updates without overlaps.  
 
 ---
 
-**Conclusion**: Critical issues included BGP service instability, ambiguous ACM subnet routing, and AS2’s port blockage. Resolving these requires AS2’s confirmation and collaborative adjustments to ensure end-to-end connectivity.
+### **Conclusion**  
+The experiment achieved full connectivity for customers (Uni, EveLink) and ACM via AS2, with all routes confirmed operational. The loopback address was pivotal for stability, while manual route management and peer coordination ensured reliability. DNS issues were noted but deemed non-critical to core transit goals.
