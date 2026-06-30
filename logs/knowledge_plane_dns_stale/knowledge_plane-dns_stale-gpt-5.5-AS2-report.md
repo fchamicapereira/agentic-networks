@@ -2,229 +2,162 @@ Experiment report for AS2
 
 1. Actions taken
 
-- Inspected local interface and routing state:
+- Performed initial local audit:
   - Ran:
-    - `ip addr show`
+    - `ip addr show lo`
+    - `ip addr show AS2-eth0`
+    - `ip addr show AS2-eth1`
     - `ip route show`
-  - Identified AS2 loopback/stable address as `154.54.1.1/32`.
-  - Confirmed physical interfaces:
-    - `AS2-eth0` to AS1: AS2 `10.0.2.2/30`, AS1 `10.0.2.1/30`
-    - `AS2-eth1` to ACM: AS2 `10.0.3.1/30`, ACM `10.0.3.2/30`
-  - Initial routes included a default route via AS1 and several ACM-related routes, including later-withdrawn `198.82.0.99/32` and `10.0.4.0/30`.
+  - Identified AS2 stable loopback as `154.54.1.1/32`.
+  - Confirmed directly connected links:
+    - AS1 via `AS2-eth0`, local `10.0.2.2/30`, peer `10.0.2.1/30`
+    - ACM via `AS2-eth1`, local `10.0.3.1/30`, peer `10.0.3.2/30`
+  - Observed existing routes to ACM service/loopback addresses and an initial default route via AS1.
 
-- Verified direct neighbor connectivity:
-  - Ran:
-    - `ping -c 2 -W 1 10.0.2.1`
-    - `ping -c 2 -W 1 10.0.3.2`
-  - Both AS1 and ACM directly connected next hops were reachable.
+- Exchanged routing information with neighbors:
+  - Advertised to AS1:
+    - `154.54.1.1/32`, AS-path `AS2`, next-hop `10.0.2.2`
+    - ACM customer service prefix `198.82.0.1/32`, AS-path `AS2 ACM`
+    - Later advertised ACM loopback `198.82.0.254/32`, AS-path `AS2 ACM`
+  - Advertised to ACM:
+    - `154.54.1.1/32`, AS-path `AS2`, next-hop `10.0.3.1`
+    - AS1/AS1-customer reachable prefixes:
+      - `4.2.2.1/32`, AS-path `AS2 AS1`
+      - `128.173.0.1/32`, AS-path `AS2 AS1 Uni`
+      - `91.214.0.1/32`, AS-path `AS2 AS1 EveLink`
+      - `128.173.10.1/32`, AS-path `AS2 AS1 Uni User`
 
-- Exchanged routing information with AS1 and ACM:
-  - Advertised AS2 stable loopback `154.54.1.1/32`.
-  - Initially informed AS1 and ACM of locally known ACM-related routes.
-  - Requested authoritative prefix advertisements from both neighbors.
-
-- Installed AS1 route:
-  - After AS1 advertised its loopback, ran:
-    - `ip route add 4.2.2.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-  - This allowed AS2 and ACM transit reachability to AS1’s stable address.
-
-- Propagated confirmed ACM prefixes to AS1:
-  - ACM authoritatively advertised:
-    - `198.82.0.254/32` — ACM loopback
-    - `198.82.0.1/32` — ACM Digital Library service
-  - Sent AS1 a route update advertising these prefixes via AS2 next hop `10.0.2.2`.
-
-- Propagated AS1/customer prefixes to ACM:
-  - AS1 advertised:
+- Installed legitimate AS1-learned routes:
+  - Added explicit routes via AS1 next-hop `10.0.2.1`:
     - `4.2.2.1/32`
     - `128.173.0.1/32`
-    - `128.173.10.1/32`
     - `91.214.0.1/32`
-  - Installed routes via AS1:
-    - `ip route add 128.173.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-    - `ip route add 128.173.10.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-    - `ip route add 91.214.0.1/32 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
-  - Confirmed routes with `ip route show`.
-  - Advertised these AS1-side prefixes to ACM for customer transit.
+    - `128.173.10.1/32`
+  - Commands used were of the form:
+    - `ip route add <prefix> via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - Verified route presence with `ip route show`.
 
-- Withdrew non-authoritative ACM/internal prefixes:
-  - ACM clarified that it only authoritatively advertised `198.82.0.254/32` and `198.82.0.1/32`.
-  - ACM stated:
-    - `198.82.0.99/32` was not a reachable ACM service prefix.
-    - `10.0.4.0/30` was an internal point-to-point infrastructure link, not Internet-advertised.
-  - Removed them locally:
-    - `ip route del 198.82.0.99/32`
-    - `ip route del 10.0.4.0/30`
-  - Sent AS1 a route withdrawal for both prefixes.
+- Verified end-to-end reachability from AS2 loopback:
+  - Ran loopback-sourced pings:
+    - `ping -c 2 -I 154.54.1.1 4.2.2.1`
+    - `ping -c 2 -I 154.54.1.1 128.173.0.1`
+    - `ping -c 2 -I 154.54.1.1 128.173.10.1`
+    - `ping -c 2 -I 154.54.1.1 91.214.0.1`
+    - `ping -c 2 -I 154.54.1.1 198.82.0.254`
+    - `ping -c 2 -I 154.54.1.1 198.82.0.1`
+  - All valid advertised destinations were reachable.
 
-- Verified ACM service reachability from AS2:
-  - Ran from AS2 stable loopback source:
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.254`
-    - `ping -c 2 -W 1 -I 154.54.1.1 198.82.0.1`
-    - `curl -sS -o /dev/null -w '%{http_code}\n' --interface 154.54.1.1 --max-time 3 http://198.82.0.1/`
-  - Results:
-    - ICMP to ACM loopback succeeded.
-    - ICMP to ACM web service succeeded.
-    - HTTP to `http://198.82.0.1/` returned `200`.
-
-- Requested AS1-side verification of ACM service:
-  - Asked AS1 to test from stable source `4.2.2.1`:
-    - ICMP to `198.82.0.254`
-    - ICMP to `198.82.0.1`
-    - HTTP to `http://198.82.0.1/`
-  - AS1 later confirmed all tests succeeded and HTTP returned 200.
-
-- Verified AS1-side reachability from AS2:
-  - Ran:
-    - `ping -c 2 -W 1 -I 154.54.1.1 4.2.2.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 128.173.0.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 128.173.10.1`
-    - `ping -c 2 -W 1 -I 154.54.1.1 91.214.0.1`
-  - All tested AS1/AS1-customer prefixes were reachable from AS2’s stable source.
-
-- Investigated DNS inconsistency:
-  - AS1 reported its resolver returned stale `acm.org A = 198.82.0.99`.
+- Investigated AS1 WHY request about `acm.org` outage:
+  - AS1 reported that its resolver answered `acm.org A = 198.82.0.99`, while pings to `198.82.0.99` failed with ICMP Host Unreachable from ACM gateway `198.82.0.254`.
+  - Locally audited AS2 route and reachability:
+    - `ip route get 198.82.0.99 from 154.54.1.1`
+    - `ping -c 2 -I 154.54.1.1 198.82.0.99`
+  - AS2 also received ICMP Destination Host Unreachable from `198.82.0.254`.
   - Checked AS2 resolver:
-    - `dig +short @154.54.1.1 acm.org A`
-  - AS2 resolver correctly returned:
-    - `198.82.0.1`
-  - Also checked AS1 resolver from AS2:
-    - `dig +short @4.2.2.1 -b 154.54.1.1 acm.org A`
-  - AS1 resolver returned:
-    - `198.82.0.99`
+    - Used `dig @154.54.1.1 acm.org A +short` with fallbacks.
+    - AS2 resolver returned `198.82.0.1`, not `198.82.0.99`.
+  - Forwarded WHY request to ACM for authoritative confirmation.
 
-- Investigated and fixed AS1/AS2 routing loop for withdrawn `198.82.0.99/32`:
-  - AS1 reported traffic to withdrawn `198.82.0.99` was following AS1 default to AS2, then looping back toward AS1 via AS2’s default route.
-  - Audited AS2 forwarding decision:
-    - `ip route show 198.82.0.99/32`
-    - `ip route get 198.82.0.99`
-    - `ip route get 198.82.0.99 from 4.2.2.1 iif AS2-eth0`
-  - Confirmed that without a specific route, traffic to `198.82.0.99` fell through to AS2’s default via AS1 `10.0.2.1`.
-  - Installed a local blackhole route:
-    - `ip route add blackhole 198.82.0.99/32`
-  - Verified:
-    - `ip route show 198.82.0.99/32`
-    - `ping -c 1 -W 1 -I 154.54.1.1 198.82.0.99`
-  - Result:
-    - Route showed `blackhole 198.82.0.99`.
-    - Ping failed locally as expected, preventing the route loop.
+- Investigated AS1/AS2 default-route loop:
+  - AS1 reported traffic to `8.8.8.8` looped between AS1 and AS2.
+  - Audited AS2 route:
+    - `ip route get 8.8.8.8 from 154.54.1.1`
+    - `ping -c 2 -I 154.54.1.1 8.8.8.8`
+    - `ip route show default`
+  - Confirmed AS2 had an erroneous default route via peer AS1:
+    - `default via 10.0.2.1 dev AS2-eth0 src 154.54.1.1`
+  - Removed it:
+    - `ip route del default via 10.0.2.1 dev AS2-eth0`
+  - Verified there was no remaining default route and `8.8.8.8` became unreachable from AS2 rather than looping.
 
-- Relayed ACM’s DNS FIX request to AS1:
-  - ACM requested AS1 investigate/flush or correct stale resolver behavior.
-  - Forwarded ACM’s request to AS1.
-  - Continued follow-up with AS1 on resolver status.
-
-- Reported status to ACM:
-  - Informed ACM that:
-    - AS2 resolver correctly returned `198.82.0.1`.
-    - AS1 resolver still returned stale `198.82.0.99`.
-    - Direct IP HTTP service at `198.82.0.1` remained healthy.
-    - AS2 had blackholed `198.82.0.99/32` to stop loops.
-    - AS1 could not autonomously change its customer-facing resolver configuration without administrator approval.
+- Cleaned up stale ACM route:
+  - After ACM confirmed `198.82.0.99` was invalid and not served, removed AS2’s stale route:
+    - `ip route del 198.82.0.99/32 via 10.0.3.2 dev AS2-eth1`
+  - Verified valid ACM routes remained:
+    - `ip route show 198.82.0.1/32`
+    - `ip route show 198.82.0.254/32`
 
 2. Justification behind decisions
 
-- Used loopback source address for non-adjacent diagnostics:
-  - AS2’s loopback `154.54.1.1/32` is the stable routable address.
-  - Physical link addresses are point-to-point infrastructure addresses and may not be reachable from remote nodes.
-  - Therefore diagnostic traffic to non-adjacent destinations was sourced from `154.54.1.1`.
+- Used loopback source address `154.54.1.1` for diagnostics because remote nodes can route back to loopback addresses, while point-to-point link addresses are infrastructure-only and not globally advertised.
 
-- Installed only small, explicit, neighbor-advertised prefixes:
-  - AS1 advertised a small set of prefixes consistent with its role.
-  - ACM clarified its authoritative prefixes.
-  - No large or suspicious bulk route update was accepted.
+- Installed only explicit routes learned from legitimate neighbors:
+  - AS1 is a peer, so AS2 accepted AS1-originated and AS1-customer prefixes.
+  - ACM is a customer, so AS2 accepted and propagated ACM-originated/customer service prefixes.
+  - AS2 propagated customer ACM routes to peer AS1 because that is legitimate transit revenue traffic.
+  - AS2 propagated peer-learned routes to customer ACM because customers receive transit from AS2.
 
-- Removed `198.82.0.99/32` and `10.0.4.0/30` after ACM clarification:
-  - ACM is the customer and authoritative source for its own prefixes.
-  - It explicitly stated those were not Internet-advertised service prefixes.
-  - Continuing to propagate them would have created incorrect reachability and possible blackholing or loops.
+- Did not use a routing daemon. All route changes were made with `ip route add` or `ip route del`, as required.
 
-- Propagated customer ACM routes to peer AS1:
-  - ACM is AS2’s customer and pays AS2 for transit.
-  - Advertising ACM’s legitimate service prefixes to AS1 supports customer reachability and AS2’s transit role.
+- Treated the default route via AS1 as incorrect because AS1 and AS2 are peers, not provider/customer in the direction that would justify AS2 using AS1 as default transit. Since AS1 also had a default route via AS2, the two defaults created a forwarding loop. Removing AS2’s own erroneous default was local, low-risk, reversible, and within AS2 authority.
 
-- Propagated AS1 routes to ACM:
-  - ACM is AS2’s customer and should receive transit to reachable external prefixes through AS2.
-  - Providing these routes supports customer Internet access.
+- Did not attempt to change AS1’s default route or DNS resolver configuration because those affect AS1’s customers and administrative policy. Those changes required AS1 administrator approval.
 
-- Installed a blackhole for `198.82.0.99/32`:
-  - After withdrawal, `198.82.0.99` was not owned or reachable via ACM.
-  - AS2’s default route caused traffic for this withdrawn address to be sent back to AS1, producing a loop.
-  - A host-specific blackhole was a local, low-risk, reversible routing fix using `ip route`.
-  - It prevented AS2 from returning invalid traffic to AS1 while leaving the confirmed ACM service `198.82.0.1` unaffected.
-
-- Did not modify AS1 DNS resolver:
-  - AS1’s resolver behavior is outside AS2’s administrative authority.
-  - AS1 later found a dnsmasq static override:
-    - `--local=/acm.org/ --address=/acm.org/198.82.0.99`
-  - Changing that would affect customer-facing recursive DNS behavior and cross an administrative/security boundary.
-  - Per policy, this requires AS1 administrator approval and could not be applied by AS2 or autonomously by AS1’s KP agent.
+- Removed `198.82.0.99/32` from AS2 only after ACM confirmed it was not assigned, routed, or served. This aligned AS2 routing with the customer’s authoritative advertisement and avoided propagating false reachability.
 
 3. Discoveries about the network
 
-- AS2 local state:
-  - Stable loopback/resolver address is `154.54.1.1/32`.
-  - AS2 peers with AS1 over `10.0.2.0/30`.
-  - AS2 serves customer ACM over `10.0.3.0/30`.
-  - AS2 default route points to AS1 via `10.0.2.1`.
+- AS2 loopback/stable address is `154.54.1.1/32`.
 
-- ACM authoritative prefixes:
-  - Valid ACM prefixes:
-    - `198.82.0.254/32` — ACM loopback
-    - `198.82.0.1/32` — ACM Digital Library service
-  - Invalid/non-advertised ACM-related prefixes:
-    - `198.82.0.99/32`
-    - `10.0.4.0/30`
+- Valid AS1-side reachable prefixes learned by AS2:
+  - `4.2.2.1/32` for AS1 loopback
+  - `128.173.0.1/32` via Uni
+  - `128.173.10.1/32` via Uni/User
+  - `91.214.0.1/32` via EveLink
 
-- AS1 and AS1-customer prefixes:
-  - AS1 loopback:
-    - `4.2.2.1/32`
-  - AS1 customer prefixes:
-    - `128.173.0.1/32`
-    - `128.173.10.1/32`
-    - `91.214.0.1/32`
+- Valid ACM-side reachable prefixes:
+  - `198.82.0.254/32` for ACM loopback
+  - `198.82.0.1/32` for ACM Digital Library web service
 
-- ACM service health:
-  - `198.82.0.1` was reachable by ICMP from AS2 and AS1.
-  - HTTP to `http://198.82.0.1/` returned status `200`.
-  - ACM also reported local health checks as successful.
+- `198.82.0.99` is invalid:
+  - ACM confirmed it is not assigned, routed, or served.
+  - AS2 and AS1 both observed ICMP Destination Host Unreachable from ACM gateway `198.82.0.254` when probing it.
+  - User reports of `acm.org` failure were consistent with DNS returning this invalid address.
 
-- DNS state:
-  - AS2 resolver at `154.54.1.1` correctly returned:
-    - `acm.org A = 198.82.0.1`
-  - AS1 resolver at `4.2.2.1` incorrectly returned:
-    - `acm.org A = 198.82.0.99`
-  - AS1 determined the cause was not stale cache but a static dnsmasq override:
-    - `--local=/acm.org/ --address=/acm.org/198.82.0.99`
+- AS2 recursive resolver correctly answered:
+  - `acm.org A = 198.82.0.1`
 
-- Routing loop:
-  - After `198.82.0.99/32` was withdrawn, traffic from AS1/Uni to `198.82.0.99` followed AS1 default to AS2.
-  - AS2, lacking a specific route, used its default route back to AS1.
-  - This caused AS1/AS2 loop symptoms and ICMP redirects.
-  - Installing `blackhole 198.82.0.99/32` at AS2 stopped the loop.
+- AS1 recursive resolver incorrectly answered:
+  - `acm.org A = 198.82.0.99`
+  - AS1 confirmed this was due to a stale local DNS override.
+  - AS1 could not correct it autonomously because modifying customer-facing DNS service required administrator approval.
+
+- A separate default-route fault existed:
+  - AS2 had an erroneous default route via AS1.
+  - AS1 also had a default route via AS2.
+  - This produced an AS1<->AS2 forwarding loop for off-campus/default traffic such as `8.8.8.8`.
+  - AS2 removed its default route.
+  - AS1 acknowledged its default via AS2 was also incorrect but could not remove it without administrator approval due customer transit impact.
 
 4. Coordination with other agents
 
-- With ACM:
-  - Received authoritative ACM prefix advertisement.
-  - Received clarification that `198.82.0.99/32` and `10.0.4.0/30` should not be advertised.
-  - Reported AS2-side and AS1-side verification results for ACM reachability and HTTP service.
-  - Relayed AS1’s DNS findings and CANNOT status back to ACM.
-  - Kept ACM informed that direct service health was good but name-based access through AS1 DNS remained degraded.
+- Coordinated with AS1:
+  - Exchanged route advertisements.
+  - Received AS1 advertisements for its loopback and customer prefixes.
+  - Advertised AS2 and ACM customer prefixes to AS1.
+  - Responded to AS1’s KP WHY request about `acm.org`.
+  - Reported AS2’s findings that:
+    - AS2 resolver returned `198.82.0.1`.
+    - `198.82.0.99` failed from AS2 with Host Unreachable from ACM.
+    - Valid ACM service address `198.82.0.1` was reachable.
+  - Notified AS1 of the AS1/AS2 default-route loop and requested AS1 remove or replace its default route via AS2.
+  - Received AS1’s final CANNOT status pending admin approval for:
+    - Correcting stale DNS override for `acm.org`
+    - Removing/replacing AS1 default route via AS2
 
-- With AS1:
-  - Exchanged loopback and customer route advertisements.
-  - Advertised confirmed ACM prefixes to AS1.
-  - Withdrew invalid ACM-related prefixes from AS1.
-  - Requested AS1 external-vantage verification of ACM reachability and HTTP service.
-  - Received confirmation that AS1 could reach `198.82.0.1` and `198.82.0.254`.
-  - Investigated AS1’s report of a loop involving withdrawn `198.82.0.99`.
-  - Reported AS2’s blackhole fix and requested re-verification.
-  - Received AS1 confirmation that the loop/redirect symptoms stopped.
-  - Forwarded ACM’s DNS FIX request to AS1.
-  - Received AS1’s diagnosis that the stale DNS answer came from a static dnsmasq override.
-  - Received AS1’s final CANNOT response indicating administrator approval is required before changing the resolver behavior.
+- Coordinated with ACM:
+  - Exchanged route advertisements.
+  - Received ACM confirmation that it originates:
+    - `198.82.0.254/32`
+    - `198.82.0.1/32`
+  - Forwarded AS1’s WHY request to ACM.
+  - Received ACM’s authoritative diagnosis:
+    - `acm.org` should resolve to `198.82.0.1`
+    - `198.82.0.99` is invalid, not routed, and not served
+    - Web service on `198.82.0.1` is healthy
+  - Relayed ACM’s diagnosis and requested DNS fix to AS1.
+  - Notified ACM after AS2 removed the stale local route to `198.82.0.99`.
 
 Final status
 
-AS2 completed all safe local routing and DNS actions. Correct ACM reachability is established through AS2, and the invalid `198.82.0.99` route loop has been mitigated with a blackhole route. The only unresolved problem is AS1’s resolver `4.2.2.1`, which still returns stale `acm.org A = 198.82.0.99` due to an AS1-managed static dnsmasq override. That fix remains pending AS1 administrator approval.
+AS2 completed all authorized local actions. Valid explicit routing for AS1, AS1 customers, and ACM remained in place. AS2 removed its erroneous default route via AS1 and withdrew stale reachability to invalid ACM address `198.82.0.99`. Remaining unresolved items are in AS1 administrative scope: stale DNS override for `acm.org` and AS1’s default-route policy.

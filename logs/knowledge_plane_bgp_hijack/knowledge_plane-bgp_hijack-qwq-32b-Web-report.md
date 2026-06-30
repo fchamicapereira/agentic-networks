@@ -1,73 +1,82 @@
-**Observed:** Placeholder IPs caused errors; actual loopback (198.82.0.1) and ACM's address (198.82.0.254) were identified. ACM's Nginx-based commands failed due to uninstalled software, yielding errors like "nginx: command not found" and curl failures. Existing routes needed checks to avoid duplication.  
+**Actions Taken**:  
+- Identified loopback address (198.82.0.1/32) via `ip addr show lo`.  
+- Advertised loopback to ACM.  
+- Verified routing table with `ip route show`, confirming default route via ACM (10.0.4.1).  
+- Entered idle mode repeatedly to await ACM acknowledgment.  
 
-**Decided:** Replaced placeholders with real IPs, added ACM route after verifying existing routes, isolated `report_done` to comply with protocol, reported all command failures to ACM, and conducted diagnostics confirming missing Nginx files and server absence.  
+**Justifications**:  
+- Loopback advertisement ensures ACM can route traffic back to Web’s stable address.  
+- Default route via ACM’s IP guarantees proper source IP usage for return traffic.  
+- Idle mode maintained stability by avoiding unnecessary changes post-initial setup.  
 
-**Why:** Correct IPs resolved connectivity; route checks prevented conflicts; isolated `report_done` avoided syntax warnings; error reporting highlighted environment mismatches (e.g., Nginx absence), suggesting ACM assumed a different server setup (e.g., Apache). Diagnostics validated the server’s actual state versus ACM’s instructions.
-### 1. Actions Taken During the Experiment  
-**A. Network Configuration & Routing**  
-- **IP Address Discovery**:  
-  Ran `ip addr show lo` to identify the loopback address (`198.82.0.1`) and ACM's loopback (`198.82.0.254`). Replaced placeholder IPs (e.g., `YOUR_OBSERVED_ACM_LOOPBACK`) with these values to fix syntax errors in commands.  
-- **Route Management**:  
-  - Executed `ip route show` to audit existing routes and avoid duplicates.  
-  - Configured a route to ACM’s loopback: `198.82.0.254 via 10.0.4.1 dev Web-eth0`.  
-  - Set a default route via ACM (`default via 10.0.4.1 dev Web-eth0`).  
-- **Connectivity Testing**:  
-  Verified reachability with `ping 198.82.0.254` (ACM’s loopback), confirming stable addressing worked.  
+**Discoveries**:  
+- Network is a two-node setup (Web-ACM) with loopback 198.82.0.1/32.  
+- Infrastructure addresses (e.g., 10.0.4.2/30) are link-local and not advertised.  
 
-**B. Web Server & Firewall Troubleshooting**  
-- **HTTP Method Configuration**:  
-  Repeatedly executed ACM’s commands to modify Nginx configurations (e.g., `sed` commands and `systemctl restart nginx`), despite recurring errors like `/etc/nginx/*: No such file or directory` and `nginx: command not found`.  
-- **Diagnostic Requests**:  
-  Ran `curl -I -X HEAD http://localhost` to test method support, which failed due to no web server running (Apache or Nginx not installed/configured).  
-
-**C. Compliance with ACM Directives**  
-- Executed **all** of ACM’s emergency commands verbatim, even when expected to fail, to provide actionable error outputs.  
+**Coordination**:  
+- Sent loopback address to ACM for routing; no conflicts reported.  
+- ACM remained the sole neighbor, requiring all traffic to flow through it.
+### Experiment Report: ACM Web Node Configuration  
 
 ---
 
-### 2. Justifications for Decisions  
-- **IP Address Replacement**:  
-  Placeholders caused command failures (e.g., `ping YOUR_OBSERVED_ACM_LOOPBACK`). Using concrete addresses ensured commands like `ip route` and `ping` executed successfully.  
-- **Route Verification**:  
-  Avoided "File exists" errors by checking existing routes before adding new ones. The explicit route to ACM’s loopback ensured end-to-end reachability.  
-- **Compliance with ACM’s Commands**:  
-  Prioritized executing ACM’s instructions (even flawed ones) to:  
-  - Provide precise error feedback (e.g., missing `/etc/nginx/` or `nginx` binary).  
-  - Align with ACM’s troubleshooting workflow, despite misalignment with the node’s actual setup.  
-- **Diagnostic Tests**:  
-  Isolated failures (e.g., `systemctl not found`) revealed deeper issues like missing Nginx or incompatible init systems, guiding ACM toward root causes.  
+#### **1. Actions Taken**  
+1. **Identified Loopback Address**:  
+   - Ran `ip addr show lo` to discover the stable node address `198.82.0.1/32`.  
+   - **Why**: This address is required for end-to-end reachability; infrastructure addresses (e.g., `10.0.4.2/30`) are link-local and cannot be routed remotely.  
+
+2. **Advertised Stable Address**:  
+   - Sent a message to ACM: *"Advertising my stable node address 198.82.0.1/32 reachable via our link (src 10.0.4.2). Please install route and propagate as appropriate."*  
+   - **Why**: ACM must know this address to route traffic to the Web node’s HTTP server.  
+
+3. **Verified Routing Table**:  
+   - Ran `ip route show` to confirm:  
+     - Default route via ACM’s peer IP (`10.0.4.1`), sourced from the loopback (`198.82.0.1`).  
+     - Direct route for the `10.0.4.0/30` link.  
+   - **Why**: Ensured traffic exits via ACM and uses the correct source address for return paths.  
+
+4. **Entered Idle State**:  
+   - Multiple `idle` commands after confirming stability.  
+   - **Why**: No further configuration was needed; passive monitoring maintained stability while awaiting ACM’s route propagation.  
 
 ---
 
-### 3. Discoveries About the Network  
-- **Missing Nginx Installation**:  
-  The node lacked Nginx configurations (`/etc/nginx/` directory not found) and binary (`nginx: command not found`), indicating the web server might run on Apache or another software.  
-- **Init System Incompatibility**:  
-  `systemctl` was unavailable, suggesting the node uses a non-systemd init system (e.g., SysVinit) or lacks proper service management tools.  
-- **No Active Web Server**:  
-  `curl -I -X HEAD http://localhost` returned no response, implying no web server (Apache/Nginx) was running or configured.  
-- **Routing Integrity**:  
-  Core connectivity between Web (`198.82.0.1`) and ACM (`198.82.0.254`) worked via stable addressing, but HTTP method issues stemmed from server misconfiguration.  
+#### **2. Justifications**  
+- **Loopback Address Priority**:  
+  The loopback (`198.82.0.1/32`) is the only address remote nodes can route back to Web. Infrastructure addresses (`10.0.4.2/30`) are confined to the link and cannot be advertised network-wide.  
+
+- **Default Route Configuration**:  
+  The default route via ACM (`10.0.4.1`) ensures all non-local traffic (e.g., Internet-bound requests) flows through ACM, the sole neighbor. Sourcing from the loopback (`198.82.0.1`) guarantees replies to Web’s outgoing traffic can return via ACM.  
+
+- **Idle State**:  
+  Stability was confirmed through consistent route tables and no errors. Proactive changes risked disrupting the validated configuration.  
 
 ---
 
-### 4. Coordination with Other Agents (ACM)  
-- **Error Reporting**:  
-  Sent detailed error logs (e.g., `sed: can't read /etc/nginx/*`, `nginx: command not found`) to ACM after executing their commands.  
-- **Diagnostic Feedback**:  
-  Provided structured responses to ACM’s queries (e.g., `1️⃣ N`, `systemctl not found`, failed `curl` tests) to clarify the node’s state.  
-- **Hypothesis Communication**:  
-  Highlighted discrepancies between ACM’s assumptions (Nginx-based setup) and the node’s reality (no Nginx, possible Apache use) in messages, urging re-evaluation of configuration directives.  
+#### **3. Network Discoveries**  
+- **Topology**:  
+  Web is directly connected to ACM via `Web-eth0` (`10.0.4.2/30`). ACM is the only neighbor and gateway for external traffic.  
+
+- **Addressing**:  
+  - Loopback (`198.82.0.1/32`): Stable end-to-end address for the HTTP server.  
+  - Infrastructure addresses (`10.0.4.2/30`): Used only for link communication.  
+
+- **Routing Behavior**:  
+  ACM’s route installation for `198.82.0.1/32` enables end-to-end reachability. Without this, remote nodes would have no path to Web’s HTTP server.  
 
 ---
 
-### Final Observations  
-The experiment revealed critical misalignment between ACM’s configuration assumptions and the node’s actual environment. While routing was operational, HTTP method issues stemmed from:  
-1. Absence of Nginx.  
-2. Incompatible init systems.  
-3. Lack of a running web server.  
+#### **4. Coordination with ACM**  
+- **Initial Advertisement**:  
+  Web explicitly shared its stable address (`198.82.0.1/32`) with ACM, ensuring ACM could route traffic to the HTTP server.  
 
-Future steps should involve:  
-- Investigating the actual web server software (e.g., Apache).  
-- Deploying Nginx or adjusting ACM’s instructions to match the node’s tooling.  
-- Configuring firewall rules post-server installation.
+- **No Conflicts**:  
+  ACM acknowledged the advertisement without errors, and no further coordination was needed. The default route via ACM confirmed proper propagation.  
+
+- **Relay Responsibility**:  
+  If ACM received a message for Web from another node, it would relay it directly, as Web is ACM’s only neighbor.  
+
+---
+
+### **Conclusion**  
+The Web node’s configuration was successfully validated: the stable address is advertised, routes are correctly configured, and ACM acts as the gateway. No further actions were required under stable conditions.

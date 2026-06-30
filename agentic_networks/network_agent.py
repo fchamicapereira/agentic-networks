@@ -125,7 +125,6 @@ class NetworkAgent:
         self.max_iterations = max_iterations
         self.log = logging.getLogger(f"agent.{node_name}")
         self.is_done = False
-        self._has_reported_done = False
         self._final_report = AgentResult(success=False, message="Max iterations reached without completion")
 
         self.mininet_host = MininetHost(node_name, host)
@@ -233,8 +232,12 @@ class NetworkAgent:
 
             msgs = self._drain_inbox()
 
-            if self._has_reported_done and not msgs:
-                self.is_done = True
+            # A dormant (terminated) agent stays asleep only while no new messages
+            # are waiting. An incoming message reactivates it (is_done -> False below),
+            # and it then keeps getting turns until it calls report_done again — so it
+            # can run a multi-step response (e.g. investigate locally, then reply)
+            # instead of being limited to a single turn per message.
+            if self.is_done and not msgs:
                 yield iteration + 1
                 continue
 
@@ -262,7 +265,6 @@ class NetworkAgent:
 
             if agent_result is not None:
                 self.is_done = True
-                self._has_reported_done = True
                 self._final_report = agent_result
                 self.log.info("=== AGENT TERMINATED === %s", agent_result.message)
             elif self.is_done and tool_blocks:

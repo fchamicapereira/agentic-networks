@@ -85,7 +85,27 @@
 
   /* Reasoning blocks use normal foreground text — the muted/grey shade is reserved for the
      internal [reason] notes shown inside tool-call cards, so reasoning must not reuse it. */
-  .kind-assistant pre, .kind-assistant summary .prev { color: var(--fg); }
+  .kind-assistant pre, .kind-assistant summary .prev, .kind-assistant .md { color: var(--fg); }
+
+  /* Markdown-rendered reasoning bodies (see mdToHtml). */
+  .md { font-size: 12px; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 6px 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 4px; line-height: 1.25; }
+  .md h1 { font-size: 1.3em; } .md h2 { font-size: 1.18em; } .md h3 { font-size: 1.08em; }
+  .md h4, .md h5, .md h6 { font-size: 1em; }
+  .md ul, .md ol { margin: 6px 0; padding-left: 1.4em; }
+  .md li { margin: 2px 0; }
+  .md code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+             background: var(--panel2); padding: 1px 4px; border-radius: 4px; font-size: .92em; }
+  .md pre { background: var(--panel2); padding: 8px 10px; border-radius: 6px; overflow: auto; margin: 6px 0; }
+  .md pre code { background: none; padding: 0; }
+  .md blockquote { margin: 6px 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--line);
+                   color: var(--muted); }
+  .md a { color: var(--accent); }
+  .md hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
+  .md strong { font-weight: 600; }
 
   body.hide-assistant .kind-assistant,
   body.hide-command   .kind-command,
@@ -119,7 +139,7 @@
   body:not(.pinned) #clear-hl { display: none; }
 </style>
 </head>
-<body>
+<body class="light">
 <div id="toolbar">
   <span class="title" id="exp-title"></span>
   <span class="group" id="filters"></span>
@@ -129,7 +149,7 @@
     <button id="clear-hl">Clear highlight</button>
   </span>
   <span class="group">
-    <label><input type="checkbox" id="light-toggle"> Light mode</label>
+    <label><input type="checkbox" id="light-toggle" checked> Light mode</label>
   </span>
   <input id="search" type="search" placeholder="filter text…">
 </div>
@@ -140,12 +160,79 @@
 <script>
 const DATA = __DATA_JSON__;
 const NH = DATA.hosts.length;
-const COLW = 300;
 const GUTTER = 64;
-const cols = `${GUTTER}px repeat(${NH}, minmax(${COLW}px, 1fr))`;
+// Host columns share the remaining width equally and shrink to fit the window
+// (minmax(0,1fr)) so the whole timeline stays within the viewport — no horizontal
+// scrolling/zoom-out — regardless of how many hosts there are.
+const cols = `${GUTTER}px repeat(${NH}, minmax(0, 1fr))`;
 
 function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
 function preview(s) { s = (s || "").replace(/\s+/g, " ").trim(); return s.length > 120 ? s.slice(0, 120) + "…" : s; }
+
+// Minimal, dependency-free Markdown -> HTML renderer for reasoning blocks. Source is
+// HTML-escaped first, so the syntax characters survive but no raw HTML can be injected.
+// Kept in sync with the copy in tools/serve_logs.py (used for standalone .md files).
+function mdToHtml(src) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  function inline(s) {
+    const Z = "\u0000", codes = [];  // sentinel guards code spans from other inline rules
+    s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return Z + (codes.length - 1) + Z; });
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+    s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+    return s.replace(new RegExp(Z + "(\\d+)" + Z, "g"), (m, i) => "<code>" + codes[+i] + "</code>");
+  }
+  const isHeading = l => /^#{1,6}\s+/.test(l), isFence = l => /^\s*```/.test(l);
+  const isHr = l => /^\s*([-*_])(\s*\1){2,}\s*$/.test(l);
+  const isUl = l => /^\s*[-*+]\s+/.test(l), isOl = l => /^\s*\d+\.\s+/.test(l);
+  const isQuote = l => /^\s*&gt;\s?/.test(l), isBlank = l => /^\s*$/.test(l);
+  const starts = l => isHeading(l) || isFence(l) || isHr(l) || isUl(l) || isOl(l) || isQuote(l);
+  function blocks(lines) {
+    let out = "", i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (isBlank(line)) { i++; continue; }
+      if (isFence(line)) {
+        i++; const buf = [];
+        while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]);
+        i++; out += "<pre><code>" + buf.join("\n") + "</code></pre>"; continue;
+      }
+      if (isHeading(line)) {
+        const m = line.match(/^(#{1,6})\s+(.*)$/), n = m[1].length;
+        out += "<h" + n + ">" + inline(m[2].trim()) + "</h" + n + ">"; i++; continue;
+      }
+      if (isHr(line)) { out += "<hr>"; i++; continue; }
+      if (isQuote(line)) {
+        const buf = [];
+        while (i < lines.length && isQuote(lines[i])) buf.push(lines[i++].replace(/^\s*&gt;\s?/, ""));
+        out += "<blockquote>" + blocks(buf) + "</blockquote>"; continue;
+      }
+      if (isUl(line)) {
+        const buf = [];
+        while (i < lines.length && isUl(lines[i])) buf.push(lines[i++].replace(/^\s*[-*+]\s+/, ""));
+        out += "<ul>" + buf.map(x => "<li>" + inline(x) + "</li>").join("") + "</ul>"; continue;
+      }
+      if (isOl(line)) {
+        const buf = [];
+        while (i < lines.length && isOl(lines[i])) buf.push(lines[i++].replace(/^\s*\d+\.\s+/, ""));
+        out += "<ol>" + buf.map(x => "<li>" + inline(x) + "</li>").join("") + "</ol>"; continue;
+      }
+      const buf = [];
+      while (i < lines.length && !isBlank(lines[i]) && !starts(lines[i])) buf.push(lines[i++]);
+      out += "<p>" + buf.map(inline).join("<br>") + "</p>";
+    }
+    return out;
+  }
+  return blocks(esc(src).replace(/\r\n?/g, "\n").split("\n"));
+}
+
+// Reasoning is rendered as Markdown; everything else stays verbatim in a <pre>.
+function bodyNode(ev) {
+  if (ev.kind === "assistant") { const d = el("div", "md"); d.innerHTML = mdToHtml(ev.body); return d; }
+  return el("pre", null, ev.body);
+}
 
 document.getElementById("exp-title").textContent = DATA.label;
 
@@ -202,11 +289,11 @@ function buildCard(ev) {
       const s = el("summary");
       s.appendChild(el("span", "prev", preview(ev.body)));
       d.appendChild(s);
-      d.appendChild(el("pre", null, ev.body));
+      d.appendChild(bodyNode(ev));
       d.addEventListener("toggle", drawArrows);
       card.appendChild(d);
     } else {
-      card.appendChild(el("pre", null, ev.body));
+      card.appendChild(bodyNode(ev));
     }
   }
   return card;

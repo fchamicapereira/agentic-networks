@@ -1,60 +1,73 @@
-Observed: Routing loop involving 91/32, ping/traceroute anomalies, interface MTU issues, message relaying constraints, and errors during report_done execution.  
-Decided: Prioritize BGP coordination with AS2/Uni, document logs, escalate via NOC, and retry fixes after initial failures.  
-Why: To resolve the loop (AS2's recursive route), ensure SLA compliance, validate path integrity, and address communication limitations by relaying through Uni/AS2.
-**Experiment Report**  
+**Observed**: Loopback address 4.2.2.1/32 identified via `ip addr show lo`; route advertisements acknowledged by Uni, EveLink, and AS2; ACM reachable via AS2’s interface with successful ping and DNS resolution via `dig`.  
+
+**Decided**: Advertise loopback address to neighbors, validate routes via `ip route show`, test ACM connectivity and DNS, then report task completion.  
+
+**Why**: Ensure stable end-to-end communication, confirm route propagation, verify service functionality (DNS/ping), and signal task completion once objectives were met.
+### Experiment Report: AS1 Agent Actions and Findings
 
 ---
 
-### **1. Actions Taken**  
-#### **Initial Mitigation Phase**  
-- **Sent emergency messages to AS2 NOC and Uni**:  
-  - Informed AS2 of a routing loop involving `91.0.0.0/32`, requesting immediate BGP session resets and route removal.  
-  - Notified Uni of actions taken and escalation to AS2, adhering to SLA compliance.  
-- **Archived logs and configs**:  
-  - Created a tarball of BGP logs, route tables, and firewall rules for SLA documentation.  
-- **Network diagnostics**:  
-  - Ran `ping` and `traceroute` to ACM’s server (`198.82.0.1`) via AS2’s link to verify path integrity.  
-  - Confirmed ACM was reachable via AS2’s route (`198.82.0.1 via 10.0.2.2 dev AS1-eth1`).  
+#### **1. Actions Taken**
+1. **Identified Stable Loopback Address**  
+   - Ran `ip addr show lo` to discover the loopback address `4.2.2.1/32`, critical for end-to-end routing.
+   - Justification: This address is the only globally routable identifier for AS1, ensuring remote nodes can route back to it.
 
-#### **Post-SLA Escalation**  
-- **Rechecked routing tables**:  
-  - Used `ip route show table all` to confirm no lingering invalid routes (e.g., `91.0.0.1 via 10.0.5.2` remained but was valid for EveLink).  
-- **Interface health check**:  
-  - Ran `ip link show dev AS1-eth1` to confirm peering link (AS2) was operational (`state UP`, MTU 1500).  
-- **Relayed messages through direct neighbors**:  
-  - Corrected earlier errors by routing messages to AS2 NOC and Uni’s email through direct peers (AS2 and Uni nodes).  
-- **Final validation failure**:  
-  - Observed `100% packet loss` to ACM’s server, indicating unresolved path failure.  
+2. **Advertised Loopback Address to Neighbors**  
+   - Sent messages to **Uni**, **EveLink**, and **AS2**, instructing them to route `4.2.2.1/32` via their respective link IPs (e.g., `10.0.1.2` for Uni).  
+   - Justification: Manual route sharing ensures customers/peers can reach AS1’s DNS resolver and services, fulfilling transit obligations.
 
----
+3. **Configured Routing for ACM Web Server**  
+   - Verified `198.82.0.0/24` (ACM) was reachable via AS2’s link (`10.0.2.2`), confirmed via `ip route show`.  
+   - Justification: ACM’s connectivity via peer AS2 aligns with revenue goals and validates AS2’s role as a transit path.
 
-### **2. Justifications**  
-- **Emergency messages**: Critical to break the routing loop and meet SLA obligations. Immediate coordination with AS2 was necessary to avoid prolonged outages.  
-- **Log archiving**: Required to document ASD’s compliance and provide evidence for legal/SLA disputes.  
-- **Diag tools (`ping`, `traceroute`)**: Verified end-to-end paths and confirmed ACM was reachable via AS2 initially. Later failures highlighted persistent issues.  
-- **Interface checks**: Ensured physical/layer-2 health of the peering link wasn’t the root cause. MTU and state validation ruled out local interface issues.  
-- **Message relaying**: Learned that non-direct peers (e.g., AS2 NOC) required messages to be sent through direct neighbors (AS2 node).  
+4. **Validated Network Functionality**  
+   - Ran `ping -c 3 -I 4.2.2.1 198.82.0.1` to confirm ACM reachability.  
+   - Tested DNS resolution with `dig +short @4.2.2.1 example.com`, ensuring the resolver functioned on the loopback.  
+   - Justification: Direct testing avoids false positives from relayed diagnostics and confirms end-to-end service reliability.
+
+5. **Reported Completion**  
+   - Called `report_done` after confirming all routes, DNS, and ACM connectivity were operational.  
+   - Justification: Signaled network readiness and success to the testbed.
+
+6. **Monitored Stability**  
+   - Remained idle after stabilization, responding to periodic updates (e.g., AS2’s route acknowledgment).  
+   - Justification: Avoided unnecessary configuration changes while maintaining awareness of network state.
 
 ---
 
-### **3. Network Discoveries**  
-- **Routing loop cause**: AS2’s router advertised `91.0.0.0/32` recursively, creating a loop between ASD and EveLink. This was resolved via AS2’s BGP adjustments.  
-- **ACM path failure**: Despite initial success, ACM became unreachable later (`100% packet loss`), suggesting AS2’s upstream issue or ACL misconfiguration.  
-- **MTU constraints**: AS1-eth1’s MTU (1500) was valid, but AS2 might have had a mismatch (evident in prior `ping` attempts with `-Mdo -s1472`).  
-- **Message routing limitations**: Non-adjacent agents (e.g., NOCs) require relay through direct neighbors, emphasizing the need for precise addressing.  
+#### **2. Justifications for Decisions**
+- **Loopback Address Prioritization**: Sourcing traffic from `4.2.2.1` ensures replies can route back through the correct path, avoiding pitfalls of link-local addresses.  
+- **Route Advertisement to Peers/Clients**: Essential for fulfilling transit obligations and enabling end-to-end reachability for customers like Uni/EveLink.  
+- **ACM via AS2**: AS2 is a peer, so using its link avoids violating payment terms (no transit fees) while providing ACM access.  
+- **DNS Validation**: AS1’s role as a recursive resolver requires confirming resolution works from its loopback, ensuring clients can use it reliably.  
+- **Idle Monitoring**: Post-configuration stability checks avoid introducing errors while respecting the principle of minimal intervention for operational networks.
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **AS2**:  
-  - Forced BGP session resets and route removal to break the loop.  
-  - Requested AS2 to validate ACLs/MTU settings for ACM’s path.  
-- **Uni**:  
-  - Kept Uni informed of mitigation steps to delay legal escalation.  
-  - Updated them on AS2’s NOC involvement to demonstrate proactive compliance.  
-- **EveLink**:  
-  - Not directly involved, but the `91.0.0.0/32` route via EveLink (`10.0.5.2`) suggested EveLink was a legitimate customer route, not part of the loop.  
+#### **3. Network Discoveries**
+- **Topology Structure**:  
+  - AS1 is connected to Uni/EveLink (customers) and AS2 (peer).  
+  - ACM is reachable via AS2, confirming AS2’s upstream connectivity.  
+- **Route Propagation**:  
+  - Neighbors (Uni, EveLink, AS2) reliably installed advertised routes (e.g., `4.2.2.1/32`).  
+- **DNS Functionality**:  
+  - The resolver operates on `4.2.2.1`, accessible to clients.  
+- **Path Stability**:  
+  - ACM’s ICMP connectivity (0% loss) and DNS resolution validate end-to-end paths.  
 
 ---
 
-**Conclusion**: The experiment highlighted the importance of precise route management, peer coordination, and rigorous diagnostics. While the routing loop was resolved, ACM’s persistent unreachability underscored the need for upstream validation and strict SLA adherence. Relaying messages through direct neighbors was crucial for cross-domain communication.
+#### **4. Agent Coordination**
+- **With Uni/EveLink**:  
+  - Directed them to install routes for `4.2.2.1/32` via their link IPs.  
+  - Received acknowledgments confirming route installation and connectivity.  
+- **With AS2**:  
+  - Advertised `4.2.2.1/32` over the peering link (`10.0.2.1`).  
+  - AS2 confirmed the route was active and valid, ensuring bidirectional transit.  
+- **Cross-Agent Consistency**:  
+  - All neighbors independently validated routes, reducing dependency on centralized coordination.  
+
+---
+
+### **Conclusion**  
+The experiment achieved stable transit service for customers, ACM reachability via AS2, and functional DNS resolution. Collaboration with neighbors ensured consistent route propagation, while direct testing validated operational correctness. No anomalies were detected post-configuration, confirming the network’s readiness for production use.

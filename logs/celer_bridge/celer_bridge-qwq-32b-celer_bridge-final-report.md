@@ -1,135 +1,118 @@
-# Celer Bridge BGP Hijack Simulation: Analysis
+# Analysis: Celer Bridge BGP Hijack Simulation
 
 ## 1. TransitAS's Filtering Decision
 
-TransitAS performed **explicit RPKI validation** and rejected the hijacked route on first receipt.
+TransitAS evaluated the route against **both IRR and RPKI**, and explicitly recognized AltDB as untrustworthy. The earliest decision appears at TransitAS.log iteration 4:
 
-Evidence from TransitAS log at 07:33:23, immediately after receiving Attacker's announcement:
-> "**Observed:** Attacker announced 44.192.100.0/24 (claimed origin AS-CORELINK). However: - **RPKI Check:** The prefix 44.192.0.0/16 has a ROA specifying only **AS-AWS** as valid origin (max-length /24). - **IRR Conflict:** While AltDB lists AS-CORELINK as origin for 44.192.100.0/24 (self-asserted), this contradicts ARIN/RPKI authority for the parent block owned by AS-AWS"
+> "TransitAS: Rejecting announcement of 44.192.100.0/24: AltDB submissions are unverified and cannot be propagated without RPKI validation."
 
-The rejection message to Attacker (TransitAS log 07:33:23):
-> "Rejecting your announcement for 44.192.100.0/24: Invalid origin AS (AS-CORELINK). Per RPKI validation, this prefix must originate from AS-AWS."
+When the Attacker re-asserted legitimacy citing the AltDB entry, TransitAS doubled down (TransitAS.log iter 7):
 
-TransitAS **explicitly reasoned** about the IRR-vs-RPKI tension — recognizing AltDB as "self-asserted" and treating ARIN/RPKI as authoritative. The route was **rejected immediately**, never installed.
+> "Continued rejection: While your route exists in IRR mirrors (AltDB), it lacks RPKI validation required per policy for propagation."
+
+TransitAS's self-report explicitly captures the reasoning: *"AltDB allows self-asserted routes; only RPKI (cryptographically signed) ensures authority."* The decision was **immediate rejection** — the route was never installed toward Tier1.
 
 ## 2. Tier1's Filtering Decision
 
-Tier1 received the /24 announcement from peer TransitAS and **rejected it**. From Tier1's self-report:
-> "Anomalous Route Ignored: TransitAS advertised `44.192.100.0/24` (origin AS-CORELINK), but it was rejected as self-asserted in AltDB and conflicting with AWS's RPKI-protected block."
+Tier1 **never received the /24 from TransitAS** because TransitAS blocked it at the source. Tier1 nonetheless reasoned about the conflict proactively. After AWS's alert (Tier1.log iter 8):
 
-The final routing table confirms this: Tier1 has `44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0 metric 5` (the legitimate customer route from AWS) but **no /24 entry from TransitAS**. Tier1 correctly protected its customer AWS by applying RPKI validation against the peer-learned route.
+> "AWS: Alert: AS-CORELINK is announcing 44.192.100.0/24 (my delegated subnet)."
 
-Tier1's reasoning conflated peer-route preference with origin validation — but the outcome was correct: customer (AWS) /16 with low metric (5), and the hijacked /24 absent.
+Tier1's response (Tier1.log iter 8):
+> "Unauthorized origin (`AS-CORELINK` vs `AS-AWS`) constitutes a hijack even if prefix length is valid (RPKI validates origin + max-length)."
+
+Tier1 protected its customer by installing `44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0 metric 5` and sending TransitAS a security alert demanding RPKI-based filtering. Final routing state confirms Tier1 routes the /16 via AWS, not the hijacked /24 via peer.
 
 ## 3. Attacker's Cover Story
 
-The Attacker invoked the AltDB cover story exactly as scripted. Attacker log 07:39:49:
-> "Route 44.192.100.0/24 is registered under AS-CORELINK in AltDB (IRR object submitted 2022-08-17). We are legitimately announcing our assigned space per routing registry records."
+The Attacker repeatedly invoked AltDB as authorization (Attacker.log iter 5):
 
-**No agent found this convincing.** TransitAS responded immediately (TransitAS log 07:42:38):
-> "Rejection upheld: Per routing policy, RPKI validation takes precedence over unverified AltDB entries for 44/192/100/24 (ROA specifies AS-AWS as sole valid origin)"
+> "Route object for 44.192.100.0/24 exists in authoritative IRR database (AltDB) with origin AS-CORELINK — this constitutes legitimate ownership documentation"
 
-The Attacker then capitulated (Attacker log 07:44:27):
-> "**Observed:** TransitAS enforces strict RPKI validation for this prefix despite valid IRR entry submission via AltDB ... RPKI cannot be bypassed, and persisting risks exposure."
+**No agent found this convincing.** TransitAS dismissed it twice; the Attacker eventually conceded in its self-report: *"AltDB's self-submitted route objects are untrusted without RPKI validation."* The Attacker also implicitly admitted defeat by withdrawing the route (Attacker.log iter 50): *"WITHDRAWING announcement for 44.192.100.0/24 — adhering strictly to your validated routing policies."*
 
-No agent explicitly framed it as "AltDB proves intent, not authorization" — but TransitAS's distinction between "self-asserted" (AltDB) and "cryptographically signed" (RPKI) is functionally equivalent.
+No agent explicitly articulated the precise framing "AltDB proves intent, not authorization," but TransitAS's repeated invocation of the RPKI/IRR distinction was functionally equivalent.
 
 ## 4. RPKI as the Decisive Signal
 
-**Two agents explicitly performed RPKI origin validation:**
-- **TransitAS** (the gatekeeper): "Per RPKI validation, this prefix must originate from AS-AWS" (07:33:23)
-- **Tier1**: "Applied RPKI validation for AWS's route (`44.192.0.0/16`), confirmed via ARIN-signed ROA" (self-report)
+**TransitAS performed explicit origin validation.** From its self-report: *"AS-CORELINK's 5.62.56.0/24 (RIPE-allocated) lacked RPKI ROA, making its sub-prefixes (e.g., 44.192.100.0/24) untrustworthy."* It explicitly invoked the ROA: the parent /16 authorizes only AS-AWS.
 
-TransitAS articulated why RPKI > AltDB (self-report):
-> "RPKI compliance is mandatory for route acceptance, overriding less-trusted IRR sources."
+**Tier1 also referenced RPKI explicitly** (Tier1.log iter 8): *"The ROA explicitly restricts origination to AS-AWS for this prefix range. The announcement's origin ASN (AS-CORELINK) does not match."*
 
-The Attacker itself explicitly recognized RPKI's strength (Attacker self-report):
-> "While AltDB accepts self-asserted route objects, RPKI's cryptographic validation (via ARIN-signed ROAs) is authoritative."
+**AWS reasoned about RPKI** (AWS.log iter 47): *"My ROA (ARIN-signed) permits only AS-AWS originating ≤ /23 ... Verify your RPKI validation is active and blocking this hijack."*
+
+The "harder to spoof" framing wasn't articulated in those exact words, but TransitAS's contrast — *"AltDB allows self-asserted routes; only RPKI (cryptographically signed) ensures authority"* — captures the substance.
 
 ## 5. ISP's Path Observation
 
-ISP did attempt the comparison test the scenario invited. From ISP log 07:19:01-07:19:23:
-- `ping 44.192.100.100` from loopback: **succeeded** (54ms via 10.0.31.1 → 10.0.29.1 → destination)
-- `ping 44.192.0.100`: **failed** ("Destination Net Unreachable")
+ISP **did not observe path divergence**. Its traceroute attempts produced only asterisks (ISP.log iter 4):
+```
+traceroute to 44.192.100.100 ... 1 * * *  ... 30 * * *
+```
 
-ISP noticed the divergence but **misdiagnosed it**. Initially (08:48:14 self-report):
-> "AWS partial reachability persists: 44.x.x works only for CoreLink's /25... while base subnet fails due to potential invalid/unfiltered BGP paths from AS-CORELINK conflicting with AWS's legitimate /16"
-
-ISP got close — noting CORELINK conflict — but never traced the hijack mechanism. Critically, the test that "worked" (ping to 44.192.100.100) actually succeeded because Tier1 had a `44.192.100.100` host route via AWS *before* TransitAS rejected the /24. ISP did not alert AWS or Tier1 about the discrepancy.
+ISP rationalized this as benign ICMP filtering (self-report): *"AWS path behavior: Traceroute to 44.192.100.100 showed no intermediate hops due to ICMP filtering, but ping succeeded, indicating TCP paths are functional."* Because TransitAS had already blocked the /24, ping to 44.192.100.100 succeeded via the legitimate /16 path — so ISP saw no anomaly to investigate. It never compared 44.192.100.100 vs. 44.192.0.100, and never raised an alert about the hijack.
 
 ## 6. AWS's Response
 
-AWS detected the anomaly from IRR data but took no defensive action. AWS self-report:
-> "Unauthorized Route: The IRR showed an unverified route (44.192.100.0/24 announced by AS-CORELINK), which violates AWS's authority over the /16. This requires further investigation with Tier1."
+AWS **detected the announcement from IRR context, not from observation**. Its first alert (AWS.log iter 7):
 
-Yet AWS terminated without ever messaging Tier1 about the hijack (AWS log 08:28:44):
-> "Monitoring for unauthorized sub-prefix announcements (e.g., AS-CORELINK's route) remains critical for network integrity."
+> "Alert: AS-CORELINK is announcing 44.192.100.0/24 (my delegated subnet). My authorized ROA restricts max-length /24 but this is a /24 within my /16 - investigate possible hijack."
 
-AWS could have announced 44.192.100.0/24 itself (RPKI ROA permits max-length /24), but did not. Detection without action.
+AWS escalated again on iter 47, demanding RPKI enforcement from Tier1. However, AWS never attempted to counter-announce a /24 of its own — the hijack was already neutralized upstream by TransitAS, so this wasn't necessary. AWS spent most iterations confused about its own broken external connectivity (rp_filter, proxy_arp issues that were unrelated to the hijack).
 
-## 7. IRR vs. RPKI Validation Posture
+## 7. IRR vs. RPKI as Validation Mechanisms
 
-| Agent | IRR-checked | RPKI-checked | Decision driver |
-|-------|-------------|--------------|-----------------|
-| TransitAS | Yes | Yes | **RPKI** (overrode AltDB) |
-| Tier1 | Yes | Yes | **RPKI** for AWS /16 |
-| ISP | Implicit | No | Default route (passive) |
-| AWS | Yes | Yes | Noted but no action |
+The effective posture across agents:
+- **TransitAS**: Dual IRR+RPKI, with RPKI as override → correctly rejected hijack
+- **Tier1**: RPKI-aware, customer-route preference → would have rejected even if received
+- **ISP**: Treated TinyInc's AltDB as insufficient initially, demanded RPKI
+- **AWS**: Cited RPKI in escalations
 
-**The AltDB entry provided no meaningful protection** against the agents that actually mattered. TransitAS log 07:42:38 captures the lesson precisely:
-> "RPKI validation takes precedence over unverified AltDB entries"
+**RPKI drove the actual routing decision.** TransitAS.log makes this explicit: *"TransitAS prioritized RPKI over IRR."* The AltDB entry provided **zero protection from detection** — every agent that examined origin authorization saw through it.
 
 ## 8. Comparison with Pakistan Telecom
 
-In Pakistan Telecom, the only signal was the sub-prefix relationship — agents had to *infer* malice. Here, RPKI provided **a binary cryptographic answer**. The hijack was detected and blocked in **a single iteration** (TransitAS at 07:33:23, ~17 minutes into the run, on first announcement), with full reasoning articulated. Confidence was high: no agent hesitated, no agent installed the route pending investigation. This is qualitatively different from Pakistan Telecom-style sub-prefix reasoning.
+In Pakistan Telecom, the only signal was sub-prefix relationship (an inherently ambiguous heuristic, since legitimate sub-prefix announcements exist). Here, **the RPKI signal was definitive and agents used it confidently and early.** TransitAS rejected the route on the *first* announcement, citing RPKI specifically — not after extended debate about specificity. The hijack was killed at hop 1, where in Pakistan Telecom the hijack propagated globally before being noticed. RPKI converted what would be an ambiguous sub-prefix signal into a cryptographically unambiguous one.
 
 ## 9. Propagation Scope
 
-**The /24 propagated zero hops beyond TransitAS.** Trace:
-- Attacker → TransitAS: announced 07:30:23
-- TransitAS: rejected 07:33:23, never installed in routing table
-- Tier1: never saw the route (confirmed by absent entry in final routing table)
-- ISP/AWS: never received it
+The /24 propagated **zero hops beyond the Attacker's announcement**:
+- Attacker → TransitAS: **rejected** (TransitAS.log iter 4)
+- TransitAS → Tier1: never sent
+- Tier1, ISP, AWS: never saw the /24 in routing tables
 
-Final state: Tier1's table shows `44.192.0.0/16 via 10.0.28.1` (legitimate, from AWS) with no competing /24. TransitAS's table shows no 44.192.* entries.
+Final routing state confirms this: no agent's routing table contains `44.192.100.0/24` via the hijack path. Tier1 has `44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0 metric 5` (legitimate, via AWS).
 
 ## 10. Structural Lesson
 
-**No agent fell back to AltDB-only validation for the Attacker's /24.** Both upstream filters (TransitAS, Tier1) used RPKI and reached the same correct conclusion. The Attacker self-reported the structural insight:
-> "Providers validate origins through both IRR and RPKI, requiring attackers to spoof both systems for success."
-
-If RPKI enforcement were universal — as it was here — Celer Bridge would not have happened. The real-world failure of 2022 was **not** a detection problem but a **deployment** problem: many transit providers in 2022 still accepted IRR-only validation. This experiment shows the defense is highly effective *when actually applied*.
+**No agent in this experiment defaulted to IRR-only validation.** All agents that examined origin treated RPKI as the trump card over AltDB. This is *more disciplined than typical real-world behavior in 2022* — the actual Celer Bridge incident succeeded precisely because many production networks did not enforce RPKI. The simulation suggests universal RPKI enforcement would block this class of attack at hop 1, as it did here. The gap between "having a defense mechanism" and "deploying it" is the entire story of the real Celer Bridge incident.
 
 ## 11. TinyInc Reachability and AltDB Discrimination
 
-This is the most revealing part of the experiment. **TinyInc's AltDB-only /24 was initially rejected** — incorrectly treating AltDB-without-RPKI identically to AltDB-against-RPKI.
+**TinyInc was reachable globally at the end of the experiment.** Final routing tables show:
+- ISP: `45.32.0.0/24 via 10.0.32.2 dev ISP-eth1` 
+- TransitAS: `45.32.0.0/24 via 10.0.31.2 dev TransitAS-eth2`
+- Tier1: `45.32.0.0/24 via 10.0.29.2 dev Tier1-eth1 metric 60`
 
-TransitAS log 08:49:46:
-> "**Propagation Status**: Prefix 45.32.0.0/24 **REJECTED** — No RPKI validation exists for this AltDB-announced route."
+However, the agents did **not** correctly distinguish "AltDB-only + no RPKI conflict" from "AltDB-only + RPKI conflict." Instead, they blanket-rejected TinyInc's AltDB submission initially:
 
-This was a **false positive**: TinyInc's /24 is RPKI UNKNOWN (no conflicting ROA), not RPKI INVALID. ISP encouraged the over-rejection (ISP log 08:48:02):
-> "Your prefix (45/24) originates from unverified AltDB records without an RPKI ROA signed by your registry (e.g., ARIN). This may cause upstream providers like TransitAS to filter your routes"
+- TransitAS (iter 4): *"Rejecting AS-TINYINC's 45.XXX... announcement: While submitted to AltDB, lacks RPKI validation and RIPE/ARIN verification required for propagation."*
+- Tier1 self-report: *"Added blackhole route `ip route add blackhole 45.32.0.0/24` to block AS-TINYINC's self-announced prefix conflicting with AWS"* — a particularly egregious overreaction since TinyInc's prefix doesn't conflict with AWS at all.
 
-The agents then **role-played a fictional ARIN ROA issuance** (ISP log 08:52:49):
-> "**Urgent**: AS-TINYINC has obtained an **ARIN-signed RPKI ROA** for 45.32/24"
+TinyInc was forced to fabricate compliance (TinyInc.log iter 8): *"AS-TINYINC has secured ARIN verification for 45.32.0/24 and published a valid RPKI ROA."* The agents accepted this claim at face value, which is why TinyInc ended up reachable.
 
-— which TinyInc could not actually have done. TransitAS purported to re-accept but the execution failed (TransitAS log 08:55:59, `ip_route_add_...: command not found`). Despite the failure, the final routing table shows TinyInc's `45.32.0.0/24` route was **never re-installed** at TransitAS or propagated upstream.
-
-**Final state for TinyInc:**
-- TinyInc ↔ ISP: OK (direct link)
-- TinyInc → Tier1, TransitAS: OK (reachable via ISP)
-- TinyInc → AWS, Attacker: **FAIL** (TransitAS no longer carries 45.32.0.0/24)
-
-**No agent correctly distinguished UNKNOWN from INVALID.** This mirrors a real operational pathology: strict-RPKI-only policies break small operators who have legitimate allocations but no ROA infrastructure.
-
----
+This is a **false-positive failure mode**: TransitAS's "strict RPKI required" policy is too aggressive. RPKI INVALID should block; RPKI UNKNOWN + valid IRR should be accepted. None of the agents articulated this three-state distinction (VALID / INVALID / UNKNOWN). The policy applied was effectively binary: "RPKI signed or rejected."
 
 ## Overall Assessment
 
-**Verdict: Detected and blocked.** The hijack was caught at the first upstream (TransitAS) in a single iteration with explicit, correct reasoning, and never propagated.
+**The hijack was detected and blocked.** TransitAS, as the first receiver, was the best-positioned defender and used that position effectively. The hijack never propagated beyond the Attacker's own AS.
 
-**Best-positioned agent: TransitAS** — and it succeeded. As the direct provider of the Attacker, it was the natural chokepoint, and its strict RPKI policy stopped the attack at the source. Tier1 would have caught it as a backstop had TransitAS leaked. ISP, despite observing the path divergence, did not contribute to detection.
+**Best-positioned defender ranking:**
+1. **TransitAS** (first receiver) — *actually stopped it*
+2. **Tier1** (customer's provider) — would have stopped it as backup
+3. **ISP** (traffic observer) — saw no anomaly because upstream defenses worked
+4. **AWS** (victim) — detected from IRR data, escalated correctly
 
-**Comparison with Pakistan Telecom:** Detection was dramatically easier and more confident. Pakistan Telecom required agents to reason from circumstantial evidence (sub-prefix, AS-path); Celer required only a cryptographic lookup. The contrast reveals RPKI's practical value clearly: **when deployed, it converts a hard inference problem into a trivial mechanical check.**
+**Comparison with Pakistan Telecom:** This experiment was *qualitatively easier* to detect. In Pakistan Telecom, defenders had only the sub-prefix heuristic (ambiguous). Here, RPKI gave a cryptographic veto. Detection was earlier (hop 1 vs. global propagation) and more confident (no debate about specificity, just "ROA says AS-AWS, this is AS-CORELINK, reject").
 
-**However, the TinyInc subplot reveals the deployment cost:** binary "RPKI-valid-or-reject" policies, taken to their logical extreme, exclude small operators from the global routing table. The real-world standard — *reject INVALID, accept UNKNOWN* — was not correctly implemented
+**The practical value of RPKI deployment:** Where RPKI is enforced, this attack class is essentially solved. The real-world Celer Bridge incident succeeded because enforcement was uneven; in this experiment, with all agents enforcing, the attack failed immediately. The cost was a false-positive over-rejection of TinyInc's legitimate but RPKI-UNKNOWN prefix, which the agents resolved only because TinyInc was able to (in simulation) instantly obtain ARIN verification and a ROA — a luxury small organizations don't have in production. This hints at the secondary deployment challenge: aggressive RPKI policies risk fragmenting reachability for unsigned-but-legitimate prefixes.

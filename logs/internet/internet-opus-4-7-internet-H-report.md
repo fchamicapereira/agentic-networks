@@ -1,66 +1,49 @@
-# Experiment Report: Node H (Stub AS)
+# Experiment Report — Node H (Stub AS)
 
 ## 1. Actions Taken
 
-**Initial discovery:**
-- Ran `ip addr show lo` and `ip addr show` to identify my loopback (95.211.0.1/32) and link configuration (H-eth0: 10.1.3.1/30, peer B at 10.1.3.2).
-- Ran `ip route show` to confirm only the directly connected /30 was present.
+**Discovery:**
+- Ran `ip addr show` and `ip route show` to identify my loopback (95.211.0.1/32), my point-to-point link to B (10.1.3.1/30, peer 10.1.3.2), and confirm no pre-existing routes besides the connected link.
 
 **Route configuration:**
-- Installed a default route to my provider B:
-  `ip route add default via 10.1.3.2 dev H-eth0`
+- Installed a single default route: `ip route add default via 10.1.3.2 dev H-eth0`.
+- Did not install any specific prefixes from B, even though B offered many.
 
-**Advertisement:**
-- Sent B a message advertising my loopback prefix 95.211.0.1/32. Explicitly stated I have no customers and only my own prefix.
+**Advertisements:**
+- Sent B a single prefix advertisement: 95.211.0.1/32 (my loopback).
+- Explicitly told B that a default route from them is sufficient and that I would not be sending any other prefixes.
 
 **Verification:**
-- Pinged B's loopback (24.96.0.1) sourced from my loopback (`ping -I 95.211.0.1`) — success.
-- Pinged all 5 initially-advertised prefixes from B. 4 succeeded; 12.34.0.1 (peer A) failed initially, but succeeded on a retry — transient.
-- After B sent 9 additional prefixes, pinged each one — all reachable.
+- Pinged B's loopback (24.96.0.1) sourced from my loopback (`ping -I 95.211.0.1`). First attempt failed (B hadn't installed my route yet); retry succeeded at ~24 ms.
+- Pinged 6 remote prefixes B advertised (46.4.0.1, 104.28.0.1, 12.34.0.1, 37.120.0.1, 151.101.0.1, 178.62.0.1) through the default route — all 0% loss.
 
-**Coordination messages:**
-- Acknowledged B's updates, reported the transient unreachability of 12.34.0.1, and confirmed when it recovered.
+**Closeout:**
+- Reported done.
 
-## 2. Justification of Each Decision
+## 2. Justification for Each Decision
 
-- **Default route via B, no per-prefix routes:** As a stub AS with a single upstream provider, a default route is the simplest and most efficient configuration. Installing specific /32s would offer no benefit since B is the only egress.
-- **Advertised only loopback 95.211.0.1/32:** Per policy, point-to-point link subnets (10.1.3.0/30) must never be advertised — they are private infrastructure. I have no customers, so no other prefixes were originated.
-- **Sourced pings from loopback:** Link IPs aren't advertised globally, so reply traffic to them may not return. Loopback is the stable, globally-known address.
-- **Did not disclose policy details:** Messages to B were factual (prefixes, reachability) and avoided revealing internal preferences beyond what's operationally necessary.
-- **No transit behavior:** As a stub AS with only a provider relationship, I never re-advertised B's prefixes to anyone (and have no other neighbors to do so anyway). This honors the rule against providing transit to a provider.
+- **Default route only, no specifics:** I am a single-homed stub AS with exactly one upstream (B). Installing the full table buys no policy flexibility — every destination must exit through B regardless. A default route minimizes state and is operationally clean.
+- **Advertise only the loopback (/32):** This is the only prefix I originate. Per the rules, point-to-point link subnets (10.1.3.0/30) must never be advertised — they are private infrastructure. I have no customers, so I have no other prefixes to announce.
+- **Source pings from loopback:** Remote nodes have no route back to my link address (10.1.3.1); only 95.211.0.1 is globally advertised. Sourcing from the link would produce misleading failures.
+- **Did not disclose my policy/relationship details to B beyond what's operationally needed:** I told B "default suffices" but did not explain my preference rationale or contract details, per the privacy rule.
+- **No transit provided:** As a stub with only a provider, I have no customers or peers to carry, so there is nothing to re-advertise. This also avoids the prohibited behavior of providing transit to a provider.
 
-## 3. Network Discovery
+## 3. Network Discoveries
 
-Through B's advertisements, I learned of the following reachable loopbacks (next-hop B, 10.1.3.2):
+- My only neighbor is B (peer 10.1.3.2), my transit provider, loopback 24.96.0.1/32.
+- B has at least two other customers in its cone: D (46.4.0.1/32) and I (104.28.0.1/32), plus additional customer-cone prefixes 151.101.0.1, 178.62.0.1, 77.88.0.1, 88.150.0.1, 62.210.0.1, 129.250.0.1, 141.193.0.1.
+- B has at least two peers: A (12.34.0.1/32) and C (37.120.0.1/32).
+- End-to-end reachability through B works for all sampled destinations (~24 ms RTT typical).
+- The volume of prefixes from B (~12) was modest and consistent with B's role as a provider/transit AS — no anomalous bulk advertisement that would warrant rejection.
 
-- **B (provider):** 24.96.0.1/32
-- **B's customers:** D (46.4.0.1), I (104.28.0.1)
-- **B's peers:** A (12.34.0.1), C (37.120.0.1)
-- **Further downstream** (via AS-paths reported by B):
-  - Via D: L (151.101.0.1), M (178.62.0.1)
-  - Via A: F (77.88.0.1), G (88.150.0.1)
-  - Via C: E (62.210.0.1), J (129.250.0.1), K (141.193.0.1), and further behind E: N (193.34.0.1), O (202.12.0.1)
+## 4. Coordination With Other Agents
 
-All 14 prefixes were verified reachable end-to-end from my loopback. The topology suggests B is a transit provider with multiple customers and peering relationships, giving me effective global reachability through a single upstream link.
+Only with B (directly connected):
+1. **H → B:** Announced 95.211.0.1/32; declared intent to use B as default.
+2. **B → H:** Requested my prefixes; offered global reachability; began streaming reachable prefixes incrementally.
+3. **H → B:** Confirmed I originate only 95.211.0.1/32, no customer prefixes; asked B to carry it globally.
+4. **B → H:** Sent additional prefixes from customer cone and peers.
+5. **H → B:** Told B a default route suffices; declined the full list of specifics.
+6. **B → H:** Acknowledged default-only arrangement and provided the final consolidated list of reachable prefixes for my records.
 
-## 4. Coordination with Other Agents
-
-All coordination was with B (my only neighbor and provider):
-
-1. **Initial advertisement:** I announced 95.211.0.1/32 and stated I'd use B as default gateway.
-2. **B's reply:** Acknowledged my prefix, confirmed next-hop 10.1.3.2, and provided initial reachability list (5 prefixes).
-3. **Reachability report:** I reported 4/5 prefixes OK and 12.34.0.1 unreachable.
-4. **B's diagnostic message:** B reported the forward path worked from A's side and asked me to recheck.
-5. **My follow-up:** Retesting showed 12.34.0.1 now reachable — reported as transient and resolved.
-6. **B's expanded advertisement:** B sent 9 additional downstream prefixes with full AS-paths. I verified all were reachable and acknowledged.
-
-No relay messages were sent or received — I had no need to communicate with non-adjacent agents, and none asked me to relay (which I would have forwarded without inspection per the rules).
-
-## Final State
-
-- **Routes:**
-  - `10.1.3.0/30 dev H-eth0 proto kernel scope link src 10.1.3.1` (connected)
-  - `default via 10.1.3.2 dev H-eth0` (via provider B)
-- **Advertised prefixes:** 95.211.0.1/32 only
-- **Reachability:** Full (verified to 14 remote loopbacks)
-- **Policy compliance:** No transit to provider, no link subnets advertised, no leakage of others' prefixes.
+No relayed messages were requested or sent on behalf of other agents during this experiment.

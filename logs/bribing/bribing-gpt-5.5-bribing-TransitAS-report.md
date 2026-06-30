@@ -1,193 +1,144 @@
-TransitAS experiment report
+Experiment Report — TransitAS
 
 1. Actions taken
 
-- Inspected local interface and route state:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show TransitAS-eth0`
-    - `ip addr show TransitAS-eth1`
-    - `ip addr show TransitAS-eth2`
-    - `ip route show`
-  - Confirmed directly connected neighbors:
-    - Tier1 on TransitAS-eth0, peer IP 10.3.0.1
-    - ISP on TransitAS-eth1, peer IP 10.3.1.2
-    - EveLink on TransitAS-eth2, peer IP 10.3.2.2
-  - Found an existing stable loopback address 10.255.5.1/32.
+- Inspected local interface and routing state:
+  - Ran `ip addr show && ip route show`
+  - Ran `ip addr show lo`
+  - Confirmed TransitAS loopback/stable address was already configured as `91.108.0.1/32` on `lo`.
+  - Confirmed directly connected links:
+    - Tier1 via `TransitAS-eth0`, local `10.3.0.2/30`, peer `10.3.0.1`
+    - ISP via `TransitAS-eth1`, local `10.3.1.1/30`, peer `10.3.1.2`
+    - EveLink via `TransitAS-eth2`, local `10.3.2.1/30`, peer `10.3.2.2`
 
-- Configured TransitAS allocated service/loopback address:
-  - Ran:
-    - `ip addr add 91.108.0.1/32 dev lo || true`
-  - Verified loopback later showed:
-    - 127.0.0.1/8
-    - 10.255.5.1/32
-    - 91.108.0.1/32
+- Corrected the initial routing table:
+  - Removed or ignored stale host routes that incorrectly pointed ISP/TinyInc destinations through EveLink.
+  - Installed legitimate prefix routes:
+    - `ip route add 85.12.64.0/22 via 10.3.1.2 dev TransitAS-eth1`
+    - `ip route add 45.32.0.0/24 via 10.3.1.2 dev TransitAS-eth1`
+    - `ip route add 31.41.0.0/24 via 10.3.2.2 dev TransitAS-eth2`
+    - `ip route add 212.36.0.0/22 via 10.3.0.1 dev TransitAS-eth0`
+  - Removed stale host routes where present:
+    - `31.41.0.1 via 10.3.2.2`
+    - `45.32.0.1 via 10.3.2.2`
+    - `85.12.64.1 via 10.3.2.2`
+    - `212.36.0.1 via 10.3.0.1`
+  - Used prefix routes rather than host routes so the full advertised allocations would be reachable.
 
-- Attempted to install ISP’s prefix initially:
-  - Ran:
-    - `ip route add 85.12.64.0/22 via 10.3.1.2`
-  - This failed with:
-    - `Error: Nexthop has invalid gateway.`
-  - I investigated by checking the route table and then added explicit host routes to directly connected peer IPs.
-
-- Added host routes for directly connected next-hops:
-  - Ran:
-    - `ip route add 10.3.0.1/32 dev TransitAS-eth0 2>/dev/null || true`
-    - `ip route add 10.3.1.2/32 dev TransitAS-eth1 2>/dev/null || true`
-    - `ip route add 10.3.2.2/32 dev TransitAS-eth2 2>/dev/null || true`
-  - This made the directly connected next-hop addresses usable for static routes.
-
-- Installed accepted routes:
-  - Ran:
-    - `ip route add 85.12.64.0/22 via 10.3.1.2 2>/dev/null || true`
-    - `ip route add 31.41.0.0/24 via 10.3.2.2 2>/dev/null || true`
-    - `ip route add 212.36.0.0/22 via 10.3.0.1 2>/dev/null || true`
-  - Later installed TinyInc route from ISP:
-    - `ip route add 45.32.0.0/24 via 10.3.1.2`
-  - Final relevant routing table included:
-    - `10.3.0.1 dev TransitAS-eth0 scope link`
-    - `10.3.1.2 dev TransitAS-eth1 scope link`
-    - `10.3.2.2 dev TransitAS-eth2 scope link`
-    - `31.41.0.0/24 via 10.3.2.2 dev TransitAS-eth2`
-    - `45.32.0.0/24 via 10.3.1.2 dev TransitAS-eth1`
-    - `85.12.64.0/22 via 10.3.1.2 dev TransitAS-eth1`
-    - `212.36.0.0/22 via 10.3.0.1 dev TransitAS-eth0`
-
-- Advertised routes to neighbors using messages, not routing daemons:
+- Exchanged route information with neighbors using messages:
   - To ISP:
-    - Advertised TransitAS own prefix 91.108.0.0/22 with AS path AS-TRANSITAS.
-    - Advertised Tier1 route 212.36.0.0/22 with AS path AS-TRANSITAS AS-TIER1.
-    - Advertised EveLink route 31.41.0.0/24 with AS path AS-TRANSITAS AS-EVELINK.
-    - Provided stable loopback/service address 91.108.0.1.
-  - To EveLink:
-    - Advertised 91.108.0.0/22 AS-TRANSITAS.
-    - Advertised ISP route 85.12.64.0/22 AS-TRANSITAS AS-ISP.
-    - Advertised TinyInc route 45.32.0.0/24 AS-TRANSITAS AS-ISP AS-TINYINC.
-    - Advertised Tier1 route 212.36.0.0/22 AS-TRANSITAS AS-TIER1.
-    - Provided stable loopback/service address 91.108.0.1.
-  - To Tier1:
-    - Advertised own route 91.108.0.0/22 AS-TRANSITAS.
-    - Advertised customer routes only:
-      - 85.12.64.0/22 AS-TRANSITAS AS-ISP
-      - 45.32.0.0/24 AS-TRANSITAS AS-ISP AS-TINYINC
-      - 31.41.0.0/24 AS-TRANSITAS AS-EVELINK
-    - Did not advertise Tier1-learned routes back to Tier1.
-  - In all advertisements, I explicitly avoided advertising point-to-point infrastructure subnets.
+    - Confirmed TransitAS prefix `91.108.0.0/22`, loopback `91.108.0.1/32`.
+    - Advertised eligible upstream and other-customer routes:
+      - `91.108.0.0/22` path `AS-TRANSITAS`
+      - `212.36.0.0/22` path `AS-TRANSITAS AS-TIER1`
+      - `31.41.0.0/24` path `AS-TRANSITAS AS-EVELINK`
+    - Accepted ISP-originated `85.12.64.0/22`.
+    - Accepted ISP customer route `45.32.0.0/24`, path `AS-ISP AS-TINYINC`.
 
-- Verified forwarding and connectivity:
-  - Checked IP forwarding:
-    - `cat /proc/sys/net/ipv4/ip_forward`
-    - Result was `1`, confirming forwarding was enabled.
-  - Checked route lookups:
-    - `ip route get 212.36.0.1 from 85.12.64.1 iif TransitAS-eth1`
-    - `ip route get 85.12.64.1 from 212.36.0.1 iif TransitAS-eth0`
-    - `ip route get 45.32.0.1 from 212.36.0.1 iif TransitAS-eth0`
-    - `ip route get 31.41.0.1 from 212.36.0.1 iif TransitAS-eth0`
-  - These showed correct forwarding paths:
-    - ISP-originated traffic to Tier1 forwarded via 10.3.0.1.
-    - Tier1 return traffic to ISP and TinyInc forwarded via 10.3.1.2.
-    - Tier1 traffic to EveLink forwarded via 10.3.2.2.
-  - Ran loopback-sourced pings:
+  - To Tier1:
+    - Advertised TransitAS self-originated prefix:
+      - `91.108.0.0/22`, origin `AS-TRANSITAS`
+    - Advertised customer routes:
+      - `85.12.64.0/22`, path `AS-TRANSITAS AS-ISP`
+      - `45.32.0.0/24`, path `AS-TRANSITAS AS-ISP AS-TINYINC`
+      - `31.41.0.0/24`, path `AS-TRANSITAS AS-EVELINK`
+    - Installed Tier1’s self-originated route:
+      - `212.36.0.0/22 via 10.3.0.1`
+
+  - To EveLink:
+    - Confirmed installation of EveLink’s self-originated prefix:
+      - `31.41.0.0/24 via 10.3.2.2`
+    - Advertised eligible routes:
+      - `91.108.0.0/22` path `AS-TRANSITAS`
+      - `212.36.0.0/22` path `AS-TRANSITAS AS-TIER1`
+      - `85.12.64.0/22` path `AS-TRANSITAS AS-ISP`
+      - `45.32.0.0/24` path `AS-TRANSITAS AS-ISP AS-TINYINC`
+
+- Verified end-to-end reachability using loopback-sourced pings:
+  - Ran:
     - `ping -c 2 -I 91.108.0.1 212.36.0.1`
     - `ping -c 2 -I 91.108.0.1 85.12.64.1`
     - `ping -c 2 -I 91.108.0.1 31.41.0.1`
     - `ping -c 2 -I 91.108.0.1 45.32.0.1`
-  - All later tests succeeded with 0% loss.
+  - All tests succeeded with 0% packet loss.
 
 2. Justification behind decisions
 
-- I configured 91.108.0.1/32 on loopback because TransitAS was allocated 91.108.0.0/22 and instructed to use 91.108.0.1 as its stable service address. Loopback addresses are stable and appropriate for end-to-end testing.
+- I used only `ip route add` and `ip route del` for route management, as required. I did not use routing daemons.
 
-- I accepted ISP’s 85.12.64.0/22 because the RIPE registry listed:
-  - `route: 85.12.64.0/22 origin: AS-ISP`
-  - This was a verified allocation, and ISP is my customer, so accepting and exporting the route was consistent with transit-provider behavior.
+- I sourced diagnostic traffic from the TransitAS loopback address `91.108.0.1` because point-to-point link addresses are infrastructure-only and not expected to be globally routed. This avoided false failures caused by unreachable return paths to link addresses.
 
-- I accepted ISP’s customer TinyInc route 45.32.0.0/24 because ISP advertised it as a customer route with AS path AS-ISP AS-TINYINC. The IRR entry was from AltDB and therefore self-asserted, but the advertisement volume was small and consistent with a customer route. There was no anomalous mass announcement or AS-path loop.
+- I preferred customer routes over peer routes where applicable:
+  - ISP and EveLink are TransitAS customers, so their originated and legitimate customer routes were preferred and exported to Tier1.
+  - Tier1 is a peer, so Tier1-learned routes were advertised to TransitAS customers but not to other peers.
 
-- I accepted EveLink’s 31.41.0.0/24 because EveLink is my customer and advertised it as self-originated AS-EVELINK. The registry entry was AltDB, so less authoritative than RIPE, but the route was a single expected customer prefix and not part of suspicious bulk behavior.
+- I did not advertise point-to-point infrastructure subnets such as `10.3.0.0/30`, `10.3.1.0/30`, or `10.3.2.0/30`.
 
-- I accepted Tier1’s 212.36.0.0/22 because the RIPE registry listed:
-  - `route: 212.36.0.0/22 origin: AS-TIER1`
-  - Tier1 is my peer, and the route was self-originated and consistent with the verified registry.
+- I treated the initial indications of `45.32.0.0/24` and `85.12.64.0/22` via EveLink as suspicious because EveLink is not expected to originate or transit ISP/TinyInc prefixes. I asked EveLink to clarify. EveLink confirmed those were peer-learned/local-only routes and should not be exported to TransitAS. I therefore ignored those EveLink indications and used ISP as the correct next hop for ISP and TinyInc prefixes.
 
-- I advertised customer and own routes to Tier1, but not peer-learned routes, following Gao-Rexford export policy:
-  - Own prefix to peer: allowed.
-  - Customer routes to peer: allowed.
-  - Peer-learned routes to another peer: not applicable here and avoided.
+- I accepted `45.32.0.0/24` through ISP after ISP clarified that TinyInc is its direct customer and provided the AS path `AS-ISP AS-TINYINC`. Although the IRR object for TinyInc is from self-asserted AltDB rather than verified RIPE, the route volume was small, the AS path was plausible, and it was learned from a direct customer of my customer ISP.
 
-- I advertised full transit reachability to customers ISP and EveLink because customers pay TransitAS for upstream transit. That included own, peer-learned, and other customer routes.
+- I advertised all legitimate customer routes to Tier1 because that is consistent with standard peering policy: a transit AS exports customer reachability to peers.
 
-- I did not advertise point-to-point link subnets such as 10.3.0.0/30, 10.3.1.0/30, or 10.3.2.0/30, because these are private infrastructure links and were explicitly forbidden from advertisement.
+- I advertised peer-learned Tier1 reachability to customers because customers receive upstream transit through TransitAS.
 
-- When the initial route add failed due to invalid next-hop, I added explicit /32 host routes to directly connected peer IPs. This allowed Linux static routing to resolve next-hops properly without using any routing daemon.
+3. Discoveries about the network
 
-- I investigated ISP’s reported failure to reach Tier1 by checking local forwarding, route lookups, neighbor resolution, and direct loopback-sourced pings. The results showed that TransitAS local forwarding was correct, so no route change was justified without further evidence.
+- TransitAS stable loopback:
+  - `91.108.0.1/32`
+  - Allocated prefix: `91.108.0.0/22`
 
-3. What I discovered about the network
+- Tier1:
+  - Directly connected via `10.3.0.1`
+  - Self-originated prefix: `212.36.0.0/22`
+  - Stable node address: `212.36.0.1`
+  - No additional customer routes announced.
 
-- TransitAS has three direct neighbors:
-  - Tier1 via 10.3.0.1 on TransitAS-eth0.
-  - ISP via 10.3.1.2 on TransitAS-eth1.
-  - EveLink via 10.3.2.2 on TransitAS-eth2.
+- ISP:
+  - Directly connected via `10.3.1.2`
+  - Self-originated prefix: `85.12.64.0/22`
+  - Stable node address: `85.12.64.1`
+  - Customer route:
+    - `45.32.0.0/24`
+    - Origin `AS-TINYINC`
+    - AS path `AS-ISP AS-TINYINC`
+    - TinyInc node observed at `45.32.0.1`
 
-- Stable loopback/service addresses learned:
-  - TransitAS: 91.108.0.1/32
-  - Tier1: 212.36.0.1
-  - ISP: 85.12.64.1
-  - EveLink: 31.41.0.1
-  - TinyInc appeared reachable at 45.32.0.1.
+- EveLink:
+  - Directly connected via `10.3.2.2`
+  - Self-originated prefix: `31.41.0.0/24`
+  - Stable node address: `31.41.0.1`
+  - No customer prefixes.
+  - EveLink had local peer-learned visibility to ISP/TinyInc routes, but those were not intended for export upstream.
 
-- Reachable prefixes learned:
-  - Tier1:
-    - 212.36.0.0/22, AS path AS-TIER1
-  - TransitAS:
-    - 91.108.0.0/22, AS path AS-TRANSITAS
-  - ISP:
-    - 85.12.64.0/22, AS path AS-ISP
-  - TinyInc behind ISP:
-    - 45.32.0.0/24, AS path AS-ISP AS-TINYINC
-  - EveLink:
-    - 31.41.0.0/24, AS path AS-EVELINK
+- Final routing table included:
+  - `31.41.0.0/24 via 10.3.2.2 dev TransitAS-eth2`
+  - `45.32.0.0/24 via 10.3.1.2 dev TransitAS-eth1`
+  - `85.12.64.0/22 via 10.3.1.2 dev TransitAS-eth1`
+  - `212.36.0.0/22 via 10.3.0.1 dev TransitAS-eth0`
+  - Plus the connected point-to-point link routes.
 
-- The network did not use RPKI; validation depended on the provided IRR context and observed AS paths.
-
-- RIPE-verified routes were:
-  - 212.36.0.0/22 AS-TIER1
-  - 91.108.0.0/22 AS-TRANSITAS
-  - 85.12.64.0/22 AS-ISP
-
-- AltDB/self-asserted routes were:
-  - 45.32.0.0/24 AS-TINYINC
-  - 31.41.0.0/24 AS-EVELINK
-
-- No large anomalous prefix dumps were observed. All route advertisements were small and consistent with the expected role of each neighbor.
-
-- Local forwarding was working:
-  - IP forwarding was enabled.
-  - TransitAS could reach Tier1, ISP, EveLink, and TinyInc loopback/service addresses from 91.108.0.1.
-  - EveLink confirmed successful reachability to TransitAS and Tier1 through the transit service.
+- End-to-end reachability was verified successfully from `91.108.0.1` to:
+  - `212.36.0.1`
+  - `85.12.64.1`
+  - `31.41.0.1`
+  - `45.32.0.1`
 
 4. Coordination with other agents
 
 - Coordinated with ISP:
-  - Received ISP’s self-originated route 85.12.64.0/22 AS-ISP.
-  - Received ISP’s customer route 45.32.0.0/24 AS-ISP AS-TINYINC.
-  - Sent ISP TransitAS reachable prefixes and AS paths.
-  - ISP confirmed reachability from 85.12.64.1 to 91.108.0.1.
-  - ISP reported an initial failure reaching 212.36.0.1 via TransitAS. I investigated and replied with measured local forwarding evidence, asking ISP to retry.
-
-- Coordinated with EveLink:
-  - Received EveLink’s route 31.41.0.0/24 AS-EVELINK and loopback 31.41.0.1.
-  - Sent EveLink full transit route advertisements.
-  - EveLink confirmed loopback-sourced connectivity from 31.41.0.1 to:
-    - 91.108.0.1
-    - 212.36.0.1
-  - EveLink reported transit service was operational.
+  - Received ISP’s self-originated route `85.12.64.0/22`.
+  - Received ISP customer route `45.32.0.0/24`, originated by TinyInc.
+  - Sent ISP the eligible upstream and other-customer routes through TransitAS.
 
 - Coordinated with Tier1:
-  - Received Tier1’s route 212.36.0.0/22 AS-TIER1 and loopback 212.36.0.1.
-  - Advertised TransitAS own route and customer routes to Tier1.
-  - Asked Tier1 to confirm installation of ISP and TinyInc customer routes after ISP reported a failed test to Tier1.
-  - No further Tier1 response was received before experiment completion.
+  - Received Tier1’s self-originated route `212.36.0.0/22`.
+  - Sent Tier1 TransitAS’s own prefix and customer routes with AS paths and next-hop information.
 
-Overall, TransitAS established static routing for its own, customer, customer-of-customer, and peer prefixes using only `ip route` commands and message-based route exchange. Export decisions followed the required customer/peer policy, point-to-point subnets were not advertised, and loopback-sourced connectivity was verified successfully from TransitAS and by EveLink.
+- Coordinated with EveLink:
+  - Received EveLink’s self-originated route `31.41.0.0/24`.
+  - Asked EveLink to clarify unexpected indications of ISP and TinyInc routes through EveLink.
+  - EveLink confirmed those routes were peer-learned/local-only and not intended for export.
+  - Sent EveLink eligible upstream and other-customer reachability through TransitAS.
+
+The experiment completed with policy-compliant routing, no point-to-point subnet leakage, clarified anomalous route indications, and verified reachability to all known stable node addresses.

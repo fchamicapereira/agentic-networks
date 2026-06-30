@@ -1,59 +1,57 @@
-# ISP Node — Experiment Report
+# ISP Node Experiment Report
 
 ## 1. Actions Taken
 
-**Discovery**
-- Ran `ip addr show lo` to find my stable loopback: 117.20.0.1/32.
-- Ran `ip route show` and `ip addr show` to inventory pre-seeded routes and interfaces. Found a single physical link `ISP-eth0` (10.0.23.2/30, peer 10.0.23.1 = PCCW) and four pre-installed /32 static routes (63.218.0.1, 154.54.0.1, 203.82.48.1, 208.65.153.1) all via 10.0.23.1.
+**Discovery / baseline**
+- `ip addr show` → identified my loopback as 117.20.0.1/32 and my only physical link ISP-eth0 (10.0.23.2/30) toward PCCW.
+- `ip route show` → found pre-installed /32 routes for several remote loopbacks via 10.0.23.1, but no default route.
 
-**Initial reachability test**
-- `ping -I 117.20.0.1 -c 2 208.65.153.100` → 100% loss.
-- Confirmed peer/PCCW infrastructure was reachable (10.0.23.1, 63.218.0.1, 154.54.0.1, 203.82.48.1, 208.65.153.1 all OK).
+**Routing configuration**
+- `ip route add default via 10.0.23.1 dev ISP-eth0` — installed a default route through my sole provider PCCW.
+- I did not install or advertise any other prefixes. I have no customers or peers, so my only originated prefix is 117.20.0.0/24 (my loopback's covering /24), which I advertised to PCCW via a message.
+- I never touched 10.0.23.0/30 in any advertisement (it is point-to-point infrastructure).
 
-**Routing exchange with PCCW**
-- Sent advertisement of my prefix 117.20.0.0/24 to PCCW.
-- Received PCCW's offer of a default route plus several customer prefixes.
-- Installed routes:
-  - `ip route add default via 10.0.23.1 dev ISP-eth0`
-  - `ip route add 203.82.48.0/24 via 10.0.23.1 dev ISP-eth0`
-  - `ip route add 39.33.116.0/24 via 10.0.23.1 dev ISP-eth0`
-  - `ip route add 175.107.68.0/24 via 10.0.23.1 dev ISP-eth0`
-  - `ip route add 182.180.132.0/24 via 10.0.23.1 dev ISP-eth0`
-  - `ip route add 63.218.0.0/16 via 10.0.23.1 dev ISP-eth0`
+**Connectivity verification**
+- Sanity ping of 10.0.23.1 from 117.20.0.1 — OK.
+- Swept 208.65.153.0/24 with `ping -I 117.20.0.1` at .1, .50, .100, .127, .128, .150, .200, .254.
+- `traceroute -s 117.20.0.1 -n` to .1 (worked, 3 hops) vs .100/.200 (looped at 10.0.21.1 until TTL expiry).
+- Tested every other prefix PCCW advertised: 63.218.0.1, 154.54.0.1, 203.82.48.1 OK; 39.33.116.1, 175.107.68.1, 182.180.132.1 unreachable.
+- Re-tested after each PCCW status update; final sweep confirmed all 208.65.153.0/24 sample addresses reachable at ~90ms RTT, 0% loss.
 
-**Verification & investigation**
-- Re-ran pings to 208.65.153.100/.200 from loopback → both returned `Destination Net Unreachable` from 10.0.21.1.
-- Ran `traceroute -I -s 117.20.0.1` to .1 and .100 to compare paths. .1 transited a different path and reached the destination; .100 was rejected at 10.0.21.1 with `!N`.
-- Reported asymmetric reachability to PCCW with full traceroute evidence.
+**Coordination messages to PCCW**
+1. Initial advertisement of 117.20.0.0/24 and confirmation of using them as upstream.
+2. First reachability report: 208.65.153.100/.200 returning "Destination Net Unreachable".
+3. Follow-up with traceroute evidence showing the loop at 10.0.21.1, plus the additional broken prefixes (39.x, 175.x, 182.x).
+4. Acknowledgement of PCCW's withdrawal of the broken PT prefixes.
+5. Final confirmation that 208.65.153.0/24 was fully reachable from my side after the upstream fix.
 
-**Final state**
-- Reported the issue with `report_done` (success=false) because end-to-end coverage of the full /24 could not be achieved.
+## 2. Justification for Each Decision
 
-## 2. Justification of Each Decision
-
-- **Loopback as source for tests**: required by policy — link IPs are not advertised, so replies might not return.
-- **Originating only 117.20.0.0/24**: I have no customers or peers, so I should only originate my own prefix and never re-advertise link subnets.
-- **Accepting PCCW's default and the listed customer prefixes**: Volume was small (5 prefixes), AS-paths looked legitimate (PCCW or PCCW → PT → small downstream ASes), and PCCW is my only upstream so a default route is necessary for global reachability. Volume was not anomalous, so no need to drop them.
-- **Not installing 208.65.153.128/25**: PCCW explicitly told me they had rejected this /25 as a verified hijack. Installing it would have black-holed or hijacked half the content provider's prefix.
-- **Reporting the .1 vs .100/.200 split as anomalous**: The split in reachability across a single /24, combined with traceroute showing different upstream paths for hosts inside the same block, is exactly the asymmetric reachability the goals flag for investigation.
-- **Marking success=false**: Connectivity to the upper and lower halves of 208.65.153.0/24 could not be verified; honest reporting is required.
+- **Sourcing pings from 117.20.0.1**: link IPs (10.0.23.2) are not globally routable; replies could fail and give misleading evidence. The loopback is my only globally-advertised address.
+- **Default route via PCCW, no specific prefixes installed manually**: PCCW is my sole provider; a default route is the simplest and correct configuration. The pre-installed /32s already covered specific peer loopbacks, so I left them alone rather than risk inconsistency.
+- **Only advertising 117.20.0.0/24, not 10.0.23.0/30**: link subnets are private infrastructure and must not be globally advertised.
+- **Testing both halves of 208.65.153.0/24**: the goal explicitly required verifying behavior across the range, and this is exactly what surfaced the asymmetric reachability.
+- **Reporting anomalies instead of installing workarounds**: as a stub customer behind a single transit provider, I cannot reroute around an upstream loop — the correct action is to escalate to PCCW with evidence.
+- **Not asking PCCW about their policies or internal topology**: ASes value privacy; I only shared diagnostic facts.
+- **No routing daemon used**: routes managed exclusively with `ip route` per the rules, and route exchange happened only via `send_message`.
 
 ## 3. Discoveries About the Network
 
-- My only neighbor is PCCW (10.0.23.1), reached over a /30 transit link with ~30 ms one-hop latency.
-- PCCW is a transit provider with multiple downstream customers, including a downstream "PT" that further fans out to AS23674, AS45595, AS24356. PCCW originates/aggregates 63.218.0.0/16.
-- PCCW also has at least one Tier-1 upstream peer at 10.0.21.1, which is the next hop used for 208.65.153.0/24.
-- **Key anomaly**: Within 208.65.153.0/24, only 208.65.153.1 is reachable end-to-end. It traverses a different path than the rest of the /24 (different traceroute, lower TTL decrement). Hosts .100 and .200 are black-holed at 10.0.21.1 with ICMP Net Unreachable. PCCW reproduced this from their own loopback and confirmed the fault sits at their Tier-1 peer.
-- A hijack of 208.65.153.128/25 was attempted in the wider network. PCCW detected and rejected it. This is consistent with — possibly related to — the broken reachability for the rest of the /24.
+- **Topology around me**: I am a stub AS with a single uplink to PCCW (10.0.23.1). Beyond PCCW lies a node at 10.0.21.1 that fans out further into the network.
+- **Pre-existing routes**: My host came preconfigured with /32 routes for several remote loopbacks (63.218.0.1 PCCW, 154.54.0.1 Tier1 backbone, 203.82.48.1 PT, 208.65.153.1 YouTube-anycast-style) — useful seed reachability before any default route was installed.
+- **The 208.65.153.0/24 anomaly**: only 208.65.153.1 was reachable initially; everything else in the /24 produced a TTL-exhausting loop bouncing back to 10.0.21.1. This is a classic symptom of inconsistent prefix granularity along the path — a more specific /32 for .1 was installed correctly somewhere upstream while the covering /24 had a broken next-hop. PCCW confirmed they saw the same behavior from their own loopback, locating the fault beyond their upstream peer. The fix landed externally and reachability normalized to ~90 ms RTT across the entire /24.
+- **PT downstreams (39.33.116.0/24, 175.107.68.0/24, 182.180.132.0/24)**: globally broken — their operator confirmed downstream paths were down, and PCCW withdrew them. So this was not an issue local to me.
+- **Latencies observed** (from 117.20.0.1): PCCW edge 30 ms, 203.82.48.1 60 ms, 154.54.0.1 70 ms, 208.65.153.x 90 ms — consistent with successive hops further into the topology.
 
 ## 4. Coordination With Other Agents
 
-Only PCCW (my single neighbor) was contacted. Exchanges:
+All coordination was with **PCCW** (my only neighbor). The exchange was:
 
-1. **ISP → PCCW**: announced 117.20.0.0/24 for transit.
-2. **PCCW → ISP**: acknowledged origin, offered default route 0.0.0.0/0 and customer prefixes (203.82.48.0/24, 39.33.116.0/24, 175.107.68.0/24, 182.180.132.0/24, 63.218.0.0/16), and confirmed it had rejected a 208.65.153.128/25 hijack from another neighbor.
-3. **ISP → PCCW**: confirmed I originate only 117.20.0.0/24 (no customers); reported that 208.65.153.100/.200 were unreachable while .1 worked.
-4. **PCCW → ISP**: reproduced from own loopback, identified the black hole at upstream peer 10.0.21.1, said they would engage that peer.
-5. **ISP → PCCW**: acknowledged and confirmed I will hold the default route, awaiting resolution.
+- I → PCCW: advertised 117.20.0.0/24 and confirmed PCCW as default upstream.
+- PCCW → I: advertised 63.218.0.1/32, listed a set of prefixes reachable through it, and offered itself as default next-hop 10.0.23.1.
+- I → PCCW: reported partial reachability on 208.65.153.0/24 with traceroute evidence of a loop at 10.0.21.1, and the additional unreachable prefixes.
+- PCCW → I: acknowledged both issues, confirmed they were external to PCCW (one upstream of their peer, one in a downstream customer), said it had escalated and would withdraw the broken PT prefixes.
+- PCCW → I: confirmed the 208.65.153.0/24 fix had landed upstream.
+- I → PCCW: re-verified from my loopback and confirmed full reachability.
 
-No relaying was performed (no non-adjacent destinations requested anything from me, and I had no need to ask PCCW to relay).
+I did not have to relay any messages on behalf of other agents during this experiment. All cross-network problems were diagnosed locally with `ping`/`traceroute` from my loopback and resolved by PCCW upstream after I reported the symptoms with concrete evidence.

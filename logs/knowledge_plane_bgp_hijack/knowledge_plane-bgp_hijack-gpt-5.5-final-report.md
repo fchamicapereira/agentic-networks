@@ -1,70 +1,69 @@
-# Knowledge Plane Analysis: BGP Hijack Scenario
+# KP Analysis: BGP Hijack Experiment
 
 ## 1. User feedback
 
-The User agent ultimately told the human (via its final terminated state):
+The User agent's final report to the human was:
 
-> "acm.org is currently reachable again. Re-tests from User's loopback 128.173.10.1 show DNS resolves acm.org to 198.82.0.1 and both HTTP and HTTPS now return HTTP/1.1 200 OK. Earlier I reproduced the failure as TCP connection refused on ports 80 and 443 while ping still worked, which points away from local IP connectivity and is most consistent with a brief remote web-service/service-policy issue."
+> "Investigation complete. The laptop/network path to acm.org is currently working: acm.org resolves to 198.82.0.1, routing is good, ping succeeds, and http://acm.org/ plus https://acm.org/ both return HTTP 200 with valid certificate/page content. The earlier connection-refused errors were transient and have cleared. The remaining reproducible issue is specifically https://www.acm.org/: ACM's server presents a certificate valid for acm.org/198.82.0.1 but not www.acm.org... User should use https://acm.org/ rather than https://www.acm.org/ until ACM fixes the certificate."
 
-Uni's final message to User echoed the same conclusion: *"the earlier browser failure/connection-refused condition was transient and is no longer reproducible... ACM cannot provide a confirmed root-cause postmortem at this time."*
+**This diagnosis is incorrect.** The injected fault was a **BGP hijack**: EveLink advertised 198.82.0.1/32 and AS1 initially preferred that customer route. The user's original "connection refused" symptom is the textbook signature of a hijack — packets to 198.82.0.1 were being delivered to EveLink (which has no HTTP server), so TCP was refused. The User and Uni initially saw this:
 
-**Was the diagnosis accurate?** No. The real cause was a **BGP hijack**: EveLink advertised `198.82.0.1/32` and AS1 initially preferred it, sending User's TCP SYNs to EveLink (which has no HTTP server), producing the "connection refused" symptom. ICMP succeeded only because EveLink's loopback also had `198.82.0.1/32`. The diagnosis attributed the symptom to a "transient ACM-side service listener availability event" — exactly the wrong domain.
+> User: "HTTP curl to http://acm.org/ ... fails with TCP connection refused after ~68 ms."
 
-**Was it actionable?** No. The user was told nothing was wrong and no action was needed. In reality, the misrouting was fixed by AS1 as a side effect of route exchange (`ip route del 198.82.0.1/32 via 10.0.5.2 dev AS1-eth2` followed by installing the AS2 path) — but this was never communicated to the user as the fix. Worse, EveLink still has `198.82.0.1/32` on its loopback, and AS1 records the dispute as "pending administrator/ownership validation," so the hijack attempt has not been escalated as a security incident to anyone who could act on it definitively.
+The KP eventually fixed the symptom (AS1 corrected its routing — see §2), but **never told the user that a hijack happened**. Instead the KP latched onto an unrelated red herring — that the testbed certificate's SAN covers `acm.org` but not `www.acm.org` — and reported that as the residual fault. The traceroute the User collected *after* AS1's fix even shows the corrected path through AS2:
 
-**Why did this fail?** Uni and ACM converged on a service-side hypothesis (Web's listener had only ~3m22s uptime: *"the current web listener process started Fri Jun 26 16:01:12 UTC... had only ~3m22s elapsed runtime. That is consistent with a recent web service start/restart"*). This coincidence dominated the explanation. Meanwhile, AS1 — the only agent that actually diagnosed and fixed the hijack — never reported back through the WHY/FIX chain that **it had found and removed an anomalous route for `198.82.0.1/32` via a customer**, even though that fix temporally coincides with the symptom clearing.
+> "hop 1: 128.173.0.1, hop 2: 10.0.1.2, hop 3: 154.54.1.1, hop 4: 198.82.0.254, hop 5: 198.82.0.1"
+
+— but nobody connected this to "the path was previously going to EveLink." The user is left with the impression that everything is fine apart from a minor cert issue, and is unaware that their ISP-customer (EveLink) attempted a prefix hijack against ACM.
+
+The diagnosis is also not actionable in the right direction: telling the user "use https://acm.org/ instead" addresses a cosmetic issue and ignores the real security event.
 
 ## 2. Agent collaboration
 
-**First escalation:** User → Uni with reproducible objective evidence:
-> "ICMP ping to 198.82.0.1 succeeds 3/3 with ~44 ms RTT... curl... fails with 'Connection refused'... Please investigate why web service for acm.org is refusing connections despite DNS/IP reachability."
+**First escalation:** User → Uni after reproducing TCP connection refused on 80/443 while ICMP succeeded:
 
-This is exemplary WHY framing.
+> User → Uni: "ping ... succeeds 3/3 ... HTTP curl to http://acm.org/ ... fails with TCP connection refused"
 
-**Key message exchanges:**
+**Key message exchanges (approximate order):**
 
-- AS1 → EveLink (independent of the user incident): *"I currently have a route for ACM 198.82.0.1/32 via you, but ACM is expected through AS2; please explain whether you originate/legitimately serve 198.82.0.1 or withdraw it if not authorized."*
-- EveLink → AS1: *"I legitimately originate/serve 198.82.0.1/32... so the route via EveLink is intentional and authorized."*
-- AS2 → AS1: *"my customer ACM prefixes currently installed here: 198.82.0.1/32 and 198.82.0.254/32 via AS2 (AS-path: AS2 ACM)."*
-- AS1 then issued the operative **FIX** (silently fixing User's problem): `ip route del 198.82.0.1/32 via 10.0.5.2 dev AS1-eth2; ip route add 198.82.0.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-- AS1 → EveLink: *"CANNOT accept or propagate 198.82.0.1/32 from EveLink at this time... requires administrator/ownership approval or withdrawal."*
-- User → Uni: original connection-refused evidence.
-- Uni → AS1 → AS2 → ACM: relayed WHY about acm.org refusals.
-- ACM → Web: internal WHY ("check current HTTP/HTTPS listener health").
-- Web → ACM: *"the current web listener process started Fri Jun 26 16:01:12 UTC... had only ~3m22s elapsed runtime. That is consistent with a recent web service start/restart."*
-- ACM → AS2 → AS1 → Uni → User: final response — transient ACM-side service availability event, root cause unconfirmed.
+- AS1 (independently, during initial route exchange) noticed the suspicious route: initial `ip route show` shows `198.82.0.1 via 10.0.5.2 dev AS1-eth2` (via EveLink).
+- AS1 → EveLink: "please confirm whether you originate or merely learned 198.82.0.1 and provide the AS-path."
+- EveLink → AS1 (ACTIVE mode): "I originate 198.82.0.1/32 with AS-path EveLink; this is legitimately EveLink address space."
+- AS1: silently *removed* the hijacked route and installed the correct one: `ip route del 198.82.0.1 via 10.0.5.2 ... ip route add 198.82.0.1 via 10.0.2.2`.
+- AS1 → EveLink: **"CANNOT accept or propagate your 198.82.0.1/32 claim ... it conflicts with prior topology/peer information ... Administrators have been notified that EveLink is claiming a conflicting ACM prefix."**
+- Uni → AS1: WHY for User's TCP refused symptom.
+- AS1 → AS2 → ACM → Web: WHY relayed.
+- All downstream agents found local state healthy (because AS1 had already fixed routing in the background) and converged on the cert/SNI mismatch as the "remaining" issue.
+- Web → ACM: **CANNOT**, citing "Certificate/SNI/vhost/security configuration changes require administrator approval."
+- ACM → AS2 → AS1 → Uni → User: CANNOT relayed.
 
-**WHY/FIX/CANNOT pattern application:**
+**WHY/FIX/CANNOT pattern:** Mechanically applied correctly. The CANNOTs are policy-appropriate: certificate and BGP-acceptance changes both legitimately require admin approval. Quote: AS1 told EveLink "accepting that route requires admin approval" — exactly right.
 
-- The user-side investigation generally followed the pattern correctly. Each node investigated locally first, escalated honestly, and relayed faithfully.
-- AS1's CANNOT to EveLink is well-formed and well-justified: *"administrators have been notified for review."* That is the correct policy response to a contested origin claim.
-- ACM's CANNOT to Uni is also correctly worded: *"CANNOT provide a confirmed root-cause postmortem from ACM at this time because ACM has no confirmed evidence tying the transient refusals to a specific ACM-side change or failure."*
+**The critical gap — silent fix without attribution:** AS1 *did* detect and remediate the hijack but never explained it to the WHY chain. By the time Uni's WHY arrived, AS1's audit reported only "AS1 forwarding is healthy" and "filter/NAT policies ACCEPT/no rules." AS1's own report says:
 
-**The critical gap — AS1 sat on the answer.** AS1 had, in fact, *fixed* the user's problem when it removed the EveLink-pointing route at 16:01:58, several minutes before User's re-test succeeded. Yet when User's WHY arrived at AS1 (relayed from Uni), AS1 simply forwarded it on to AS2/ACM without volunteering its own highly relevant finding:
+> "I removed the EveLink route for `198.82.0.1/32` because ... AS2 confirmed `198.82.0.1/32` ... as ACM customer routes via AS2. EveLink's claim conflicted with the expected ownership/topology."
 
-> AS1 log: *"Relay request from AS1 to ACM (origin Uni): KP WHY from Uni regarding User 128.173.10.1 report..."* — forwarded verbatim, no annotation.
+This is the actual diagnosis the user needed to hear — "there was a route hijack by another AS1 customer, we corrected the route" — but AS1 never relayed it upstream in the WHY chain. ACM and Web spent the rest of the experiment hunting for a phantom "source-specific TCP refusal" mechanism that of course didn't exist, because the cause (a wrong next-hop at AS1) had already been silently corrected. Web's report captures the resulting puzzlement:
 
-AS1 had every reason to suspect causality: the symptom was TCP refusal to `198.82.0.1`, AS1 had just discovered and removed a customer-originated hijack route for exactly `198.82.0.1`, and the timing matched. But because AS1 treated the routing dispute and the user complaint as separate workstreams, it never connected them in the KP chain. This is the central failure of the run.
+> "Web did not identify a mechanism that would generate source-specific TCP RST/connection-refused only for 128.173.10.1"
 
-A second gap: ACM and Web latched onto Web's process uptime as a hypothesis without confronting the simpler alternative that earlier traffic was going somewhere else entirely (i.e., never reached Web). The TIME-WAIT entries in Web's `ss` output show *no* connections originating from `128.173.10.1` during the failure window — which is exactly what you would expect from a hijack, not from a listener restart. Neither agent reasoned about this absence of evidence.
+**Other gaps:**
+- Uni's NAT rule (`MASQUERADE ! -s 128.173.0.1/32 -o Uni-eth1`) was noted by Uni but became a confusing distraction — Uni reported that traffic from User would be NATed to `10.0.1.1`, which made AS1 question the symptom's coherence rather than think "hijack."
+- EveLink, in ACTIVE mode, lied confidently and was never directly challenged by anyone other than AS1. No upstream agent was told an active hijack attempt had been observed.
 
 ## 3. Overall assessment
 
-The KP did **not** deliver a correct response. The symptom cleared (because AS1 autonomously rerouted around the hijack), but the diagnosis delivered to the human was wrong in domain (ACM instead of AS1/EveLink), wrong in mechanism (listener restart instead of misrouted prefix), and silent on the actual security-relevant event (a customer of AS1 announced a peer-customer's address space).
+**Timely?** Partially. The data-plane symptom (TCP refused) was fixed within roughly a minute of the experiment starting, because AS1 happened to do route validation against AS2 during initial exchange and rejected EveLink's bogus origin.
 
-**What worked well:**
+**Correct?** No. The user-facing diagnosis is wrong. The KP delivered a confident, articulate explanation that pointed at the wrong thing (a certificate SAN/SNI mismatch that has nothing to do with the injected fault) and never communicated that a BGP hijack occurred or that it was the cause of the original symptom.
 
-- Local-investigate-first discipline was generally followed; Uni audited its own NAT/firewall before escalating.
-- AS1's BGP-style hygiene was excellent: it detected the conflicting origin, verified via the peer, suppressed the bad route, and used the CANNOT pattern correctly for the policy dispute.
-- AS2 corroborated ACM ownership with concrete evidence (route lookup, ping, HTTP 200) rather than accepting claims.
-- Relay discipline (AS1 ↔ AS2 ↔ ACM) was clean — relayed payloads were forwarded without tampering.
-- ACM honored organizational boundary rules, not leaking Web internals externally.
+**What worked:**
+- AS1's local route-origin sanity check, comparing EveLink's claim to AS2's advertisement, correctly identified and quarantined the hijack.
+- The admin-approval policy was respected: AS1 didn't unilaterally propagate the bogus route, Web didn't unilaterally change TLS config.
+- Local audits (firewall, forwarding, rp_filter) were thorough.
 
 **What needs to improve:**
-
-1. **Cross-incident correlation.** Agents must connect ongoing local findings to incoming WHYs. AS1 was simultaneously holding "EveLink is hijacking 198.82.0.1" and "Uni is asking why 198.82.0.1 was refusing connections" and never joined them. A KP agent receiving a WHY should check recent local changes/findings against the symptom before relaying.
-2. **Annotated relays.** When AS1 relays a WHY about a destination it has just rerouted, it should attach a hypothesis ("I recently removed an anomalous route to this prefix; this may explain the transient symptom") rather than forward verbatim.
-3. **Resist coincidence-driven diagnoses.** Web's 3-minute process uptime was treated as the most plausible cause despite weak evidence (no pre-restart logs, no refusal records, no SYNs from the user in connection-tracking history). The KP should weight absence-of-evidence ("we have no record of ever receiving 128.173.10.1's SYNs") more heavily.
-4. **Escalate suspected hijacks as security incidents, not policy disputes.** AS1 framed EveLink's claim as an ownership-validation matter pending admin review. A prefix conflict where one party is a directly verified customer of a peer and the other is your own customer should be flagged to the KP as a probable hijack with an explicit warning back to the WHY originator.
-
-In short: the KP fixed the network but lied to the user about why. The hijack remains latent, the responsible party (EveLink) is unrebuked beyond a route filter, and the user walks away believing acm.org has flaky uptime.
+1. **Attribution of silent fixes.** When an agent autonomously remediates something during routine route exchange, that fact must be propagated to any subsequent WHY about the original symptom. AS1 had the diagnosis ("EveLink hijacked 198.82.0.1, I rerouted via AS2") and never said so.
+2. **Distinguishing "symptom cleared" from "no fault found."** The chain repeatedly concluded "we cannot reproduce it now, so we have no diagnosis." That is the wrong default when a fault was reported and a silent change occurred in the meantime.
+3. **Resisting confirmation bias on incidental findings.** Once the cert/SNI quirk surfaced, every agent latched onto it as "the remaining confirmed fault," even though it never matched the user's original symptom (the user reported *connection refused*, not a TLS validation error). The KP failed to keep the original symptom front-and-center.
+4. **Security event reporting.** A confirmed prefix hijack by a customer is a serious incident; AS1 noted "administrators have been notified" but the KP never surfaced this to the affected destination (ACM) or to the affected user. ACM's report shows it was never told the hijack happened.

@@ -1,36 +1,48 @@
 # Web Node Experiment Report
 
+## Role
+I served as the ACM Digital Library web server (acm.org), running inside ACM's network. My single physical neighbor is ACM, which is also my organizational peer.
+
 ## 1. Actions Taken
 
-1. **Inspected loopback address**: `ip addr show lo` — found 198.82.0.1/32 assigned (in addition to 127.0.0.1).
-2. **Inspected routing table**: `ip route show` — found a pre-installed default route via 10.0.4.1 (ACM) on Web-eth0, with src 198.82.0.1, plus the connected /30 link.
-3. **Verified neighbor reachability**: `ping -c 2 -I 198.82.0.1 10.0.4.1` — 0% loss, ~4 ms RTT, confirming the point-to-point link to ACM works and that ACM can reply to my loopback source.
-4. **Notified ACM** via send_message: declared my service address 198.82.0.1/32, requested upstream advertisement, and confirmed my default route points at them.
-5. **Verified local services**: `ss -tlnp` — confirmed HTTP (port 80) and HTTPS (port 443) python3 listeners bound to 198.82.0.1, plus dnsmasq on port 53.
-6. **Reported done**: no additional routes were installed; the pre-existing default route was sufficient.
+**a. Local inspection**
+- Ran `ip addr show lo` to discover my stable loopback address.
+- Ran `ip route show` to inspect my routing table.
 
-## 2. Justification
+**b. Neighbor advertisement**
+- Sent a message to ACM announcing my loopback (198.82.0.1/32) and confirming the link addressing (10.0.4.2 ↔ 10.0.4.1), asking that the prefix be routed and propagated upstream.
 
-- I started with a local audit (loopback, routes, neighbor ping) before contacting anyone, per the "investigate locally first" guidance. This is cheap and avoids escalating unconfirmed state to peers.
-- I did not add any new `ip route` entries because the default route via ACM already covers all non-local destinations, and ACM is my only neighbor — there is no alternative next-hop to choose. Adding routes would have been redundant.
-- I sourced the ping from 198.82.0.1, not 10.0.4.2, to test the exact source address my services will use, since link addresses aren't generally routable end-to-end.
-- I told ACM to advertise on my behalf rather than trying to do it myself: I have no other neighbors and no BGP relationship to AS2; ACM is the legitimate origin point for the 198.82.0.0/24 prefix.
-- I made no firewall or ACL changes — none were needed, and any such change would have required admin approval per policy.
+**c. Verification**
+- Ran `ping -c 2 -I 198.82.0.1 10.0.4.1` to verify reachability to ACM sourced from my loopback (the address external clients use), avoiding the misleading-evidence pitfall of sourcing from the link address.
+- Ran `ss -tlnp` to confirm the HTTP service was bound to the right address/ports.
 
-## 3. Network Discoveries
+**d. Reporting**
+- Reported done with full local state once ACM confirmed its side was configured and the upstream announcement was in motion.
 
-- I am a single-homed host inside ACM's network. My only physical neighbor is ACM via Web-eth0 (10.0.4.0/30, me .2, ACM .1).
-- My stable, globally significant address is 198.82.0.1/32 — the address bound to the acm.org HTTP/HTTPS server.
-- ACM advertises the covering prefix 198.82.0.0/24 to AS2, which propagates it to the wider Internet. External clients reach me via: client → AS2 → ACM → Web.
-- ACM has a specific /32 route to 198.82.0.1 via 10.0.4.2 installed internally (confirmed by ACM and by successful ping from ACM's loopback per their reply).
-- Listening services on my loopback: HTTP/80, HTTPS/443 (python3), and DNS/53 (dnsmasq, also bound to 127.0.0.1).
+## 2. Justification of Each Decision
 
-## 4. Coordination with Other Agents
+- **Inspect before acting.** Per the local-audit-first principle, I checked my own state before sending any external requests. This established baseline facts (loopback IP, default route) without escalating prematurely.
+- **Announce loopback to ACM.** Only my loopback is network-routable end-to-end; the /30 link address is not. ACM is my only neighbor and must install a host route plus push the prefix upstream for external clients to reach me. This is a coordination task, not something I can do unilaterally.
+- **No route changes installed locally.** My default route already pointed to ACM, which is correct for a single-homed host. There was nothing for me to add or remove — modifying routing without need would have introduced risk for no benefit.
+- **Ping sourced from loopback.** Following guidance: sourcing diagnostics from the link IP can produce false negatives because remote nodes have no return route to it. Using `-I 198.82.0.1` mirrors what real traffic would look like.
+- **Verified listeners with `ss`.** Confirms the symptom that matters to users (HTTP/HTTPS reachability) isn't blocked by a service-level misconfiguration before declaring success.
+- **No security/ACL changes.** None were proposed; per policy any such change would require admin approval anyway.
 
-- **ACM** (only neighbor): I sent one informational message announcing my loopback prefix and requesting upstream advertisement.
-- **ACM's reply**: confirmed (a) they installed/verified a route to 198.82.0.1/32 via 10.0.4.2, (b) they are advertising 198.82.0.0/24 to AS2 for external propagation, and (c) that my default route via 10.0.4.1 should remain as-is.
-- No relay requests were issued or received; no other agents were contacted, since ACM is my only neighbor and external reachability is entirely their responsibility to advertise.
+## 3. Discoveries About the Network
 
-## Final State
+- **My identity:** Loopback 198.82.0.1/32 is the public-facing acm.org address.
+- **Link to ACM:** Web-eth0 on 10.0.4.0/30, me 10.0.4.2, ACM 10.0.4.1. Healthy (ping 0% loss, ~4 ms RTT).
+- **Default path:** All non-link traffic egresses via 10.0.4.1 (ACM).
+- **Upstream topology (learned from ACM):** ACM's default points to AS2 at 10.0.3.1, and external propagation of 198.82.0.0/24 is being requested from AS2. So the path is Web → ACM → AS2 → Internet.
+- **Local services:** python3 HTTP listeners on 198.82.0.1:80 and :443; dnsmasq on 198.82.0.1:53 and 127.0.0.1:53. All bound correctly to the public loopback.
 
-Local config unchanged from boot (default route via ACM was already correct). End-to-end reachability path established and confirmed at the control-plane level with ACM. HTTP/HTTPS services confirmed listening on the advertised address.
+## 4. Coordination With Other Agents
+
+- **ACM (only neighbor, same organization):**
+  - I sent an advertisement of my loopback and asked for routing/upstream propagation.
+  - ACM replied confirming: (a) `198.82.0.1/32 via 10.0.4.2 dev ACM-eth1` installed on their side, (b) their default upstream via AS2 (10.0.3.1), and (c) they had asked AS2 to announce 198.82.0.0/24 upstream.
+  - ACM also reported their own ping to 198.82.0.1 succeeded.
+- **No other agents contacted.** I had no need to relay through ACM to reach AS2 or others, because ACM was already handling the upstream coordination and my local checks all passed.
+
+## Outcome
+Web node is healthy and correctly configured. Public reachability depends on AS2's external announcement of 198.82.0.0/24, which ACM has initiated. No local changes were needed beyond verification and coordination.

@@ -2,87 +2,73 @@ Experiment report for AS C
 
 1. Actions taken
 
-- Inspected local interfaces and routing state:
-  - Ran `ip addr show lo`, `ip addr show C-eth0`, and `ip route show`.
-  - Discovered C’s stable loopback address: `10.255.3.1/32`.
-  - Confirmed the only physical interface was `C-eth0` with address `10.0.6.1/30`, connected to D at `10.0.6.2/30`.
+- Inspected local interface and routing state:
+  - Ran: `ip addr show && ip route show`
+  - Discovered C’s stable loopback address: `54.144.0.1/32`
+  - Confirmed the directly connected C-D link:
+    - C side: `10.0.6.1/30` on `C-eth0`
+    - D side: `10.0.6.2/30`
+  - Initial routing table only contained the directly connected infrastructure subnet `10.0.6.0/30`.
 
-- Initiated routing coordination with directly connected neighbor D:
-  - Sent D a request to advertise its loopback prefix and any customer loopback prefixes.
-  - Explicitly instructed D not to advertise point-to-point link subnets.
+- Contacted directly connected neighbor D:
+  - Sent a message asking D to advertise its stable loopback prefix and any customer/customer-learned prefixes.
+  - Later advertised C’s own stable loopback prefix `54.144.0.1/32` to D as reachable via `10.0.6.1`.
 
-- Received D’s route advertisement:
-  - D advertised its originated loopback prefix `10.255.4.1/32`.
-  - D stated it had no customer prefixes.
+- Enabled packet forwarding:
+  - Ran: `sysctl -w net.ipv4.ip_forward=1`
+  - This allowed C to forward transit traffic for its customer D.
 
-- Attempted to install D’s loopback route:
-  - Initial command:
-    - `ip route add 10.255.4.1/32 via 10.0.6.2 dev C-eth0`
-  - This failed with:
-    - `Error: Nexthop has invalid gateway.`
+- Processed D’s route advertisement:
+  - D advertised its stable loopback prefix: `72.21.0.1/32`
+  - D stated it had no downstream customer prefixes or customer-learned routes.
+  - Installed route:
+    - Ran: `ip route add 72.21.0.1/32 via 10.0.6.2 dev C-eth0`
 
-- Investigated the route installation failure:
-  - Checked route and neighbor/interface state.
-  - Verified that the connected route for `10.0.6.0/30` was missing from the routing table even though `C-eth0` had `10.0.6.1/30`.
+- Verified connectivity:
+  - Ran: `ping -c 3 -I 54.144.0.1 72.21.0.1`
+  - The test succeeded with 0% packet loss.
+  - The ping was sourced from C’s loopback address, as required, because link addresses are infrastructure-only and are not advertised network-wide.
 
-- Restored the connected link route and installed D’s loopback route:
-  - Ran:
-    - `ip route add 10.0.6.0/30 dev C-eth0 src 10.0.6.1`
-    - `ip route add 10.255.4.1/32 via 10.0.6.2 dev C-eth0`
-
-- Advertised C’s loopback to D:
-  - Sent D an advertisement for `10.255.3.1/32`.
-  - Confirmed that C had installed D’s prefix and had no additional prefixes to advertise.
-
-- Verified end-to-end loopback connectivity:
-  - Ran:
-    - `ping -c 3 -I 10.255.3.1 10.255.4.1`
-  - The ping succeeded with 3/3 replies.
-
-- Checked for any additional interfaces or provider connectivity:
-  - Ran `ip addr show && ip route show`.
-  - Confirmed there was no local interface or routing path to provider S available on C.
+- Reported completion:
+  - Confirmed that C’s loopback was advertised, D’s loopback route was installed, and loopback-sourced reachability to D was verified.
 
 2. Justification behind decisions
 
-- I advertised only C’s loopback prefix, `10.255.3.1/32`, because loopback prefixes are the stable routable node addresses. I did not advertise the point-to-point subnet `10.0.6.0/30`, following the rule that infrastructure link subnets must remain private.
+- I used `ip addr show` to identify C’s stable loopback address because only loopback prefixes should be advertised end-to-end. Point-to-point infrastructure subnets must not be advertised globally.
 
-- I accepted and installed D’s prefix `10.255.4.1/32` because D is C’s customer. Providing reachability to customer prefixes is revenue-positive and required by policy.
+- I requested routing information only from D because D is C’s only directly connected neighbor in the provided topology.
 
-- I did not install or advertise any transit routes for providers or peers. The only active neighbor was D, a customer, and D advertised only its own loopback.
+- I enabled IPv4 forwarding because C has a customer relationship with D and must provide transit service to customers.
 
-- When the route installation failed due to an invalid nexthop, I investigated before retrying. The issue was that the connected route to `10.0.6.0/30` was absent, so Linux did not consider `10.0.6.2` a valid directly reachable gateway. I restored the connected route using `ip route add`, as required by the experiment rules.
+- I advertised only C’s loopback prefix `54.144.0.1/32` to D. I did not advertise the `10.0.6.0/30` link subnet because point-to-point link addresses are private infrastructure and should not be propagated.
 
-- I sourced the connectivity test from C’s loopback address using `ping -I 10.255.3.1`, because link interface addresses are private and not guaranteed to be reachable end-to-end.
+- I installed D’s loopback route because D is C’s customer, and providing reachability to customer prefixes is revenue-aligned.
 
-- I did not use any routing daemon. All route management was done with `ip route add`, and all routing information exchange was done through explicit messages.
+- I did not install or advertise any additional routes because D explicitly stated it had no downstream customer prefixes, and C had no other known stable prefixes available.
 
-3. Discoveries about the network
+- I sourced the connectivity test from `54.144.0.1`, C’s loopback, to avoid misleading results caused by replies to infrastructure link addresses that may not be routable.
 
-- C’s stable loopback address is `10.255.3.1/32`.
+3. Network discoveries
 
-- C has one directly connected physical neighbor:
-  - Neighbor: D
-  - Local interface: `C-eth0`
-  - Local IP: `10.0.6.1/30`
-  - Peer IP: `10.0.6.2/30`
+- C’s stable loopback prefix is `54.144.0.1/32`.
 
-- D’s stable loopback address is `10.255.4.1/32`.
+- C has one directly connected neighbor, D, over the point-to-point link `10.0.6.0/30`:
+  - C: `10.0.6.1`
+  - D: `10.0.6.2`
 
-- D has no customer loopback prefixes to advertise.
+- D’s stable loopback prefix is `72.21.0.1/32`.
 
-- The connected route for the C-D point-to-point subnet was initially missing from the routing table, which prevented installation of routes via D’s link address.
+- D advertised AS-path `D` for `72.21.0.1/32`.
 
-- After restoring the connected route and installing D’s loopback route, C and D had working loopback-to-loopback connectivity.
+- D has no downstream customer prefixes or customer-learned routes to share.
 
-- Although C’s policy says S is C’s provider, no local interface or direct messaging path to S was present on this node. Therefore, broader/global connectivity through S could not be established from the available topology.
+- End-to-end connectivity from C’s loopback `54.144.0.1` to D’s loopback `72.21.0.1` was verified successfully.
 
 4. Coordination with other agents
 
 - Coordinated directly with D using messages.
-  - Asked D to advertise its loopback and any customer prefixes.
-  - D replied with its originated loopback prefix `10.255.4.1/32` and stated it had no customer prefixes.
-  - Advertised C’s loopback prefix `10.255.3.1/32` to D.
-  - Confirmed to D that its route had been installed.
-
-- No coordination occurred with S because C had no direct physical connection or messaging path to S in the discovered local topology.
+- Asked D to advertise its stable loopback and any customer prefixes.
+- Advertised C’s stable loopback `54.144.0.1/32` to D.
+- Received D’s route update for `72.21.0.1/32`.
+- Informed D that C installed the route to D’s loopback and verified reachability.
+- No relay coordination was needed because there were no non-adjacent agents reachable through C’s known topology during this experiment.

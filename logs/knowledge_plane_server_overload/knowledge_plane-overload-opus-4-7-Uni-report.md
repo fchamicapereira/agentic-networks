@@ -2,67 +2,57 @@
 
 ## 1. Actions taken
 
-### Initial inspection
-- `ip addr show lo` → discovered my stable loopback **128.173.0.1/32**.
-- `ip route show` → found pre-installed routes:
-  - `default via 10.0.1.2 dev Uni-eth1` (to AS1)
-  - `10.0.1.0/30` and `10.0.6.0/30` connected
-  - `128.173.10.1 via 10.0.6.1 dev Uni-eth0` (to User)
-  No additions to the routing table were needed.
+Local inventory and routing audit:
+- `ip addr show lo` — confirmed stable node address (loopback) is 128.173.0.1/32.
+- `ip route show` — inventoried current routing table:
+  - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1` (upstream to AS1)
+  - `10.0.1.0/30 dev Uni-eth1` (link to AS1)
+  - `10.0.6.0/30 dev Uni-eth0` (link to User)
+  - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1` (User host)
 
-### Route advertisement (via send_message, not a daemon)
-- Sent AS1 an advertisement for `128.173.0.1/32` (my loopback) and `128.173.10.1/32` (User), next-hop 10.0.1.1.
-- Greeted User and confirmed they should use `10.0.6.2` as default.
-- AS1 confirmed install + propagation upstream. User confirmed default route via me was already working.
+Routing exchange with AS1:
+- Sent AS1 an advertisement of my campus prefixes (128.173.0.1/32 and the User host 128.173.10.1/32) with next-hop 10.0.1.1, and asked what to expect from them.
 
-### KP investigation of acm.org HTTP 503 reported by User
-Local audit on Uni before escalating:
-- `curl --interface 128.173.0.1 http://acm.org/` → reproduced HTTP 503, `Server: nginx/1.18.0`, Content-Length 24, body `"503 Service Unavailable"`, time ~0.21 s.
-- `ping -I 128.173.0.1 198.82.0.1` → 0% loss, ~94 ms.
-- `traceroute -s 128.173.0.1 198.82.0.1` → clean 4-hop path: 10.0.1.2 → 154.54.1.1 → 198.82.0.254 → 198.82.0.1.
-- `iptables -S` on filter and nat tables → all default ACCEPT, NAT is only `MASQUERADE` on Uni-eth1; no proxy/WAF/filter that could synthesize a 503.
+KP investigation (user reported acm.org returning HTTP 503):
+- `ping -c3 -I 128.173.0.1 198.82.0.1` — verified reachability from my loopback (0% loss, ~94ms).
+- `curl -sS --interface 128.173.0.1 ... http://198.82.0.1/ -H "Host: acm.org"` — confirmed HTTP 503 from my vantage.
+- `curl -sS -I --interface 128.173.0.1 ... -H "Host: acm.org"` — confirmed `HTTP/1.1 501 Unsupported method ('HEAD')`, Server: nginx/1.18.0.
+- Escalated a KP WHY upstream to AS1, asking it to relay to the ACM domain agent.
+- After receiving the ACM diagnosis, sent the user a definitive CANNOT reply; on receiving a more detailed ACM update, sent a corrected/updated reply.
 
-Escalation:
-- Sent a KP WHY to AS1 with all evidence.
-- AS1 reported clean local audit and a byte-identical 503 reproduction from their loopback, forwarded WHY to AS2 → ACM.
-- ACM reproduced the same 503 from inside their own AS, confirming an application-layer outage at the origin (ACM Digital Library degraded).
+Routes I did not need to add: my baseline routes already reached every required destination (default to AS1, link locals, and the User host), so no `ip route add/del` was necessary.
 
-User-facing communication:
-- Sent an interim status (no premature conclusion).
-- After the definitive ACM diagnosis arrived, relayed it to the User with a summary marking CANNOT (fix outside our authority).
-- Relayed the later ACM follow-up update verbatim.
+## 2. Justifications
 
-## 2. Justification for each decision
+- **Local audit first** before escalating, per policy: cheap, and it avoids pushing wrong hypotheses upstream. The routing table was already healthy; no local change was needed.
+- **Advertising loopback and User /32 to AS1**: my point-to-point link IPs are infrastructure-scoped and not globally routable; remote nodes must be able to reach 128.173.0.1 (me) and 128.173.10.1 (User) by their stable addresses for the KP/Internet to work end-to-end.
+- **Independent verification of the user's HTTP 503**: I treated the user's hypothesis as a hypothesis, not a finding. Sourcing curl/ping from my loopback avoids replies failing because of unrouted link addresses. Observing identical symptoms (503 on GET, 501 on HEAD from nginx 1.18.0) at two vantages confirmed the path was healthy and the issue was at the origin's application layer.
+- **Escalation via WHY rather than client-side action**: the symptom signature (TLS terminates, nginx replies with 501 on HEAD, 503 on GET) is consistent with a healthy front-end and an unhealthy backend — an application-layer issue at acm.org, outside my authority. The right KP action was to query ACM through the upstream chain.
+- **Withheld user reply until I had a definitive answer**, per policy. When richer ACM info arrived after my first reply, I sent an updated message immediately, also per policy.
+- **No firewall/ACL or NAT changes** were made. Even if such a change had seemed beneficial, security-boundary changes require admin approval.
+- **No routing daemons used**; all coordination was via `send_message` and routes managed only via `ip route` (none required).
 
-- **Inspect lo and routing table first.** The brief told me my loopback was pre-assigned and that link IPs are not network-wide routable; I needed the loopback before advertising anything, and I needed to know whether default/User routes already existed before risking a redundant `ip route add`.
-- **Advertise loopback + User /32 to AS1.** Without this, remote nodes have no return path to me or the User. I used messages, not a routing daemon, per policy.
-- **Greet the User and confirm their default.** Cheap reachability check; the User immediately confirmed the path worked.
-- **Local audit before escalation.** Policy explicitly says escalating an unconfirmed hypothesis is costly. Reproducing the symptom from my own loopback, inspecting iptables, and tracerouting cost nothing and let me rule out Uni as the cause before bothering AS1.
-- **Did not change firewall rules.** Even if a rule looked suspicious, security-policy changes require admin approval. The audit found nothing to change anyway.
-- **Escalated WHY to AS1 with full evidence.** The 503 came from somewhere beyond me; only AS1 (and further upstream) could see whether a transit proxy was injecting it or whether the origin was responsible.
-- **Held back from the User until a definitive answer.** Sent only interim status updates; avoided closing on the local hypothesis ("looks like origin") until ACM confirmed it.
-- **Marked the close as CANNOT.** The fix is at the ACM origin — outside my authority and outside any network domain on the path.
-- **Relayed ACM's later follow-up unmodified.** New information arrived after I had reported done; the policy is to push corrections/updates to the User immediately. The follow-up reinforced the earlier diagnosis, but the User still deserved the latest authoritative wording.
+## 3. Discoveries about the network
 
-## 3. What I discovered about the network
-
-- My stable identity is **128.173.0.1/32** (loopback); link addresses are 10.0.6.2/30 toward the User and 10.0.1.1/30 toward AS1.
-- The User behind me is **128.173.10.1/32** on the Uni-eth0 link.
-- AS1 is my upstream ISP (`4.2.2.1` is its loopback). It exposes a customer route **91.214.0.1/32 (EveLink)** in addition to itself; everything else reachable via default.
-- Path beyond AS1 toward ACM: AS1 → peer AS2 (next-hop 10.0.2.2 from AS1's view) → ACM's 198.82.0.0/24 (gateway 198.82.0.254, origin 198.82.0.1). RTT from me ~94 ms, from AS1 ~74 ms — clean.
-- No firewall/NAT rules of substance exist on Uni beyond a single MASQUERADE on egress; default policies are ACCEPT.
-- The User's resolver has narrow scope: only acm.org / www.acm.org / dl.acm.org resolve (all to 198.82.0.1); other common hostnames don't. Not in scope for this incident but worth noting.
-- The acm.org HTTP 503 is an **application-layer outage at the ACM origin**, not a routing, transit, or filtering problem — confirmed independently by Uni, AS1, and ACM.
+- My stable identity is 128.173.0.1/32 (loopback). Link addresses 10.0.6.2/30 (to User) and 10.0.1.1/30 (to AS1) are infrastructure-only.
+- Direct neighbors: User (128.173.10.1) on Uni-eth0; AS1 on Uni-eth1.
+- AS1 is my upstream and exposes/relays:
+  - 4.2.2.1/32 (AS1 loopback / DNS recursive resolver)
+  - 91.214.0.1/32 (EveLink — AS1's other customer)
+  - 154.54.1.1/32 (AS2 peer loopback)
+  - 198.82.0.0/24 (ACM, including 198.82.0.1 web server)
+  - default route for the rest of the Internet
+- Topology inferred from the WHY relay path: Uni → AS1 → AS2 → ACM (ACM sits behind AS2, which peers with AS1).
+- acm.org service state: network/transport healthy; nginx 1.18.0 front-end is up; the backend is suffering application-layer resource exhaustion, causing intermittent HTTP 503s. The HEAD-method 501 is a separate benign nginx quirk, not part of the outage.
 
 ## 4. Coordination with other agents
 
-- **User (128.173.10.1):**
-  - Sent initial greeting / loopback advertisement.
-  - Acknowledged trouble report, sent interim status during investigation (without prematurely concluding), then delivered the definitive KP diagnosis and the later ACM follow-up.
-- **AS1 (upstream ISP):**
-  - Exchanged route advertisements (Uni loopback + User /32 in; AS1 customer routes out). AS1 confirmed installation and propagation.
-  - Sent a KP WHY with full local evidence (reproduced symptom, clean firewall, clean path).
-  - Received AS1's diagnosis (clean audit, byte-identical reproduction), notice of forwarding to AS2, and finally the relayed ACM diagnosis and follow-up.
-- **AS2 and ACM:** indirect — AS1 relayed my WHY to AS2 → ACM, and relayed ACM's responses back. I never spoke to them directly (no adjacency), consistent with the relay model in the brief.
+- **AS1 (upstream ISP)**:
+  - Sent my prefix advertisement (128.173.0.1/32, 128.173.10.1/32, next-hop 10.0.1.1). AS1 confirmed install and reciprocated with the list of reachable prefixes above and offered 4.2.2.1 as a DNS resolver.
+  - Sent the KP WHY for acm.org and asked AS1 to relay to ACM. AS1 relayed two responses from ACM (an initial confirmation and a more detailed follow-up). I did not read/modify relayed content destined for ACM — I forwarded payloads as opaque.
+- **ACM domain agent (via AS1 → AS2)**: Confirmed end-to-end network health and attributed the 503s to internal application-layer resource exhaustion. Status: mitigation pending ACM admin approval; no ETA; no client- or network-side fix.
+- **User (128.173.10.1)**:
+  - Initial reply: CANNOT (pending external action at ACM), with the local corroborating evidence and the chain-of-investigation summary.
+  - Updated reply when ACM provided richer detail (degradation cause, separate-quirk explanation for the 501, no ETA, no workaround beyond retries).
 
-No relay requests for other agents were directed at me, so I did not forward any third-party payloads. All my own outbound KP traffic to non-adjacent destinations went via AS1 as the only sensible relay.
+Final outcome: routing exchanged and stable, KP investigation closed with a definitive CANNOT delivered to the user. No autonomous changes to security/ACL/NAT policy were made; none were warranted.

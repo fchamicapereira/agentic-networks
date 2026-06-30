@@ -2,124 +2,109 @@ Experiment Report — TinyInc
 
 1. Actions taken
 
-- Inspected local loopback and routing state:
+- Inspected local interface and routing state:
   - Ran `ip addr show lo`
+    - Confirmed loopback had `45.32.0.1/32` configured, in addition to `127.0.0.1`.
+  - Ran `ip addr show TinyInc-eth0`
+    - Confirmed the ISP point-to-point link was up with local address `10.3.4.2/30`.
   - Ran `ip route show`
-  - Confirmed the pre-existing stable loopback address `10.255.4.1/32`.
-  - Initially found no routes in the main routing table.
-
-- Configured TinyInc’s allocated address on loopback:
-  - Ran `ip addr add 45.32.0.1/32 dev lo`
-  - Verified with `ip addr show lo` that `45.32.0.1/32` was configured.
-
-- Installed provider-facing routes using only `ip route add`:
-  - Added a default route to ISP:
-    - `ip route add default via 10.3.4.1 dev TinyInc-eth0`
-  - Added an explicit route to ISP’s registered prefix:
-    - `ip route add 85.12.64.0/22 via 10.3.4.1 dev TinyInc-eth0`
-  - Added the directly connected provider link route after discovering route lookup issues:
-    - `ip route add 10.3.4.0/30 dev TinyInc-eth0`
+    - Observed existing directly connected route `10.3.4.0/30 dev TinyInc-eth0`.
+    - Also observed host routes to known remote loopbacks via ISP.
 
 - Advertised TinyInc’s prefix to ISP:
-  - Sent ISP the route advertisement:
-    - Prefix: `45.32.0.0/24`
-    - Origin: `AS-TINYINC`
-    - AS path: `AS-TINYINC`
-  - Did not advertise any point-to-point link subnet.
+  - Sent ISP a routing update advertising:
+    - `45.32.0.0/24` as self-originated by AS-TINYINC.
+    - Stable loopback/node address `45.32.0.1/32`.
+  - Explicitly did not advertise the point-to-point infrastructure subnet `10.3.4.0/30`.
 
-- Verified local interface status:
-  - Ran `ip addr show TinyInc-eth0`
-  - Confirmed `TinyInc-eth0` was up with `10.3.4.2/30`.
+- Installed upstream/default routing via ISP:
+  - Ran:
+    - `ip route add default via 10.3.4.1 dev TinyInc-eth0`
+  - This made ISP the default next hop for destinations not covered by more specific routes.
 
-- Performed loopback-sourced connectivity tests as required:
-  - `ping -c 3 -I 45.32.0.1 85.12.64.1`
-  - `ping -c 3 -I 45.32.0.1 91.108.0.1`
-  - `ping -c 3 -I 45.32.0.1 31.41.0.1`
-  - `ping -c 3 -I 45.32.0.1 212.36.0.1`
+- Verified loopback-sourced connectivity:
+  - Ran:
+    - `ping -c 3 -I 45.32.0.1 85.12.64.1`
+    - `ping -c 3 -I 45.32.0.1 91.108.0.1`
+    - `ping -c 3 -I 45.32.0.1 212.36.0.1`
+    - `ping -c 3 -I 45.32.0.1 31.41.0.1`
+  - All tests succeeded with 0% packet loss.
 
-- Reported final completion after verifying all target destinations were reachable.
+- Installed ISP-advertised prefix routes:
+  - After ISP provided route information, ran:
+    - `ip route add 85.12.64.0/22 via 10.3.4.1 dev TinyInc-eth0`
+    - `ip route add 91.108.0.0/22 via 10.3.4.1 dev TinyInc-eth0`
+    - `ip route add 212.36.0.0/22 via 10.3.4.1 dev TinyInc-eth0`
+    - `ip route add 31.41.0.0/24 via 10.3.4.1 dev TinyInc-eth0`
+
+- Re-tested loopback-sourced reachability after installing prefix routes:
+  - Re-ran pings from `45.32.0.1` to:
+    - `85.12.64.1`
+    - `91.108.0.1`
+    - `212.36.0.1`
+    - `31.41.0.1`
+  - All tests again succeeded with 0% packet loss.
 
 
 2. Justification behind decisions
 
-- I configured `45.32.0.1/32` on loopback because TinyInc’s assigned prefix is `45.32.0.0/24`, and the experiment required `45.32.0.1/32` to be configured as the stable service address within that prefix.
+- Used the loopback address `45.32.0.1/32` as the source for tests because it is TinyInc’s stable globally advertised address. Link address `10.3.4.2/30` is only valid on the ISP point-to-point link and should not be used for remote diagnostics.
 
-- I advertised only `45.32.0.0/24` to ISP because it is TinyInc’s allocated prefix and the registry context lists it as originated by `AS-TINYINC`. I did not advertise `10.3.4.0/30` because point-to-point infrastructure subnets must not be advertised.
+- Advertised only `45.32.0.0/24` to ISP because that is TinyInc’s allocated prefix. I did not advertise `10.3.4.0/30` because it is private point-to-point infrastructure.
 
-- I installed routes only with `ip route add`, in accordance with the rules. I did not use FRR, BGP, OSPF, zebra, vtysh, or any routing daemon.
+- Installed the default route via `10.3.4.1` because ISP is TinyInc’s only provider and upstream transit path.
 
-- I installed a default route via `10.3.4.1` because ISP is TinyInc’s only provider and upstream transit path.
+- Installed the more specific routes advertised by ISP because they matched known routing registry context and were consistent with ISP acting as TinyInc’s provider:
+  - `85.12.64.0/22` originated by AS-ISP.
+  - `91.108.0.0/22` reachable through AS-ISP AS-TRANSITAS.
+  - `212.36.0.0/22` reachable through AS-ISP AS-TRANSITAS AS-TIER1.
+  - `31.41.0.0/24` reachable through AS-ISP AS-EVELINK.
 
-- I installed `85.12.64.0/22 via 10.3.4.1` because ISP explicitly advertised its stable loopback as `85.12.64.1/32`, and the registry context verifies `85.12.64.0/22` as originated by `AS-ISP`.
-
-- I added `10.3.4.0/30 dev TinyInc-eth0` after a loopback-sourced ping initially failed and route lookup showed `RTNETLINK answers: Network is unreachable`. Adding the connected link route ensured reachability to ISP’s next hop `10.3.4.1`.
-
-- I sourced all ping tests from `45.32.0.1` because link-interface addresses are not globally advertised and replies to them may not return.
-
-- I accepted ISP’s updates for `91.108.0.0/22`, `212.36.0.0/22`, and `31.41.0.0/24` via the default route rather than installing many specific routes. This was appropriate because ISP is TinyInc’s provider and the default route covers upstream and peer reachability.
-
-- I did not treat ISP’s update as anomalous because the number of prefixes was small, the advertised prefixes matched the public routing registry context, and ISP’s role as provider made it expected to provide transit and peer reachability.
+- No anomalous large route dump was received. The number and content of routes from ISP were limited and consistent with the expected network context.
 
 
 3. What was discovered about the network
 
-- TinyInc has one physical neighbor, ISP, over:
-  - TinyInc side: `10.3.4.2/30`
-  - ISP side: `10.3.4.1/30`
+- TinyInc has one physical neighbor: ISP, reachable over `TinyInc-eth0`.
+  - TinyInc link IP: `10.3.4.2/30`
+  - ISP link IP: `10.3.4.1/30`
 
-- TinyInc’s loopback initially had:
-  - `127.0.0.1/8`
-  - `10.255.4.1/32`
-  - Later configured: `45.32.0.1/32`
+- TinyInc’s stable loopback address is `45.32.0.1/32`.
 
-- ISP’s stable loopback is:
-  - `85.12.64.1/32`, within `85.12.64.0/22`
-
-- After configuration, TinyInc had working provider connectivity through ISP.
-
-- Verified reachable destinations from TinyInc’s loopback `45.32.0.1`:
-  - `85.12.64.1`: ISP loopback, reachable, 3/3 replies, about 10 ms
-  - `91.108.0.1`: TransitAS prefix, reachable, 3/3 replies, about 34 ms
-  - `31.41.0.1`: peer route prefix, reachable, 3/3 replies, about 20 ms
-  - `212.36.0.1`: Tier1 prefix, reachable, 3/3 replies, about 54 ms
-
-- ISP stated that upstream routes available via TinyInc’s default route included:
-  - `91.108.0.0/22`
-  - `212.36.0.0/22`
-  - `31.41.0.0/24`
-
-- ISP also confirmed it installed TinyInc’s prefix:
+- ISP successfully installed TinyInc’s route:
   - `45.32.0.0/24 via 10.3.4.2`
-  - and advertised it upstream/peer.
 
-- There was a transient reachability issue early in the experiment. ISP’s loopback-sourced ping to `45.32.0.1` initially returned locally unreachable, and TinyInc’s first ping to ISP also failed. After confirming and installing the connected link, ISP prefix, and default routes, loopback-sourced connectivity succeeded.
+- ISP propagated TinyInc’s prefix upstream to TransitAS, which confirmed installation with AS path:
+  - `AS-ISP AS-TINYINC`
+
+- Remote destinations were reachable from TinyInc’s loopback:
+  - ISP: `85.12.64.1`
+  - TransitAS: `91.108.0.1`
+  - Tier1: `212.36.0.1`
+  - EveLink: `31.41.0.1`
+
+- End-to-end connectivity was confirmed with 0% packet loss to all tested destinations.
 
 
 4. Coordination with other agents
 
-- Coordinated directly with ISP, TinyInc’s only connected neighbor and provider.
+- Coordinated directly with ISP, TinyInc’s only connected neighbor and upstream provider.
 
-- ISP requested TinyInc’s customer prefix advertisements. I responded with:
-  - `45.32.0.0/24`
-  - Origin `AS-TINYINC`
-  - AS path `AS-TINYINC`
+- ISP requested TinyInc’s customer prefix and stable loopback information.
 
-- ISP provided its stable loopback:
-  - `85.12.64.1/32`
-  - and requested that TinyInc install reachability to `85.12.64.0/22` via `10.3.4.1`.
+- TinyInc advertised:
+  - `45.32.0.0/24` origin AS-TINYINC
+  - Loopback `45.32.0.1/32`
 
-- ISP confirmed it installed TinyInc’s prefix route via `10.3.4.2` and advertised it upstream/peer.
+- ISP confirmed:
+  - Installation of `45.32.0.0/24` via TinyInc’s direct link.
+  - Propagation of the route upstream to TransitAS.
+  - TransitAS installation of the route with path `AS-ISP AS-TINYINC`.
 
-- ISP asked TinyInc to confirm local configuration after its initial test failed. I confirmed:
-  - `45.32.0.1/32` was on loopback
-  - `TinyInc-eth0` was up with `10.3.4.2/30`
-  - routes existed for `10.3.4.0/30`, `85.12.64.0/22`, and default via `10.3.4.1`
+- ISP provided reachable route information for:
+  - `85.12.64.0/22`
+  - `91.108.0.0/22`
+  - `212.36.0.0/22`
+  - `31.41.0.0/24`
 
-- ISP requested specific loopback-sourced tests to:
-  - `85.12.64.1`
-  - `91.108.0.1`
-  - `31.41.0.1`
-
-- I ran those tests and reported the successful results to ISP.
-
-- ISP mentioned it was investigating its own reachability to `212.36.0.1` with TransitAS. I independently verified that TinyInc could reach `212.36.0.1` successfully from `45.32.0.1`.
+Final state: TinyInc’s prefix was advertised and globally reachable, ISP was configured as the upstream path, and loopback-sourced connectivity to all requested remote destinations was verified successfully.

@@ -1,16 +1,1 @@
-1. **Observed:**
-   - Verified loopback interface and direct neighbor connectivity.
-   - DNS resolution for acm.org was successful.
-   - Pings to acm.org's IP address failed with "Destination Host Unreachable."
-   - Traceroute identified the issue at hop 4 (198.82.0.254).
-   - Local end-to-end connectivity to Uni was confirmed.
-
-2. **Decided:**
-   - Reported the network issue to Uni for further investigation.
-   - Reiterated the issue to Uni, confirming local connectivity.
-   - Updated the owner on the status and ongoing investigation.
-
-3. **Why:**
-   - To isolate the issue and confirm local network functionality.
-   - To provide detailed information for deeper troubleshooting by the Knowledge Plane.
-   - To keep stakeholders informed and manage expectations.
+I assessed the initial state by running network commands to verify addresses and connections. I then monitored connectivity by pinging acm.org and reported the failure to Uni, detailing the issue and technical observations. I waited for updates from Uni, who confirmed that AS2 and ACM were addressing the problem. Finally, I continued to idle, ensuring the issue was resolved before concluding the experiment. This approach ensured a systematic diagnosis and coordination with the Knowledge Plane for effective resolution.

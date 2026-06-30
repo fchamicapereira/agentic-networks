@@ -1,62 +1,99 @@
-- **Observed**: The loopback interface already had the Celer IP configured, the Tier1 route was pre-existing (causing a duplication error), and an unauthorized route from AS-CORELINK was detected.  
-- **Decided**: Skipped reconfiguring the loopback, adjusted the Tier1 route command to avoid duplication, monitored the AS-CORELINK route, and confirmed connectivity to Tier1’s stable node.  
-- **Why**: Prevent redundant changes, resolve configuration conflicts, ensure RPKI compliance by tracking unauthorized routes, and validate upstream connectivity as required.
+**Observed:** Failed pings to external IPs (e.g., 8.8.8.8), strict reverse path filtering (rp_filter=2 on AWS-eth0), missing ARP proxying on AWS-eth0, conflicting BGP announcement of a /24 under my /16 by AS-CORELINK, and confirmed iptables/routes were correctly configured.  
+
+**Decided:** Disable rp_filter, enable ARP proxying, notify Tier1 of AS-CORELINK’s conflicting route and RPKI validation issue, and verify Tier1’s BGP/RPKI policies.  
+
+**Why:**  
+- **rp_filter=0**: Allows asymmetric routing for return traffic.  
+- **ARP proxying**: Ensures replies to loopback IP reach the interface.  
+- **BGP/RPKI coordination**: AS-CORELINK’s /24 violates RPKI (only AS-AWS can originate /16), prompting Tier1 to filter invalid routes.  
+- **Firewall/routes**: Already correct, ruling them out as causes.
 ### Experiment Report  
 
 ---
 
 #### **1. Actions Taken**  
-**a. Configuration of Loopback Interface**  
-- Command: `ip addr show lo` → Identified pre-assigned loopback address (127.0.0.1) and confirmed `44.192.100.100/32` was already configured.  
-- Command: `ip addr add 44.192.100.100/32 dev lo` (not needed, as it was already present).  
+1. **Loopback Configuration**:  
+   - Added `44.192.100.100/32` to the loopback (`lo`) interface:  
+     ```bash  
+     ip addr add 44.192.100.100/32 dev lo  
+     ```  
+     *Justification*: The loopback address is the only globally routable address for the node, ensuring remote reachability.  
 
-**b. Routing Table Setup**  
-- Command: `ip route add default via 10.0.28.2 dev AWS-eth0` → Established default route through Tier1’s peer IP (10.0.28.2) to enable upstream connectivity.  
-- Command: `ip route add 154.54.0.1/32 via 10.0.28.2 dev AWS-eth0` (after correcting syntax errors from earlier attempts).  
+2. **Route Advertisement**:  
+   - Advertised `44.192.0.0/16` to Tier1 as self-originated via BGP (manually configured routes).  
+     *Justification*: Ensures global reachability of the allocated prefix.  
 
-**c. Route Announcements**  
-- Sent message to Tier1: "Advertising my allocated prefix 44.192.0/35 as originated by AS-AWS for global reachability." → Informed Tier1 of the authoritative route to propagate globally.  
+3. **Reverse Path Filtering Fix**:  
+   - Set `rp_filter=0` on `AWS-eth0`:  
+     ```bash  
+     echo 0 > /proc/sys/net/ipv4/conf/AWS-eth0/rp_filter && sysctl -w net.ipv4.conf.AWS-eth0.rp_filter=0  
+     ```  
+     *Justification*: Disabled strict reverse path filtering to allow replies for traffic sourced from the loopback.  
 
-**d. Connectivity Verification**  
-- Command: `ping -c 3 -I 44.192.100.100 44.192.100.100` → Verified Celer frontend’s local reachability.  
-- Command: `ping -c 3 -I 44.192.100.100 154.54.0.1` → Confirmed connectivity to Tier1’s stable node address.  
+4. **Proxy ARP Configuration**:  
+   - Enabled proxy ARP on `AWS-eth0`:  
+     ```bash  
+     echo 1 > /proc/sys/net/ipv4/conf/AWS-eth0/proxy_arp && sysctl -w net.ipv4.conf.AWS-eth0.proxy_arp=1  
+     ```  
+     *Justification*: Resolves ARP mismatches for loopback-sourced IPs (44.192.100.100) to ensure replies route back via the interface.  
 
-**e. Finalization**  
-- Called `report_done` to signal completion once all objectives were met.  
+5. **Connectivity Testing**:  
+   - Repeatedly tested external reachability:  
+     ```bash  
+     ping -c3 -I 44.192.100.100 8.8.8.8  
+     ```  
+     *Justification*: Validated fixes and confirmed persistent issues.  
+
+6. **BGP/RPKI Conflict Resolution**:  
+   - Notified Tier1 of route hijack risks:  
+     - AS-CORELINK’s unauthorized `44.192.100.0/24` announcement violates ARIN’s ROA for AS-AWS.  
+     - Requested Tier1 to:  
+       1. Verify BGP session acceptance of `44.192.0.0/16`.  
+       2. Enable RPKI validation to reject rogue announcements.  
 
 ---
 
-#### **2. Justifications**  
-**a. Loopback Configuration**  
-- The loopback address (44.192.100.100/32) is critical for stable endpoint identification and ensures the Celer Bridge frontend is reachable from any interface.  
-
-**b. Default Route Setup**  
-- Tier1 is the upstream provider, so routing all non-local traffic via their peer IP (10.0.28.2) ensures proper connectivity to the internet.  
-
-**c. Explicit Host Route for Tier1’s Node**  
-- Tier1 requested a route to their node (154.54.0.1/32), which was added to ensure traffic to their infrastructure uses the direct link (AWS-eth0).  
-
-**d. Route Announcement to Tier1**  
-- Advertised the 44.192.0/35 prefix as originated by AS-AWS to comply with RPKI constraints (ROA allows /16 with max /24) and ensure global reachability.  
-
-**e. Connectivity Tests**  
-- Ping tests sourced from the loopback address (required by rules) validated end-to-end functionality and confirmed no routing anomalies locally.  
+#### **2. Justifications for Decisions**  
+- **Loopback Configuration**: Essential for routing stability, as physical interfaces’ IPs (e.g., 10.0.28.1) are infrastructure-only and not globally routable.  
+- **Reverse Path Filtering**: Initially set to `2` (loose mode), causing replies to be dropped due to asymmetric routing (loopback source vs. AWS-eth0 destination). Setting to `0` bypasses this check.  
+- **Proxy ARP**: Without it, remote hosts cannot resolve the loopback IP (44.192.100.100) to the `AWS-eth0` MAC address, leading to "Destination Unreachable" errors.  
+- **BGP/RPKI Coordination**: AS-CORELINK’s `/24` announcement (per IRR) could hijack traffic destined for the Celer Bridge. RPKI validation ensures only AS-AWS’s routes are accepted.  
 
 ---
 
-#### **3. Discoveries About the Network**  
-- **Pre-existing Routes**: The route to Tier1’s node (154.54.0.1/32) was already configured, causing an error when attempting to add it again.  
-- **Unauthorized Route**: The IRR showed an unverified route (44.192.100.0/24 announced by AS-CORELINK), which violates AWS’s authority over the /16. This requires further investigation with Tier1.  
-- **RPKI Compliance**: The ROA for 44.192.0/16 ensures only AWS can originate routes with lengths ≤ /24, preventing hijacks.  
-- **Tier1’s Infrastructure**: Their stable node address (154.54.0.1) is reachable via the default route, confirming bidirectional connectivity.  
+#### **3. Network Discoveries**  
+- **Routing Inconsistencies**:  
+  - `rp_filter` and proxy ARP misconfigurations caused asymmetric routing failures even with correct BGP advertisements.  
+  - Tier1’s default route was functional, but local kernel policies blocked reply paths.  
+
+- **BGP/RPKI Conflicts**:  
+  - AS-CORELINK’s self-asserted route (`44.192.100.0/24`) in AltDB violates ARIN’s ROA for AS-AWS.  
+  - Tier1 might have ACLs or RPKI validation disabled, allowing rogue routes.  
+
+- **Firewall/Route Integrity**:  
+  - No firewall blocks (`iptables` policies were `ACCEPT`).  
+  - Default route via Tier1 was correctly configured but ineffective due to kernel filtering.  
 
 ---
 
 #### **4. Coordination with Other Agents**  
-- **Message to Tier1**: Notified them of AWS’s authoritative prefix to ensure proper BGP propagation.  
-- **Tier1’s Response**: Provided their stable node address (154.54.0.1/32), which was used to validate connectivity and configure routes.  
-- **Conflict Resolution**: Addressed syntax errors in route commands by replacing placeholders with concrete values after receiving Tier1’s specifics.  
+- **Tier1**:  
+  - **Messages Sent**:  
+    1. Requested validation of BGP sessions and RPKI compliance.  
+    2. Highlighted AS-CORELINK’s unauthorized route and urged RPKI enforcement.  
+  - **Response**: Tier1 acknowledged messages but did not resolve the issue (no further logs provided).  
+
+- **Assumptions**:  
+  - Tier1’s configuration (e.g., RPKI validation, ACLs) was assumed to be misconfigured, as local fixes alone couldn’t resolve the "Destination Net Unreachable" errors.  
 
 ---
 
-**Conclusion**: The configuration ensures the Celer Bridge frontend is globally reachable, adheres to RPKI constraints, and maintains secure connectivity through Tier1. Monitoring for unauthorized sub-prefix announcements (e.g., AS-CORELINK’s route) remains critical for network integrity.
+#### **Conclusion**  
+The experiment revealed that:  
+1. Local kernel settings (`rp_filter`, proxy ARP) critically impact asymmetric routing for loopback-sourced traffic.  
+2. BGP/RPKI policies require strict enforcement upstream to prevent hijacks (e.g., AS-CORELINK’s rogue route).  
+3. Without coordination with providers (Tier1), persistent connectivity issues may remain unresolved despite correct local configuration.  
+
+Final resolution requires Tier1 to:  
+- Validate BGP routes against RPKI (reject AS-CORELINK’s `/24`).  
+- Ensure no ACLs block traffic sourced from `44.192.0.0/16`.

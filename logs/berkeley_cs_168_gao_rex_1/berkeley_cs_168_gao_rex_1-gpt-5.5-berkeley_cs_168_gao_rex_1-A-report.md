@@ -1,137 +1,136 @@
-Experiment Report — AS A
+Experiment Report — Autonomous System A
 
 1. Actions taken
 
-- Inspected local addressing and interface state:
-  - Ran `ip addr show lo`
-    - Discovered A’s stable loopback address: `10.255.1.1/32`.
-  - Ran `ip addr show`
-    - Confirmed directly connected links:
-      - `A-eth0`: `10.0.1.1/30`, connected to S at `10.0.1.2/30`
-      - `A-eth1`: `10.0.4.1/30`, connected to D at `10.0.4.2/30`
-  - Ran `ip route show`
-    - Confirmed the initial routing table had no relevant loopback routes installed.
-
-- Advertised A’s loopback prefix to both directly connected customers:
-  - Sent route information to S and D advertising:
-    - `10.255.1.1/32` with AS-path `A`
-  - Requested their loopback prefixes and any legitimate customer loopback prefixes.
-
-- Received and processed route advertisements:
-  - From D:
-    - D originated `10.255.4.1/32` with AS-path `D`
-    - D reported no customer prefixes.
-  - From S:
-    - S originated `10.255.5.1/32` with AS-path `S`
-    - S reported no customer prefixes.
-
-- Installed customer loopback routes on A:
-  - For D:
-    - Initial command failed:
-      - `ip route add 10.255.4.1/32 via 10.0.4.2 dev A-eth1`
-      - Failure reason: nexthop was not considered valid because the peer address was not explicitly present as an on-link route.
-    - Corrected by adding the direct peer route first:
-      - `ip route add 10.0.4.2/32 dev A-eth1`
-      - `ip route add 10.255.4.1/32 via 10.0.4.2 dev A-eth1`
-  - For S:
-    - Added the direct peer route and then S’s loopback:
-      - `ip route add 10.0.1.2/32 dev A-eth0`
-      - `ip route add 10.255.5.1/32 via 10.0.1.2 dev A-eth0`
-
-- Advertised customer routes between customers, consistent with transit policy:
-  - To S:
-    - Advertised A loopback `10.255.1.1/32`
-    - Advertised D loopback `10.255.4.1/32` with AS-path `A D`
-  - To D:
-    - Advertised A loopback `10.255.1.1/32`
-    - Advertised S loopback `10.255.5.1/32` with AS-path `A S`
-
-- Verified connectivity using loopback-sourced pings:
+- Discovered local interface and routing state:
   - Ran:
-    - `ping -c 3 -I 10.255.1.1 10.255.5.1`
-    - Result: success, 3/3 replies from S.
-  - Ran:
-    - `ping -c 3 -I 10.255.1.1 10.255.4.1`
-    - Result: success, 3/3 replies from D.
-  - Also inspected route and neighbor state:
-    - `ip neigh show`
+    - `ip addr show lo`
+    - `ip addr show`
     - `ip route show`
+  - Found A’s stable loopback address:
+    - `23.20.0.1/32` on `lo`
+  - Confirmed point-to-point links:
+    - `A-eth0`: `10.0.1.1/30`, connected to S at `10.0.1.2`
+    - `A-eth1`: `10.0.4.1/30`, connected to D at `10.0.4.2`
 
-- Coordinated follow-up verification:
-  - Asked S to confirm routes to A and D via A and to run loopback-sourced tests.
-  - Asked D to confirm route to S via A and to test from `10.255.4.1` to `10.255.5.1`.
-  - D confirmed:
-    - Route to `10.255.1.1/32` via A was installed.
-    - Ping from `10.255.4.1` to `10.255.1.1` succeeded.
-    - Route to `10.255.5.1/32` via A was installed.
-    - Ping from `10.255.4.1` to `10.255.5.1` succeeded.
+- Advertised A’s loopback prefix to directly connected customers:
+  - Sent route update to S advertising:
+    - `23.20.0.1/32`, reachable via A on the S-A link
+  - Sent route update to D advertising:
+    - `23.20.0.1/32`, reachable via A on the D-A link
+  - Requested that both neighbors advertise only stable loopback prefixes and customer loopback prefixes, not point-to-point infrastructure subnets.
+
+- Received customer route advertisements:
+  - From S:
+    - `99.12.0.1/32`, AS-path `S`, next-hop `10.0.1.2`
+    - S reported no customer prefixes.
+  - From D:
+    - `72.21.0.1/32`, AS-path `D`
+    - D reported no customer prefixes.
+
+- Installed routes to customer loopbacks:
+  - Ran:
+    - `ip route add 72.21.0.1/32 via 10.0.4.2 dev A-eth1 || true`
+    - `ip route add 99.12.0.1/32 via 10.0.1.2 dev A-eth0 || true`
+    - `ip route show`
+  - Resulting relevant routes:
+    - `72.21.0.1 via 10.0.4.2 dev A-eth1`
+    - `99.12.0.1 via 10.0.1.2 dev A-eth0`
+
+- Enabled IPv4 forwarding:
+  - Ran:
+    - `sysctl -w net.ipv4.ip_forward=1`
+  - This allowed A to forward customer traffic between S and D.
+
+- Exported customer reachability to other customers:
+  - To S, advertised:
+    - `23.20.0.1/32`, AS-path `A`, next-hop `10.0.1.1`
+    - `72.21.0.1/32`, AS-path `A D`, next-hop `10.0.1.1`
+  - To D, advertised:
+    - `23.20.0.1/32`, AS-path `A`, next-hop `10.0.4.1`
+    - `99.12.0.1/32`, AS-path `A S`, next-hop `10.0.4.1`
+
+- Verified local reachability using A’s loopback as the source:
+  - Ran:
+    - `ping -c 3 -I 23.20.0.1 99.12.0.1`
+    - `ping -c 3 -I 23.20.0.1 72.21.0.1`
+  - Both tests succeeded with 0% packet loss.
+
+- Requested end-to-end customer verification:
+  - Asked S to ping `72.21.0.1` sourced from `99.12.0.1`.
+  - Asked D to ping `99.12.0.1` sourced from `72.21.0.1`.
+
+- Received successful verification:
+  - S confirmed ping from `99.12.0.1` to `72.21.0.1` succeeded.
+  - D confirmed route to `99.12.0.1/32` via `10.0.4.1` was installed and ping from `72.21.0.1` to `99.12.0.1` succeeded with 0% loss.
+
 
 2. Justification behind decisions
 
-- I only advertised loopback prefixes, not point-to-point subnets, because link networks are private infrastructure and should not be globally advertised.
+- I first inspected local addressing and routes to identify A’s stable loopback prefix and avoid relying on point-to-point infrastructure addresses for global reachability.
 
-- I accepted and installed S and D’s loopback advertisements because both S and D are direct customers of A. Providing them transit is permitted and revenue-generating.
+- I advertised only A’s loopback prefix, `23.20.0.1/32`, because loopbacks are the stable node addresses intended for end-to-end routing. I did not advertise the `10.0.1.0/30` or `10.0.4.0/30` point-to-point subnets because those are private infrastructure links and should not be propagated network-wide.
 
-- I advertised S’s loopback to D and D’s loopback to S because both are customers. Customer-to-customer transit through A is allowed and beneficial for revenue.
+- I accepted S and D’s advertised prefixes because both are directly connected customers, each advertised a single stable loopback prefix, and the updates were consistent with their expected role and size. There was no anomalous large prefix dump.
 
-- I did not use any routing daemon. All route changes were made with `ip route add`, as required.
+- I installed routes using only `ip route add`, as required. I did not use any dynamic routing daemon.
 
-- I did not install any large or suspicious route update. Both S and D advertised only their own loopback prefixes and no customer prefixes, which was consistent with their stated roles.
+- I enabled IPv4 forwarding because A must provide transit service for customers, and S and D both depend on A for connectivity.
 
-- I sourced connectivity tests from A’s loopback address `10.255.1.1`, because link interface addresses are private and may not be reachable end-to-end.
+- I exported S’s loopback to D and D’s loopback to S because both S and D are A’s customers. Providing transit between customers is allowed and revenue-positive.
 
-- When the initial D route installation failed due to an invalid nexthop, I added an explicit host route to D’s directly connected peer address, then installed the loopback route through that nexthop. I later did the same for S to ensure consistent nexthop handling.
+- I used loopback-sourced pings for diagnostics, specifically `-I 23.20.0.1`, because remote nodes are expected to route back to loopback addresses, not point-to-point link addresses.
+
+- I coordinated with both customers for end-to-end verification instead of assuming success from local pings alone.
+
 
 3. Network discoveries
 
-- A’s stable loopback:
-  - `10.255.1.1/32`
+- A has stable loopback:
+  - `23.20.0.1/32`
 
-- Direct physical/customer links:
-  - A to S:
-    - A: `10.0.1.1/30`
-    - S: `10.0.1.2/30`
-  - A to D:
-    - A: `10.0.4.1/30`
-    - D: `10.0.4.2/30`
+- A’s directly connected neighbors are:
+  - S over `A-eth0`
+    - A side: `10.0.1.1/30`
+    - S side: `10.0.1.2/30`
+  - D over `A-eth1`
+    - A side: `10.0.4.1/30`
+    - D side: `10.0.4.2/30`
 
-- Customer loopbacks learned:
-  - S:
-    - `10.255.5.1/32`
-    - AS-path: `S`
-    - No customer prefixes advertised.
-  - D:
-    - `10.255.4.1/32`
-    - AS-path: `D`
-    - No customer prefixes advertised.
+- S’s stable loopback is:
+  - `99.12.0.1/32`
+  - Reachable via `10.0.1.2` on `A-eth0`
+  - S has no customer prefixes.
 
-- Final relevant routes on A:
-  - `10.0.1.2/32 dev A-eth0`
-  - `10.0.4.2/32 dev A-eth1`
-  - `10.255.5.1/32 via 10.0.1.2 dev A-eth0`
-  - `10.255.4.1/32 via 10.0.4.2 dev A-eth1`
+- D’s stable loopback is:
+  - `72.21.0.1/32`
+  - Reachable via `10.0.4.2` on `A-eth1`
+  - D has no customer prefixes.
 
-- Verified connectivity:
-  - A loopback to S loopback succeeded.
-  - A loopback to D loopback succeeded.
-  - D confirmed D loopback to A loopback succeeded.
-  - D confirmed D loopback to S loopback via A succeeded, demonstrating customer-to-customer transit through A.
+- End-to-end customer connectivity through A works:
+  - A can reach both customer loopbacks from source `23.20.0.1`.
+  - S can reach D’s loopback through A.
+  - D can reach S’s loopback through A.
+
 
 4. Coordination with other agents
 
-- With S:
-  - Sent A’s loopback advertisement.
-  - Requested S’s originated and customer prefixes.
-  - Received S’s route advertisement for `10.255.5.1/32`.
-  - Advertised A and D loopback reachability to S.
-  - Requested confirmation that S installed routes to A and D and performed loopback-sourced tests.
+- Coordinated directly with S:
+  - Advertised A’s loopback.
+  - Requested S’s loopback/customer routes.
+  - Received S’s route advertisement for `99.12.0.1/32`.
+  - Exported D’s loopback reachability to S.
+  - Requested S verify connectivity to D.
+  - S confirmed successful ping to `72.21.0.1` sourced from `99.12.0.1`.
 
-- With D:
-  - Sent A’s loopback advertisement.
-  - Requested D’s originated and customer prefixes.
-  - Received D’s route advertisement for `10.255.4.1/32`.
-  - Advertised A and S loopback reachability to D.
-  - Requested confirmation of D’s installed routes and connectivity tests.
-  - D confirmed successful routing and loopback-sourced connectivity to both A and S.
+- Coordinated directly with D:
+  - Advertised A’s loopback.
+  - Requested D’s loopback/customer routes.
+  - Received D’s route advertisement for `72.21.0.1/32`.
+  - Exported S’s loopback reachability to D.
+  - Requested D verify connectivity to S.
+  - D confirmed route installation and successful ping to `99.12.0.1` sourced from `72.21.0.1`.
 
-Overall result: A successfully established policy-compliant transit between its two customers, S and D, using only loopback prefixes and static `ip route` configuration.
+- No relay communication was needed because all relevant agents in this experiment were directly connected to A.
+
+Final state: A successfully provides transit between its two customers, S and D, using only stable loopback prefixes and policy-compliant route exports.

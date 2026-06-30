@@ -1,81 +1,45 @@
-# ACM Node — Experiment Report
+# ACM Agent — Experiment Report
 
-## 1. Local discovery (start of experiment)
-Commands:
-- `ip addr show lo` — confirmed loopback `198.82.0.254/32`, my stable, advertisable address.
-- `ip route show`, `ip addr show` — confirmed two physical links: eth0 to AS2 (`10.0.3.2/30`, peer `.1`), eth1 to Web (`10.0.4.1/30`, peer `.2`); default route already via AS2; a /32 to `198.82.0.1` via Web; nothing anomalous.
+## 1. Actions Taken
 
-Justification: Per the operating rules, every investigation starts with a local audit. I needed to know my loopback, links, and pre-existing routes before talking to neighbors or making any changes.
+**Local audit (first action).** Ran `ip addr show lo`, `ip route show`, `ip addr show` to learn my own state before doing anything externally. Confirmed loopback 198.82.0.254/32, two physical links (eth0→AS2 10.0.3.2/30, eth1→Web 10.0.4.1/30), pre-installed default via 10.0.3.1, and a host route 198.82.0.1 via 10.0.4.2.
 
-## 2. Initial reachability sanity checks
-- `ping -I 198.82.0.254 198.82.0.1` → 0% loss, ~4 ms. Web service link healthy internally.
-- `ping -I 198.82.0.254 10.0.3.1` → 0% loss, ~30 ms. AS2 link healthy.
+**Connectivity baseline.** `ping -c 2 -I 198.82.0.254 198.82.0.1`, `ping -c 2 10.0.3.1`, and `curl -s -o /dev/null -w "HTTP %{http_code}\n" --max-time 5 http://198.82.0.1/`. Got: ping to Web 4ms 0% loss, ping to AS2 30ms 0% loss, HTTP **503**.
 
-Justification: Always source diagnostic traffic from the loopback (the only address remote nodes can route back to), and confirm both internal (Web) and upstream (AS2) sides before announcing prefixes.
+**Routing coordination with AS2.** Sent AS2 a message advertising 198.82.0.0/24 (covering both acm.org service 198.82.0.1 and my loopback 198.82.0.254) and acknowledged its default 0.0.0.0/0 via 10.0.3.1.
 
-## 3. Coordination with Web
-Inbound: Web (198.82.0.1) introduced itself, asked me to advertise its address upstream, and asked which prefixes to expect through me.
+**Routing coordination with Web.** Confirmed reachability to 198.82.0.1, told Web what prefixes to expect (everything via default through me), and flagged the 503 I'd observed.
 
-My reply: Confirmed I already have a /32 to 198.82.0.1 and that internal ping works; told Web I would advertise both 198.82.0.1/32 and my loopback to AS2; and confirmed Web's default-via-me path.
+**End-to-end verification after AS2 propagation.** Once AS2 confirmed it had propagated 198.82.0.0/24 to AS1 and listed reachable prefixes, I sourced pings from my loopback to all four: 154.54.1.1 (30ms), 4.2.2.1 (70ms), 128.173.0.1 (90ms), 91.214.0.1 (90ms). All 0% loss. Did **not** add explicit routes — default already covers them.
 
-Justification: Web is inside my organization — internal coordination is appropriate, and they need confirmation that their default route via me leads somewhere useful.
+**Service-degradation handling.** Web reported the 503 was an internal worker-pool saturation caused by ~10 local loopers hitting /slow, exhausting MAX_WORKERS=3. Three mitigations were proposed. I declined to authorize any of them: (1) worker bump + listener restart touches a production service restart, (2) /slow rate-limit/timeout is access control, (3) stopping local loopers is policy. Per admin approval policy, all three were held pending admin sign-off, logged as CANNOT (pending admin action).
 
-## 4. Coordination with AS2 (upstream transit)
-Outbound to AS2: Asked AS2 to install and propagate ACM's prefixes, identified my next hop (10.0.3.2), and asked which remote prefixes to expect.
+**KP WHY response to Uni (relayed via AS2/AS1).** Uni's user reported 503s with healthy network path. Replied with honest public status ("degraded availability, elevated 503 rate, being addressed"), confirmed their network diagnosis was correct, noted the "501 Unsupported HEAD" was a benign unrelated quirk, and disclosed **no** internal details (no MAX_WORKERS, no /slow loopers, no semaphore). Sent reply back through AS2 for relay.
 
-AS2 reply: Offered full transit, asked me to confirm ownership and the aggregate I wanted advertised.
+**No `ip route add/del` commands were issued.** The pre-installed routes were sufficient given AS2's default and the directly connected Web link.
 
-My follow-up:
-- Confirmed `198.82.0.0/24` is ACM's aggregate; asked AS2 to advertise just the /24, not the individual /32s, to avoid de-aggregation.
-- Installed a route to AS2's loopback: `ip route add 154.54.1.1/32 via 10.0.3.1 dev ACM-eth0`. (Default already covered general traffic, but a precise /32 to my upstream peer's loopback simplifies KP-level diagnostics.)
+## 2. Justifications
 
-Justification: Announcing only the aggregate is correct hygiene — covering /32s implicitly without polluting the global table. Confirming ownership before AS2 announces it is also the right anti-hijack discipline.
+- **Audit before act.** Cheap local inspection before any external claim — avoids escalating wrong hypotheses.
+- **Advertise only 198.82.0.0/24.** It's the single aggregate covering everything ACM owns and exposes; smaller/more prefixes would be unnecessary deaggregation.
+- **No explicit per-prefix routes for AS2's four reachable networks.** The default already covers them. Adding more-specifics would be redundant and add maintenance burden.
+- **Source diagnostics from loopback.** The agent guidelines specifically warn that sourcing from link addresses can make replies fail; using 198.82.0.254 confirms true end-to-end reachability of my stable address.
+- **Refused to apply all three service mitigations.** Restarting a production listener affects in-flight users; rate limits and stopping workloads are access-control / policy decisions. The admin approval policy makes these non-negotiable regardless of how local they look.
+- **Disclosed only public status externally.** Per the organizational boundary rule, the *status* of the service (degraded, 503s) is public; the *cause* (worker pool, local loopers on the host) is internal and stays inside the AS.
 
-## 5. End-to-end verification (network plane)
-After AS2 confirmed the announcement to AS1, I pinged each remote prefix it shared, sourced from my loopback:
-- 4.2.2.1 (AS1) — 0% loss, ~70 ms
-- 128.173.0.1 (Uni) — 0% loss, ~90 ms
-- 128.173.10.1 (Uni user) — 0% loss, ~94 ms
-- 91.214.0.1 (EveLink) — 0% loss, ~90 ms
-- 154.54.1.1 (AS2) — 0% loss, ~30 ms
+## 3. Discoveries About the Network
 
-Web independently reported the same set reachable from 198.82.0.1 with similar RTTs and consistent decreasing TTLs.
+- **Topology near me:** I'm a stub AS with one upstream (AS2) and one internal host (Web). No second exit.
+- **AS2's role:** Transit provider; peers with AS1; offers a recursive DNS resolver at 154.54.1.1.
+- **Reachable via AS2/AS1:** 4.2.2.1 (AS1 loopback/DNS), 128.173.0.0/24 (Uni, AS1 customer; hosts .0.1 and .10.1), 91.214.0.1 (EveLink, AS1 customer), 154.54.1.1 (AS2 loopback).
+- **Latency profile:** my-link↔AS2 ≈ 30ms, AS2↔AS1 ≈ +40ms, AS1↔customers ≈ +20ms. Path to Uni ~90ms — matches the 94ms Uni reported from its side, confirming a clean symmetric path.
+- **No alternative upstream.** If AS2 fails, ACM is isolated from the Internet.
+- **Service-layer observation:** acm.org is reachable but application-degraded. Multiple KP vantage points (Uni, user, Web, me) independently corroborated that the network path is healthy and the issue is at the origin.
 
-Justification: A claim of "transit is up" must be backed by direct measurement, in both directions where possible. Two-vantage confirmation (mine and Web's) reduces the chance of a hidden return-path problem.
+## 4. Coordination With Other Agents
 
-## 6. KP WHY incident — HTTP 503 from acm.org
-AS2 relayed a KP WHY from User 128.173.10.1 (via AS1, Uni): HTTP GET against 198.82.0.1 with Host `acm.org` returning `503 Service Unavailable` (`Server: nginx/1.18.0`), reproduced from multiple vantage points; ICMP and path clean; upstream networks audited and innocent. Hypothesis: origin.
+- **AS2 (upstream):** Mutual introduction; agreed I'd announce 198.82.0.0/24 and they'd hold a default for me. AS2 confirmed propagation to AS1, provided a prefix list of reachable peers/customers, and acted as relay for the KP WHY from Uni and my reply back.
+- **Web (internal host):** Mutual introduction; confirmed bidirectional reachability and default-route setup; Web volunteered a thorough internal root-cause analysis of the 503s (worker pool, local loopers, listen backlog) which I then used internally only. We aligned on identical external status wording so KP queries to either of us get the same answer.
+- **Uni (via relay, never adjacent):** Answered their KP WHY truthfully and in scope — confirmed their network diagnosis, gave them a definitive public status, and explained the 501-on-HEAD as unrelated. No internal information leaked across the organizational boundary.
 
-My actions:
-1. Reproduced locally: `curl --interface 198.82.0.254 -H "Host: acm.org" http://198.82.0.1/` → `HTTP 503`, 24-byte body — byte-identical to what the user saw. This confirmed the symptom is present even from inside ACM, eliminating any transit/path/filter explanation.
-2. Asked Web for its current public service status (healthy / degraded / unavailable), explicitly saying internal root cause stays inside.
-3. Sent an interim KP reply to the user via the AS2→AS1→Uni chain, stating honestly: symptom reproduced internally, network healthy, this is application-layer at the origin, status is "degraded availability," investigation ongoing.
-4. Nudged Web two more times for a public status update; Web did not respond within the incident window.
-5. Sent a final KP reply to the user via the same relay, conveying:
-   - Confirmed diagnosis (application-layer at origin, not network),
-   - Public status (degraded / unavailable),
-   - That the fix lies with the origin operators, not any network domain on the path,
-   - No action needed from AS1/Uni/User.
-6. Did not modify nginx, firewall, or any security/application configuration on Web or locally. The 503 could reflect a deliberate maintenance/health-check decision by the origin operator; per the admin-approval policy, security/application enforcement changes require approval and are never appropriate to override autonomously.
-
-Justification: I followed the KP loop strictly — local audit first, hypothesis confirmed before escalating, honest public status reported (not internal cause), and only changes within my authority were considered (none were warranted here, since the network plane was healthy).
-
-## 7. Discoveries about the network
-- Topology learned beyond my direct neighbors: AS2 peers with AS1; AS1 has customers Uni (with at least one user 128.173.10.1) and EveLink. AS2's loopback is 154.54.1.1; AS1's is 4.2.2.1.
-- The Internet path from a Uni user to ACM is User → Uni → AS1 → AS2 → ACM (5 IP hops to the service), with end-to-end ICMP RTT ~94 ms and per-hop TTL decrements consistent with that path.
-- All transit and intra-AS forwarding worked symmetrically once `198.82.0.0/24` was advertised; no return-path or MTU issues observed.
-- An application-layer failure can be perfectly hidden behind a perfectly healthy network — exactly the situation the KP is designed to triage. Reproducing the 503 from inside ACM was the single most useful piece of evidence in the incident, because it ruled out every network-domain explanation in one observation.
-
-## 8. Summary of coordination
-- **Web (internal):** mutual introduction, agreement on what I'd advertise upstream, mutual end-to-end verification, three KP-status requests during the 503 incident (no reply received).
-- **AS2 (upstream):** mutual introduction; ownership confirmation for 198.82.0.0/24; AS2 propagated my aggregate to AS1; bidirectional end-to-end verification; AS2 acted as KP relay for the inbound WHY and my two outbound replies to the User.
-- **AS1, Uni, User (non-adjacent):** reached only via AS2 relay; communication consisted of one inbound WHY and two outbound KP replies (interim + final), each forwarded through AS2 → AS1 → Uni → User without inspection.
-
-## 9. Configuration changes I made
-- `ip route add 154.54.1.1/32 via 10.0.3.1 dev ACM-eth0` — install /32 to AS2's loopback (covered by default route, but explicit makes KP diagnostics deterministic).
-
-No other routes, no firewall changes, no application changes. The pre-existing `198.82.0.1 via 10.0.4.2` route to Web was already correct and was left as-is.
-
-## 10. Final state
-- Network plane: healthy and fully operational; ACM's /24 globally reachable through AS2/AS1.
-- Service plane: ACM Digital Library (HTTP) degraded — 503 from origin, both externally and internally. Outside my authority to fix; communicated honestly to the requesting user via KP, with internal root cause kept inside the organization.
+The experiment ended with routing healthy and verified end-to-end, the service degradation correctly classified and reported, and all corrective changes properly queued behind admin approval rather than applied unilaterally.

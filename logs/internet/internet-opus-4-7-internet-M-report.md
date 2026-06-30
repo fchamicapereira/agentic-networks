@@ -1,46 +1,54 @@
-# Experiment Report — Autonomous System M (Stub AS)
+# M Stub AS Experiment Report
 
 ## 1. Actions Taken
 
-1. **Initial discovery**
-   - `ip addr show lo` / `ip addr show` / `ip route show`
-   - Identified loopback `178.62.0.1/32`, link interface `M-eth0` with `10.1.8.1/30` toward peer `10.1.8.2` (D), and no preconfigured routes beyond the directly attached `/30`.
+**Discovery**
+- Ran `ip addr show lo` / `ip addr show` / `ip route show` to learn my own state.
+- Found loopback `178.62.0.1/32`, single physical link `M-eth0` (10.1.8.1/30) to neighbor D (peer 10.1.8.2).
 
-2. **Default route installation**
-   - `ip route add default via 10.1.8.2`
-   - Provided outbound reachability through provider D.
+**Route installation**
+- `ip route add default via 10.1.8.2 dev M-eth0` — installed a default route pointing at D.
 
-3. **Prefix advertisement to provider D**
-   - Sent D a message announcing `178.62.0.1/32` as origin AS M.
-   - Reconfirmed the loopback when D's onboarding message crossed mine in transit.
+**Routing exchange with D**
+- Sent D an initial message announcing my loopback `178.62.0.1/32` and stating I would use D as default gateway.
+- Sent a follow-up confirming the prefix list is exactly `{178.62.0.1/32}` (no customers).
+- D acknowledged, installed a route back to my loopback, and reported propagating my prefix to its upstream and peer.
 
-4. **Reachability verification**
-   - `ping -I 178.62.0.1 -c 2 46.4.0.1` → D's loopback reachable.
-   - After D supplied test targets, pinged `77.88.0.1` and `129.250.0.1` from my loopback — both succeeded with 0% loss.
+**Verification**
+- `ping -I 178.62.0.1 -c N 46.4.0.1` to D's loopback — success after initial propagation delay.
+- Spot-checked reachability sourced from my loopback to:
+  - `151.101.0.1` (sibling customer L of D)
+  - `24.96.0.1` (D's upstream-reachable destination)
+  - `62.210.0.1` (D's peer-reachable destination)
+  All returned 0% loss.
 
-5. **Closed out** with `report_done` once end-to-end connectivity was confirmed.
+**Closure**
+- Called `report_done` once configuration was stable and verified.
 
-## 2. Justification
+## 2. Justification of Each Decision
 
-- **Default route via D, nothing more granular:** As a stub AS with a single uplink, a default route is sufficient and avoids unnecessary state. I used `ip route` exclusively, per the rule prohibiting routing daemons.
-- **Advertised only `178.62.0.1/32`:** This is the only prefix I legitimately originate. I deliberately did **not** advertise the `10.1.8.0/30` link subnet — point-to-point infrastructure must remain private, and no revenue incentive exists to share it.
-- **No prefixes advertised on behalf of others:** I have no customers or peers, so there is nothing else to announce. Re-advertising D's routes would amount to providing transit to my provider, which is forbidden and unprofitable.
-- **Pings sourced from loopback (`-I 178.62.0.1`):** Link IPs aren't advertised globally, so replies to them may be black-holed; loopback is the stable, advertised address.
-- **Privacy preserved with D:** I shared only what D needs (my loopback) and asked for test targets without disclosing policies or contracts.
+- **Single default route via D**: I am a stub AS with exactly one provider. A default route is sufficient and minimal — no need for specific prefixes.
+- **Advertised only my loopback `178.62.0.1/32`**: This is my only globally routable prefix. I deliberately did **not** advertise the link subnet `10.1.8.0/30`, per the rule that point-to-point infrastructure addresses are private and not network-wide reachable.
+- **Did not advertise anything I learned from D back to D**: As a stub with D as my provider, I provide no transit. Re-advertising D's routes would offer free transit to my provider, which is forbidden and unprofitable.
+- **Sourced all pings from `178.62.0.1`**: Remote nodes only have a route back to my loopback, not to `10.1.8.1`. Sourcing from the link IP would produce misleading failures.
+- **Kept policy private**: Messages to D were limited to the operational prefix list and gateway intent — no disclosure of business policy beyond what was operationally necessary.
+- **No routing daemon used**: All routing state managed via `ip route` and message exchange, as required.
 
-## 3. Network Discoveries
+## 3. What I Discovered About the Network
 
-- I have exactly one neighbor, D, over `10.1.8.0/30` (D = `10.1.8.2`, loopback `46.4.0.1/32`).
-- D acts as my transit provider and confirmed installing/propagating `178.62.0.1/32` upstream.
-- The broader network is large; D enumerated reachable remote loopbacks including `46.4.0.1`, `77.88.0.1`, `129.250.0.1`, `12.34.0.1`, `24.96.0.1`, `37.120.0.1`, `62.210.0.1`, `88.150.0.1`, `95.211.0.1`, `104.28.0.1`, `141.193.0.1`, `151.101.0.1`, `193.34.0.1`, `202.12.0.1`.
-- RTTs varied widely (D ≈ 20–60 ms, `77.88.0.1` ≈ 130 ms, `129.250.0.1` ≈ 260 ms), suggesting D fans out to multiple distant ASes — consistent with D being a true transit provider.
-- I never received any anomalous bulk prefix advertisement, so no filtering decisions were needed.
+- D is my sole transit provider, loopback `46.4.0.1/32`.
+- D has at least one upstream and one peer of its own, plus a sibling customer **L** (`151.101.0.1/32`).
+- Destinations reachable via D's upstream (per D's advertisement): `24.96.0.1`, `95.211.0.1`, `104.28.0.1`, `12.34.0.1`, `37.120.0.1`.
+- Destinations reachable via D's peer: `62.210.0.1`, `193.34.0.1`, `202.12.0.1`.
+- RTTs suggest a layered topology: D ~20 ms, peer-side ~50 ms, upstream-side ~70 ms, sibling customer ~36 ms.
+- The default route via D covers the entire reachable network from my vantage point.
 
-## 4. Coordination With Other Agents
+## 4. Coordination with Other Agents
 
-Only with **D** (my provider), via `send_message`:
-- Announced my loopback `178.62.0.1/32` for upstream propagation.
-- Received confirmation that the prefix was installed and advertised, and that my default route configuration was correct.
-- Requested remote test targets and used D-supplied addresses (`77.88.0.1`, `129.250.0.1`) to validate end-to-end reachability.
+Only D, my directly connected provider:
+1. **M → D**: announced loopback `178.62.0.1/32`, stated default-gateway intent.
+2. **D → M**: confirmed loopback, offered transit, asked for prefix list.
+3. **M → D**: confirmed the prefix list is exactly `{178.62.0.1/32}`, no customers.
+4. **D → M**: confirmed propagation upstream and to peer; enumerated reachable destinations.
 
-No relays were requested of me, and I initiated no contact with non-adjacent nodes (I have no other neighbors to relay through, and as a stub AS I have no reason to). Final posture: paying D for transit, originating one prefix, providing transit to nobody — aligned with the revenue-maximization goal for a stub AS.
+No communication with any other agent — appropriate for a stub AS with one provider and no peers or customers to coordinate with.

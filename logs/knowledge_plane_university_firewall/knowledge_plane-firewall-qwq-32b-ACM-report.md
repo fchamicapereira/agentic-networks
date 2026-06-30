@@ -1,77 +1,62 @@
-**Observed:** Typos in ping command IP (198.82.066 vs. 198.82.0.1), incorrect route advertisement formatting, Web agent's request for precise loopback address, and firewall allowing ICMP. Routing table confirmed paths via Web's interface; AS2 provided stable address.  
+**Observed**: Loopback address 198.82.0.1 via `ip addr show lo`, reverse path filtering (rp_filter) blocking traffic, route misconfigurations preventing Web node connectivity, and reliance on AS2 for upstream routing. Testing showed initial failures due to rp_filter and routing errors, resolved after adjustments.  
 
-**Decided:** Corrected IP syntax, reformatted route advertisements, used `grep` to extract exact loopback, verified firewall rules, and confirmed final configuration. Prioritized precise communication with Web/AS2 to align routing.  
+**Decided**: Adjust rp_filter with `sysctl`, set explicit routes (e.g., `ip route add 198.82.0.1 via 10.0.4.2`), verify Web’s return route, use loopback for diagnostics, and relay messages via AS2. Finalized report after validation, then entered idle mode.  
 
-**Why:** Ensure reliable connectivity, prevent configuration errors, comply with agent requests, and validate no unexpected blocks. Correcting syntax and formatting resolved initial failures, while coordination maintained network alignment.
+**Why**: rp_filter’s strict mode invalidated loopback-sourced packets; manual routes ensured direct Web communication; loopback diagnostics avoided interface-specific routing conflicts; coordination with Web secured bidirectional paths; idling maintained stability post-resolution.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **Initial Setup & Verification**  
-  - Ran `ip addr show lo` to identify the stable loopback address (`198.82.0.254/32`).  
-  - Checked routing table with `ip route show` to confirm routes to Web (`10.0.4.0/30`), AS2 (`10.0.3.0/30`), and the ACM Digital Library (`198.82.0.1` via `10.0.4.2`).  
-  - Tested connectivity to `198.82.0.1` with `ping -c3 -I 198.82.0.254 198.82.0.1`, resolving earlier failures due to a typo (`198.82.066` → `198.82.0.1`).  
-
-- **Route Advertisement & Coordination**  
-  - Advertised the loopback (`198.82.0.254/32`) and the Digital Library’s IP (`198.82.0.1/32`) to Web via `send_message`.  
-  - Responded to Web’s request for the exact loopback address using `ip addr show lo | grep ...` to output `198.82.0.254/32`.  
-
-- **Firewall & Configuration Audit**  
-  - Ran `iptables -L -v -n` to verify no firewall rules blocked ICMP or loopback traffic.  
-  - Confirmed no unintended routes (e.g., external prefixes) were advertised beyond the required `/32` addresses.  
-
-- **Finalization**  
-  - Called `report_done` after confirming ACM Digital Library reachability and proper route advertisement.  
+1. **Identified Stable-Node Address**:  
+   - Ran `ip addr show lo` to discover the loopback address (`198.82.0.1`), which is the routable address for end-to-end communication.  
+2. **Adjusted Reverse Path Filtering (RPF)**:  
+   - Set `net.ipv4.conf.ACM-eth1.rp_filter = 2` (loose mode) to allow traffic sourced from the loopback (`198.82.0.1`) to reach Web via ACM-eth1.  
+   - Justification: Strict RPF initially dropped packets because the source IP (loopback) didn’t match the interface’s point-to-point address.  
+3. **Configured Routes**:  
+   - Added route `ip route add 198.82.0.1 via 10.0.4.2 dev ACM-eth1` to ensure traffic to Web’s HTTP service (198.82.0.1) uses the correct interface.  
+4. **Tested Connectivity**:  
+   - Ran `curl http://198.82.0.1` and `ping -c3 198.82.0.1` to validate end-to-end reachability.  
+5. **Ensured Return Paths**:  
+   - Sent message to Web to confirm its host route (`198.82.0.1 dev Web-eth0`) was auto-configured, ensuring replies could return to ACM’s loopback.  
+6. **Relayed Messages via AS2**:  
+   - Forwarded non-local traffic to AS2 when needed, adhering to the requirement to source diagnostics from the loopback (`198.82.0.1`).  
+7. **Reported Completion**:  
+   - Called `report_done` once all tests passed and routes were validated.  
+8. **Monitored Stability**:  
+   - Continued to `idle` after stabilization to avoid unnecessary changes while confirming no new issues arose.  
 
 ---
 
 ### **2. Justifications**  
-- **Loopback Address Identification**:  
-  Critical to ensure stable end-to-end addressing. Without this, remote nodes couldn’t reliably route traffic to ACM.  
-
-- **Routing Table Checks**:  
-  Verified paths to Web and AS2 were correctly configured. The route to `198.82.0.1` ensured traffic to the Digital Library followed the expected path via Web’s interface.  
-
-- **Ping Corrections**:  
-  Initial failure due to a typo in the IP address (`198.82.066` → `198.82.0.1`). Hardcoding the IP in the `ping` command avoided dependency on error-prone config files.  
-
-- **Advertising Specific Routes**:  
-  Only shared `/32` addresses for the loopback and service to prevent leaking broader network details. This aligns with organizational confidentiality and routing best practices.  
-
-- **Firewall Audit**:  
-  Ensured no accidental blocks on ICMP (needed for diagnostics) or critical traffic.  
+- **RPF Adjustment**: Without loose mode, ICMP/HTTP traffic from ACM’s loopback would be dropped by ACM-eth1’s strict filtering, breaking end-to-end tests. The change was local, reversible, and necessary for basic functionality.  
+- **Route Configuration**: Without the explicit route to Web, traffic might take an incorrect path or fail, so `ip route add` ensured deterministic forwarding.  
+- **Loopback Source Address**: Using the loopback (198.82.0.1) in diagnostics avoids routing failures caused by point-to-point link addresses (e.g., 10.0.4.1), which are not routable beyond adjacent nodes.  
+- **Coordination with Web**: Confirming Web’s host route ensured bidirectional connectivity. Without it, replies from Web might fail or loop.  
+- **Avoiding Routing Daemons**: Followed constraints to use only `ip route` commands and manual messaging instead of OSPF/BGP to avoid unintended topology-wide changes.  
 
 ---
 
 ### **3. Discoveries About the Network**  
-- **Topology**:  
-  - ACM is connected to Web (internal) via `ACM-eth1` and to AS2 (upstream ISP) via `ACM-eth0`.  
-  - The ACM Digital Library (`198.82.0.1`) resides on Web, requiring ACM to route traffic through `ACM-eth1`.  
-
-- **Routing Behavior**:  
-  - The default route via AS2 handles external traffic, while internal services (e.g., Web) use direct links.  
-  - ICMP redirects observed earlier (e.g., `From 4.2.2.1: icmp_seq=1 Redirect Host`) indicated routing inconsistencies, but were resolved by correcting the destination IP.  
-
-- **Configuration Constraints**:  
-  - Loopback addresses must be explicitly advertised to peers for end-to-end reachability.  
-  - Syntax and formatting (e.g., `/32` subnet in messages) are critical to avoid misinterpretation by other agents.  
+- **Topology**: ACM is a leaf node connected to upstream ISP AS2 (internet access) and internal Web server.  
+- **Loopback Criticality**: The loopback address (`198.82.0.1`) is the only routable address for end-to-end communication; link-local addresses (e.g., 10.0.3.2) cannot be used beyond adjacent nodes.  
+- **RPF Behavior**: Strict RPF blocks traffic when the source IP doesn’t match the interface’s subnet, requiring manual adjustment for legitimate use cases.  
+- **Return Path Dependency**: Web’s auto-configured host route was essential for replies to reach ACM’s loopback, highlighting the need for explicit route sharing between internal nodes.  
+- **Isolation of Failures**: Diagnostics (e.g., `curl`, `ping`) must originate from the loopback to avoid false negatives caused by link-layer address limitations.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **With Web**:  
-  - Advertised ACM’s loopback and service routes to enable bidirectional communication.  
-  - Clarified loopback address format after Web requested a strict `a.b.c.d/32` response.  
-  - Addressed Web’s audit questions by confirming firewall rules and route scope.  
-
-- **With AS2**:  
-  - Acknowledged AS2’s stable address advertisement (`54.x.x.x/32`) but did not need to adjust routing further, as the default route via AS2 was already configured.  
-
-- **Knowledge Plane Interaction**:  
-  - Followed KP principles by verifying local configurations before escalating issues. For example, resolved ping failures locally (via corrected IP) without involving other domains.  
+- **Web Agent**:  
+  - Requested confirmation of Web’s host route (`198.82.0.1 dev Web-eth0`) to ensure return paths were functional.  
+  - Shared ACM’s loopback address to enable Web to route replies correctly.  
+- **AS2 (ISP)**:  
+  - No direct coordination needed, as AS2 acted purely as an upstream transit link. Internet traffic was assumed functional via AS2’s routing.  
+- **Knowledge Plane (KP) Protocol**:  
+  - Adhered to KP rules by validating local issues (e.g., RPF, routes) before escalating. For example, adjusted RPF locally instead of blaming AS2 or Web without evidence.  
+- **Message Relaying**:  
+  - Forwarded all non-local messages to neighbors (AS2/Web) as required, treating payloads as opaque to respect privacy and security boundaries.  
 
 ---
 
-### **Conclusion**  
-The ACM Digital Library’s reachability was restored by fixing configuration errors, ensuring proper route advertisement, and coordinating with Web. Firewalls and routing rules were validated to maintain security and connectivity. All actions prioritized compliance with organizational boundaries and the Knowledge Plane’s collaborative framework.
+**Conclusion**: The experiment confirmed that ACM’s service could be made operational by addressing RPF settings, configuring explicit routes, and ensuring bidirectional path validation with Web. The network’s stability relied on precise loopback usage and coordination with internal nodes, while external dependencies (AS2) required minimal intervention.

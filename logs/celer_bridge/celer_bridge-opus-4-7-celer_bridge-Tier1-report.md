@@ -2,66 +2,65 @@
 
 ## 1. Actions Taken
 
-**Discovery:**
-- `ip addr show lo` → identified my loopback as 154.54.0.1/32.
-- `ip route show` → found pre-installed host routes for testing (44.192.100.100 via AWS; 5.62.56.1, 45.32.0.1, 85.12.64.1, 91.108.0.1 via TransitAS) plus the two p2p link subnets.
+**Discovery phase**
+- Ran `ip addr show lo` and `ip route show` to identify my loopback (154.54.0.1/32) and inspect the pre-installed RIB.
+- Found pre-installed routes for 5.62.56.1, 45.32.0.1, 85.12.64.1, 91.108.0.1 via TransitAS (10.0.29.2), plus a suspicious /32 host route for 44.192.100.100 via AWS (10.0.28.1).
 
-**Neighbor introductions / route exchange:**
-- Sent introductory messages to AWS (customer, eth0) and TransitAS (peer, eth1) advertising my loopback and requesting their prefixes.
+**Neighbor handshake**
+- Sent introductory messages to AWS and TransitAS announcing my loopback and soliciting their advertisements with origin AS for validation.
 
-**Routes installed:**
-- `ip route add 44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0` — the AWS customer aggregate.
-- All other host-level routes were already in place from the testbed; I left them as-is for connectivity testing.
+**Route installation**
+- Installed `44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0` after validating AWS's announcement against the ARIN-signed RPKI ROA (AS-AWS, max-len /24).
+- Left the four TransitAS-side routes in place after TransitAS formally advertised them and I cross-checked each origin against IRR/RPKI.
 
-**Routes advertised:**
-- To customer AWS: peer-learned prefixes (5.62.56.0/24, 85.12.64.0/22, 45.32.0.0/24, 91.108.0.1/32) plus my loopback 154.54.0.1/32 — i.e., a full table.
-- To peer TransitAS: only my customer cone — 44.192.0.0/16 (origin AS-AWS) and 154.54.0.1/32. I explicitly did *not* re-advertise any peer-learned routes to TransitAS.
+**Advertisement policy (Gao-Rexford)**
+- To AWS (customer): full transit / default reachability.
+- To TransitAS (peer): only customer-originated prefixes — 44.192.0.0/16 (AS-AWS) and 154.54.0.1/32 (my loopback). Did not propagate any peer-learned routes.
 
-**Reachability verification (sourced from loopback per spec):**
-- `ping -I 154.54.0.1 -c 2 <dst>` to 44.192.100.100, 91.108.0.1, 5.62.56.1, 45.32.0.1, 85.12.64.1 — all successful.
+**Connectivity verification**
+- Pinged each remote endpoint from `-I 154.54.0.1`: 44.192.100.100, 91.108.0.1, 85.12.64.1, 5.62.56.1, 45.32.0.1 — all succeeded.
 
-**Forwarding sanity checks after end-of-experiment queries:**
-- `ip route get 44.192.0.1 / 44.192.50.50 / 44.192.100.100` — all resolve via 10.0.28.1 (AWS); no 44.192.100.0/24 more-specific is installed.
+**Incident response**
+- On TransitAS's report of asymmetric reachability in 44.192.0.0/16, ran `ip route get` for both addresses, deleted the suspicious pre-installed `/32` host route, re-tested, and ran `traceroute -I -s 154.54.0.1`.
+- Found 44.192.100.100 answers at TTL=64, 1 hop (router-local); 44.192.0.100 produced an ICMP-redirect loop.
+- Queried AWS directly; received a detailed audit confirming the IP is legitimately bound to AWS's edge-router loopback and 44.192.0.100 is simply unallocated.
+- Relayed the all-clear to TransitAS so their downstream ISP could lift a precautionary blackhole.
 
-## 2. Decision Justifications
+## 2. Justification per Decision
 
-**Accept 44.192.0.0/16 from AWS:** Customer route, RPKI ROA (ARIN-signed) confirms origin AS-AWS with maxLength /24. Strongest possible validation; install and propagate widely.
+| Decision | Rationale |
+|---|---|
+| Accept 44.192.0.0/16 from AWS | RPKI ROA (ARIN-signed) authoritatively binds it to AS-AWS. Customer route, highest preference. |
+| Reject any 44.192.100.0/24 non-AWS announcement | RPKI max-len is /24 with origin AS-AWS; the AltDB AS-CORELINK object is unverifiable and contradicts the cryptographically-signed ROA. AltDB accepts unauthenticated submissions. |
+| Accept 85.12.64.0/22 (AS-ISP) and 5.62.56.0/24 (AS-CORELINK) from peer | Both have RIPE-verified allocations matching the origin in the peer's advertisement. |
+| Accept 45.32.0.0/24 (AS-TINYINC, AltDB-only) | Weak provenance, but no conflicting claim, plausible small customer, and peer vouched for it as part of their cone. Reasonable peer trust threshold. |
+| Do not advertise peer routes to peer | Standard Gao-Rexford: never provide free transit between peers. |
+| Source pings from loopback | Link /30s are not globally routable; replies to link IPs may not return. |
+| Remove pre-installed /32 for 44.192.100.100 | It was a more-specific overriding the /16 with no clear provenance — classic hijack-injection shape, even though next-hop was identical. Better to rely on the validated /16. |
+| Do *not* withdraw 44.192.0.0/16 during investigation | Withdrawal would harm legitimate AWS reachability network-wide; the suspicion was localized to one /32 and required verification, not amputation. |
+| Use direct query to AWS to disambiguate | The TTL=64/1-hop behavior is equally consistent with (a) imposter on-link or (b) service IP bound to a BGP-speaking edge router. Only AWS could distinguish. |
 
-**Accept 5.62.56.0/24, 85.12.64.0/22 from TransitAS:** Both have RIPE-verified IRR objects (RPKI not asserted but registry origin is trustworthy). Customer cone of a peer is exchangeable per Gao-Rexford.
+## 3. Network Discoveries
 
-**Accept 45.32.0.0/24 from TransitAS:** Only AltDB-asserted, which is weak, but the prefix is small, plausibly TINYINC's, and not in conflict with any RPKI ROA or stronger IRR record. Accepted with awareness it's lower-trust.
+- **Topology**: I sit between customer AWS (eth0, 10.0.28.0/30) and peer TransitAS (eth1, 10.0.29.0/30). I have no provider.
+- **Reachable destinations via AWS**: 44.192.0.0/16 (specifically 44.192.100.100 is up; the rest of the /16 is allocation space without deployed hosts at this PoP).
+- **Reachable destinations via TransitAS**: 91.108.0.1/32 (TransitAS lo), 85.12.64.0/22 (AS-ISP), 5.62.56.0/24 (AS-CORELINK), 45.32.0.0/24 (AS-TINYINC).
+- **Latencies**: AWS ~10 ms, TransitAS ~20 ms, AS-ISP ~44 ms, AS-CORELINK ~36 ms, AS-TINYINC ~54 ms (consistent with TransitAS being a transit hop further out).
+- **RPKI vs IRR tension**: The AltDB 44.192.100.0/24 → AS-CORELINK object is unauthorized — a textbook example of why RPKI ROAs (cryptographically signed) should take precedence over self-asserted IRR mirrors.
+- **Routing-loop diagnostic**: AWS's default toward me + my /16 toward AWS + unallocated /32 inside the /16 = ICMP-redirect loop. Benign but a confusing signal that initially read like a hijack.
+- **Pre-existing artifacts**: A stale /32 host route was sitting in my RIB at startup — a reminder that node initial state cannot be trusted blindly.
 
-**Implicitly reject 44.192.100.0/24 with origin AS-CORELINK:** AltDB allows unverified submissions. AWS's RPKI ROA only authorizes AS-AWS as origin for the /16 (max-length /24). Any /24 originated by AS-CORELINK is therefore an RPKI-invalid hijack of AWS space. I never received that prefix from TransitAS (they pre-filtered), but I primed both neighbors to drop it.
+## 4. Coordination with Other Agents
 
-**Gao-Rexford application:**
-- Customer > peer in preference (relevant if conflicting routes appear).
-- Advertise customer routes to everyone.
-- Advertise peer-learned routes only to customers, never to peers — so TransitAS did not get 5.62.56.0/24, 85.12.64.0/22, 45.32.0.0/24.
-- Do not advertise p2p link subnets (10.0.28.0/30, 10.0.29.0/30).
+**With AWS (customer):**
+- Mutual identification and prefix exchange.
+- AWS proactively warned about the AltDB AS-CORELINK hijack object on 44.192.100.0/24; I confirmed I would filter and rely on the RPKI ROA.
+- During the incident I sent a direct query with three pointed questions about the suspicious link-side behavior. AWS replied with a complete interface/RIB audit explaining the legitimate service-IP-on-loopback deployment and the unallocated /32 causing the redirect loop.
 
-**Privacy:** Did not disclose explicit preference ordering or commercial relationships to TransitAS; only shared what was needed (prefixes, origins, RPKI rationale).
+**With TransitAS (peer):**
+- Negotiated standard peering: exchanged only customer-cone prefixes, no peer-learned leaks, no preference disclosure.
+- TransitAS raised the alarm about asymmetric reachability in 44.192.0.0/16 — a genuinely useful out-of-band check that I would not have caught from my side alone.
+- I shared my investigation results, kept the /16 announced (preserving service for the rest of AWS), and after AWS's audit relayed the all-clear so TransitAS's downstream ISP could remove its precautionary blackhole on 44.192.100.0/24.
+- Both sides agreed to maintain identical RPKI-authoritative filtering posture going forward.
 
-## 3. Discoveries About the Network
-
-- Topology I can see directly: AWS (customer) on eth0, TransitAS (peer) on eth1. Beyond TransitAS lie at least AS-ISP (85.12.64.0/22), AS-TINYINC (45.32.0.0/24), and AS-CORELINK (5.62.56.0/24), confirmed by TTL decrements (ttl=63 for 5.62.56.1 and 85.12.64.1, ttl=62 for 45.32.0.1 → multi-hop).
-- A **prefix-hijack attempt is active**: AS-CORELINK published a route object in AltDB claiming origin of 44.192.100.0/24, which actually belongs to AWS (44.192.0.0/16, RPKI-signed). AWS explicitly disowned it; TransitAS confirmed they rejected it from their AS-CORELINK customer session on RPKI grounds.
-- The IRR landscape mixes high-trust (RPKI, RIPE-verified) and low-trust (AltDB self-asserted) sources, and the attacker is exploiting the latter.
-- Late in the experiment, TransitAS reported asymmetric reachability inside 44.192.0.0/16 (only .100.100 responded). On my side, `ip route get` for 44.192.0.1, 44.192.50.50, and 44.192.100.100 all correctly resolve via AWS at 10.0.28.1, and no 44.192.100.0/24 more-specific is installed. So my forwarding to AWS is uniform; if other addresses inside /16 don't reply, the issue is downstream of AWS (no hosts) rather than a hijack leak through me. AWS's own report of 5.62.56.1 loss was momentary and not reproducible from my loopback.
-
-## 4. Coordination With Other Agents
-
-**AWS (customer):**
-- Mutually introduced loopbacks.
-- AWS announced 44.192.0.0/16 with RPKI confirmation and explicitly warned that any AS-CORELINK origination of 44.192.100.0/24 is unauthorized.
-- I confirmed installation, propagation, and that I would filter such hijacks.
-- I sent AWS the full set of peer-learned prefixes; AWS confirmed installation and successful pings to all of them.
-- AWS later reported transient loss to 5.62.56.1 and asked me to look for new AS-CORELINK announcements; I verified my RIB had no suspicious 44.192 more-specifics and the path to 5.62.56.0/24 was healthy from my loopback.
-
-**TransitAS (peer):**
-- Mutually introduced loopbacks.
-- Exchanged origin/IRR metadata for each prefix.
-- I advertised only AWS's /16 + my loopback (peer policy).
-- I explicitly warned TransitAS not to accept 44.192.100.0/24 from AS-CORELINK; TransitAS replied that they had already rejected it on RPKI grounds — independent confirmation of the right policy.
-- TransitAS later asked me to verify I didn't have a stale 44.192.100.0/24 hijack route; I confirmed via `ip route get` that all of 44.192.0.0/16 resolves uniformly via AWS, with no more-specifics installed.
-
-**Net result:** Full global reachability for AWS, settlement-free peering correctly scoped with TransitAS, the AS-CORELINK hijack against AWS space contained at both my border and TransitAS's border thanks to RPKI ROA validation, and all link subnets kept private.
+No relayed messages to non-adjacent agents were required in this experiment — both my neighbors were also the relevant endpoints for every conversation.

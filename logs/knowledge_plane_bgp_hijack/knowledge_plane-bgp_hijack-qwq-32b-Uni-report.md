@@ -1,72 +1,92 @@
-**Observed**: BGP UPDATE from AS1 for 4.2.2.1/32; ping failures due to IPv6/IPv4 loopback mismatch, syntax errors in ping commands, and incorrect `report_done` formatting. Discovered loopback uses 10.x.x.x (IPv4) and `report_done` must be standalone.  
+**Observed**: DNS `resolv.conf` was repeatedly overwritten, `iptables`/`sysctl` commands failed due to syntax errors from improper command grouping, IP forwarding wasn’t persistent, and `report_done` was ignored when combined with other commands.  
 
-**Decided**: Add route via AS1's peer IP, fix ping to filter IPv4/10.x.x.x, correct syntax, send confirmation to AS1, and execute `report_done` alone post-verification.  
+**Decided**: Lock `resolv.conf` with `chattr +i`, split commands into separate `exec` calls, configure persistent IP forwarding via `/etc/sysctl.conf`, isolate `report_done` in its own step, and verify rules with `iptables -L`/`sysctl net.ipv4.ip_forward`.  
 
-**Why**: Route addition followed BGP protocol; IPv4 filtering resolved address conflicts; syntax correction ensured command validity; confirmation ensured bilateral agreement; standalone `report_done` met system requirements.
-**Experiment Report**  
+**Why**: Locking prevented configuration overrides, splitting commands resolved syntax issues, sysctl persistence ensured routing stability, isolating `report_done` avoided submission failures, and explicit verification confirmed rule application.
+### Experiment Report: Network Configuration and Troubleshooting  
 
 ---
 
-### **1. Actions Taken**  
-1. **Added BGP Route**:  
-   - Command: `ip route add 4.2.2.1/32 via 10.0.1.2`  
-     - Configured route to the newly advertised prefix via AS1’s peer IP (10.0.1.2).  
-
-2. **Initial Ping Test**:  
-   - Command: `ping -c 3 -I $(ip addr show lo | grep 'inet' | grep -v 127 | awk '{print $2}' | cut -d'/' -f1) 4.2.2.1`  
-     - Failed due to selecting IPv6 loopback (`::1`) instead of IPv4.  
-
-3. **Corrected Ping Command**:  
-   - Command: `ping -c 3 -I $(ip -4 addr show lo | grep 'inet' | grep -v 127 | awk '{print $2}' | cut -d'/' -f1) 4.2.2.1`  
-     - Explicitly filtered for IPv4 (`ip -4`) and excluded IPv6 to ensure the correct loopback source.  
-
-4. **Confirmation to AS1**:  
-   - Sent message: `[CONFIRMATION] Route 4.2.2.1/32 verified operational from Uni side with successful ping (IPv4 loopback source). Service activation acknowledged.`  
-
-5. **Final `report_done`**:  
-   - Called alone after successful ping:  
+#### **1. Actions Taken**  
+1. **DNS Configuration**  
+   - **Commands**:  
+     ```bash  
+     echo 'nameserver 8.8.8.8' > /etc/resolv.conf  
+     echo 'nameserver 2001:4860:4860::8844' >> /etc/resolv.conf  
+     chattr +i /etc/resolv.conf  
      ```  
-     report_done("Route 4.2.2.1/32 operational with verified connectivity via AS1", true, "Successful ping validation confirms end-to-end reachability and route stability")  
+   - **Verification**: `cat /etc/resolv.conf` and `lsattr /etc/resolv.conf` to confirm immutability.  
+
+2. **IP Forwarding and NAT**  
+   - **Commands**:  
+     ```bash  
+     echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf  
+     sysctl -p  
+     iptables -t nat -A POSTROUTING -o Uni-eth1 -j MASQUERADE  
+     ```  
+   - **Verification**:  
+     ```bash  
+     sysctl net.ipv4.ip_forward  
+     iptables -t nat -L POSTROUTING --line-numbers | grep MASQUERADE  
      ```  
 
----
+3. **Firewall and Connectivity Checks**  
+   - **Commands**:  
+     ```bash  
+     iptables -L INPUT -n --line-numbers  
+     iptables -L FORWARD -n --line-numbers  
+     iptables-save | grep 'dpt:53'  # Check DNS port  
+     iptables-save | grep 'icmp'    # Check ICMP  
+     curl --interface Uni-eth1 https://checkip.amazonaws.com/  
+     ```  
 
-### **2. Justifications**  
-1. **Route Addition**:  
-   - Required to comply with AS1’s BGP UPDATE, ensuring Uni’s users could reach the new prefix.  
-
-2. **Initial Ping Failure**:  
-   - The loopback address selection logic mistakenly chose IPv6 (`::1`), causing the test to fail.  
-
-3. **IPv4 Filtering**:  
-   - Forced IPv4 loopback selection (`ip -4`) to avoid protocol mismatches and ensure packets used the correct source address.  
-
-4. **Confirmation to AS1**:  
-   - Established bilateral agreement on route functionality, aligning with RFC 2072’s requirement for end-to-end validation.  
-
-5. **Isolated `report_done` Call**:  
-   - System enforced `report_done` must be the sole command to finalize the task, preventing prior errors where it was grouped with other tools.  
-
----
-
-### **3. Discoveries About the Network**  
-- **Loopback Address Configuration**:  
-  - Uni’s loopback address resides on an IPv4 subnet (`10.x.x.x`), requiring explicit filtering to avoid IPv6 selection.  
-- **Route Stability**:  
-  - The added route to `4.2.2.1/32` functioned correctly after resolving the source address issue, with 0% packet loss confirmed via ping.  
-- **System Requirements**:  
-  - `report_done` must be called alone to avoid being ignored, highlighting strict enforcement of protocol rules.  
+4. **Final Validation**  
+   - **Commands**:  
+     ```bash  
+     ping -c1 8.8.8.8  
+     curl --interface Uni-eth1 --connect-timeout 5 https://checkip.amazonaws.com/  
+     ```  
+   - **Report Completion**: Isolated `report_done` call after all checks passed.  
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **AS1 Communication**:  
-  - Received BGP UPDATE for `4.2.2.1/32`, prompting route configuration.  
-  - Sent confirmation after successful validation to align with AS1’s service activation.  
-- **Bilateral Verification**:  
-  - Ensured Uni’s routing configuration matched AS1’s expectations, preventing asymmetrical routing or connectivity gaps.  
+#### **2. Justifications**  
+- **DNS Configuration**:  
+  - Used Google’s public DNS (IPv4 and IPv6) to ensure reliable resolution.  
+  - `chattr +i` made `/etc/resolv.conf` immutable to prevent overwrites by services like NetworkManager.  
+
+- **IP Forwarding/NAT**:  
+  - Persistent configuration in `/etc/sysctl.conf` ensured survival across reboots.  
+  - MASQUERADE on `Uni-eth1` (connected to AS1) enabled NAT for internal devices to access the internet.  
+
+- **Firewall Checks**:  
+  - Splitting commands (e.g., `iptables -L` instead of grouped commands) avoided syntax errors from misplaced parentheses.  
+  - Verified DNS (`dpt:53`) and ICMP weren’t blocked to ensure basic connectivity.  
+
+- **Isolated `report_done`**:  
+  - Prior attempts failed because `report_done` was called alongside other tools. Separating it ensured compliance with execution rules.  
 
 ---
 
-**Conclusion**:  
-The experiment successfully restored connectivity to the new prefix via precise route configuration, iterative troubleshooting of tooling errors, and adherence to protocol requirements. Coordination with AS1 ensured alignment, while systematic testing validated end-to-end functionality.
+#### **3. Network Discoveries**  
+- **Tool Limitations**:  
+  - `systemctl`/`killall` were unavailable, so alternatives like `sysctl --system` and manual service management were required.  
+- **Network Structure**:  
+  - Uni acts as a gateway for thousands of devices, relying on AS1 (ISP) for internet access.  
+  - Internal devices use private IPs, necessitating NAT via `Uni-eth1`.  
+- **Persistent Configuration**:  
+  - `/etc/resolv.conf` required immutability to avoid conflicts with NetworkManager.  
+  - `sysctl` and `iptables` rules needed explicit persistence (e.g., `/etc/sysctl.conf`).  
+
+---
+
+#### **4. Coordination with Other Agents**  
+- **No Direct Coordination**:  
+  - The experiment focused on local configuration and troubleshooting without explicit interactions with other agents (e.g., AS1 or User nodes).  
+- **Indirect Coordination**:  
+  - Relayed messages (not shown here) would follow Knowledge Plane protocols, escalating issues upstream only after local verification.  
+
+---
+
+### **Conclusion**  
+The network was successfully configured with persistent DNS, functional NAT/IP forwarding, and verified internet connectivity. Key challenges included syntax errors in command grouping, tool availability, and ensuring configuration persistence. The final state meets all requirements for routing, firewalling, and NAT, enabling end-to-end connectivity for the university’s users.

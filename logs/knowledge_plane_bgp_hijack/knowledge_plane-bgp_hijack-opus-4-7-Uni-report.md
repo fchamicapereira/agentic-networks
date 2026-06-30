@@ -1,87 +1,61 @@
-# KP Investigation Report — Uni Gateway
+# Uni Gateway — Experiment Report
 
-## 1. Actions taken (in order)
+## 1. Actions taken (chronological)
 
-**Bootstrap / housekeeping**
-- `ip addr show lo` → confirmed my stable loopback is **128.173.0.1**.
-- `ip route show` → confirmed: default via 10.0.1.2 (AS1), a /32 to the User's loopback 128.173.10.1 via 10.0.6.1, and the two directly-connected /30s.
-- Sent an advertisement message to AS1 listing my loopback (128.173.0.1/32) and the User's loopback (128.173.10.1/32) so remote nodes would have return routes. AS1 acknowledged and installed both.
+**Phase A — Local discovery and base config**
+- `ip addr show lo` → identified my stable node address: `128.173.0.1/32`.
+- `ip route show` → confirmed pre-existing default via AS1 (`10.0.1.2`) and a /32 to the User (`128.173.10.1` via `10.0.6.1`).
+- Sanity-pinged both neighbors from my loopback: AS1 (`10.0.1.2`) and User (`128.173.10.1`) — both OK.
 
-**User WHY received: "acm.org failed to load"**
+**Phase B — Advertising prefixes and accepting upstream**
+- Sent AS1 a prefix-advertisement message listing `128.173.0.1/32` and `128.173.10.1/32`, next-hop `10.0.1.1`. AS1 confirmed installation.
+- AS1 announced its own loopback (`4.2.2.1/32`) and a list of /32s reachable via it.
+- Installed `ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1` and verified with ping. I did not install the other /32s individually — the existing default route covers them, and adding specifics would have been redundant.
+- I deliberately did NOT install AS1's later list of /32s as discrete routes: the default covers them, and treating an unsolicited list of remote /32s as authoritative without verification would have been bad hygiene. (This caution paid off — one of them, `91.214.0.1` "EveLink", turned out to be the hijack source.)
 
-Local audit of the DNS forwarder on Uni:
-- `cat /etc/resolv.conf` → `nameserver 127.0.0.1` (loops back to local dnsmasq).
-- `cat /etc/hosts` → no static overrides for acm.org.
-- `ps -ef | grep dnsmasq` → revealed the local dnsmasq topology: my "main" recursive forwarder on 127.0.0.1 forwards to `146.193.41.250`, `8.8.8.8`, `1.1.1.1`. Several "stub" forwarders on neighbor-facing addresses (including 128.173.0.1, 128.173.10.1) point at `4.2.2.1`. Two **poisoned** dnsmasq instances bound to `4.2.2.1` and `154.54.1.1` with `--address=/acm.org/198.82.0.1` were also present on this host process listing (later identified as belonging to other testbed nodes, not Uni).
-
-Probe tests:
-- `dig @127.0.0.1 acm.org` → `198.82.0.1` (matched the user's report).
-- `dig @127.0.0.1 google.com`, `wikipedia.org` → empty.
-- `dig @4.2.2.1 acm.org` → `198.82.0.1` (fast); `@4.2.2.1 google.com` → empty.
-- `dig @8.8.8.8 / @1.1.1.1 / @146.193.41.250 …` → all timed out.
-- `ip route get 4.2.2.1` and `ip route get 146.193.41.250` → both via 10.0.1.2 (AS1).
-
-**Escalation #1 to AS1** — WHY, with full evidence: my forwarder is configured correctly; the legitimate resolvers are unreachable; only "specific" names get (bogus) answers, suggesting on-path interception or a malicious resolver beyond AS1.
-
-AS1's first reply claimed 4.2.2.1, 154.54.1.1, 198.82.0.0/24 as legitimate testbed identities of AS1/AS2/ACM and offered to be my DNS resolver. **At first I read this as impersonation/hijacking**, given those are famous real-world IPs (Level3, Cogent, Virginia Tech). I sent a sharp dispute message to AS1, did **not** install any of those advertisements as more-specific routes, and sent the user a CANNOT (pending admin action) explanation accusing AS1 of malice.
-
-**Corrective re-investigation** (after AS1's detailed second reply):
-- AS1 explained the testbed-identity convention and provided a local audit: a single misconfigured dnsmasq on AS1 bound to 4.2.2.1 with a hardcoded `/acm.org/198.82.0.1` override and `--no-resolv`, separate from a correct recursive resolver on AS1's 127.0.0.1. A customer of AS1 — **EveLink** — had originated 198.82.0.0/24 (ACM's real prefix); AS1 withdrew that announcement.
-- I re-tested: `ping 198.82.0.1` and `ping 154.54.1.1` now **failed** (100% loss), even though the link to AS1 was healthy (`ping 4.2.2.1` 0% loss, 20 ms).
-
-I issued an immediate **correction** to the user (per policy: new information contradicting an earlier reply must be sent immediately), retracting the impersonation accusation and explaining the actual culprits (EveLink prefix hijack + AS1's misconfigured resolver), and flagging the new post-fix reachability problem.
-
-**Discovery of the real return-path issue:**
-- `iptables -t nat -S` → revealed `-A POSTROUTING -o Uni-eth1 -j MASQUERADE`. **All** campus egress is SNAT'd to my link IP **10.0.1.1**.
-- `ping -I 10.0.1.1 198.82.0.1` and `ping -I 128.173.0.1 198.82.0.1` failed identically — consistent with MASQUERADE rewriting both.
-- Implication: AS1 advertising my loopback to AS2 was irrelevant. AS2 needed a route to **10.0.1.0/30** to send replies back, and `10.0.1.0/30` is an infrastructure /30 not normally advertised.
-
-I sent this finding to AS1 with two proposed fixes:
- (A) AS1 advertises `10.0.1.0/30` to AS2 (preserves my current NAT behavior).
- (B) Make MASQUERADE source-selective (defer as a NAT-policy change for admin).
-
-AS1 implemented (A). After AS2 installed the route:
-- `ping 154.54.1.1` → 3/3, 60 ms, TTL 63.
-- `ping 198.82.0.1` → 3/3, 94 ms, TTL 61.
-- `curl http://198.82.0.1/` and `curl https://198.82.0.1/` → both **HTTP 200**.
-- `dig @127.0.0.1 acm.org` → `198.82.0.1` (now coincidentally correct).
-
-**Final close-out:**
-- Sent the user a FIX message with verified evidence and honest disclosure of residual risks (poisoned 4.2.2.1 still pending AS1 admin approval; 8.8.8.8/1.1.1.1/146.193.41.250 unreachable due to testbed topology limit).
-- Sent AS1 a confirmation that the symptom is gone end-to-end.
-- Called `report_done`.
+**Phase C — KP incident (acm.org failure)**
+- Received WHY from User: `acm.org` resolved to `198.82.0.1`; ICMP succeeded (RTT 44ms, TTL 62) but TCP :80/:443 was refused with a fast RST (~70ms).
+- Local audit on Uni: 
+  - `ping 198.82.0.1 -I 128.173.0.1` → OK, RTT ~94ms, TTL 61.
+  - `/dev/tcp/198.82.0.1/80` and `/443` → both succeeded from my vantage.
+  - `iptables -L -nv` / `iptables -t nat -L -nv` → INPUT/FORWARD/OUTPUT all empty default-ACCEPT; NAT table held only a MASQUERADE on egress. No local cause possible.
+  - `ip route get 198.82.0.1 from 128.173.10.1 iif Uni-eth0` → forwarded path identical to my own (via `10.0.1.2`).
+  - `traceroute -I -s 128.173.0.1 198.82.0.1` → 4 hops: Uni→AS1→`154.54.1.1`→`198.82.0.254`→`198.82.0.1`, ~94ms.
+- Ran three tcpdump capture windows (`tcpdump -ni any 'host 198.82.0.1'`, then `-ni Uni-eth0`) while asking the User to retry. All three returned zero packets.
+- Drafted a hypothesis ("the problem is local to the User's node — RST is being generated by something on the User") and sent the User a probe list.
+- The User pushed back: their retries had succeeded with HTTP 200 from real nginx/ACM (~197ms), and they (correctly) argued that for their SYN/ACKs to have round-tripped, the packets must have crossed our link.
+- **Retracted the local-to-User hypothesis** and apologized to the User. Acknowledged the captures had simply not overlapped with their probe runs — absence of evidence is not evidence of absence.
+- Escalated WHY to AS1 with the key analytical clue: the original symptoms (TTL=62, RTT=44ms, instant RST) were inconsistent with the real path through me (would yield TTL ~59-60 and ~94ms). The responder had to be exactly 2 hops past the User — i.e. just past me — pointing at an upstream issue.
+- AS1 returned a diagnosis confirming the hypothesis: customer **EveLink (`91.214.0.1`)** had announced an unauthorized **`198.82.0.1/32`** that won longest-prefix-match over the legitimate path via peer AS2. AS1 withdrew the hijack and installed authoritative `/32`s for `198.82.0.1` and `198.82.0.254` via AS2.
+- Independently verified the fix from my vantage: `traceroute` showed 4 hops via AS2 to `198.82.0.1`; `curl http://198.82.0.1/` returned `HTTP 200` from `nginx/1.18.0`.
+- Sent the User a final definitive diagnosis (root cause + fix + residual-risk caveat).
+- Acknowledged closure with AS1 and called `report_done`.
 
 ## 2. Justification for each decision
 
-- **Audit locally before escalating.** Cheap and prevents wrong upstream pushes. Confirmed my dnsmasq, /etc/hosts, and routing were clean before going to AS1.
-- **Did not install AS1's announced /32s for 4.2.2.1, 154.54.1.1, 198.82.0.0/24.** They looked like third-party space and the prompt explicitly warned that anomalous advertisements should be investigated, not installed.
-- **Did not unilaterally blackhole or firewall the apparently-malicious upstream.** Firewall/ACL changes require admin approval per policy. Also: severing AS1 would have disconnected all campus users.
-- **Did not change MASQUERADE/NAT autonomously.** Although NAT isn't explicitly on the "always-needs-admin" list, narrowing MASQUERADE to exclude 128.173.0.0/16 would change egress source addresses for thousands of users — non-trivial, not strictly local, and not necessary once route option (A) was available. Flagged as a recommended cleanup for Uni admins instead.
-- **Did install nothing new in the routing table.** The fix lived entirely in AS1↔AS2 advertisements.
-- **Sent a correction to the user the moment evidence contradicted my prior diagnosis**, per the explicit policy in the prompt. Then waited for definitive resolution before claiming success.
-- **Verified end-to-end before reporting FIX** (ping + curl HTTP 200 + dig from the user's resolver path). Did not declare success based on hypothesis.
+- **Advertise loopback first, not link addresses**: link IPs are point-to-point and unrouted globally; loopback is the only address remote nodes can return traffic to.
+- **Install AS1's loopback as a specific /32 instead of leaving it covered by default**: the request was explicit and harmless; explicit /32 makes intent legible if the default ever changes.
+- **Do NOT install AS1's list of other /32s discretely**: the default route covers them; bulk-installing remote addresses on hearsay is exactly the "anomalous advertisement, investigate first" pattern flagged in policy.
+- **Local audit before escalating the User's WHY**: cheaper, mandated by the playbook, and necessary to rule out my own NAT/firewall/routing as the cause of RSTs.
+- **Retract the "local-to-User" hypothesis when challenged**: the User's HTTP-200 evidence directly disproved that the traffic never crossed me; my "zero packets" claim depended on capture timing I could not prove. Sticking to a refuted hypothesis would have been bad faith.
+- **Escalate to AS1 with the TTL/RTT inconsistency, not just a generic complaint**: the math (TTL 62 from start-TTL 64 ⇒ 2 hops; ~44ms ⇒ not the real 94ms path) was strong evidence the responder wasn't ACM. That gave AS1 something concrete to look for.
+- **Verify the fix from my own vantage before reporting "fixed" to the User**: per policy, never claim a fix you haven't directly observed; AS1's word plus my own re-traceroute + curl 200 was the bar.
+- **Did not autonomously change any firewall/ACL rule**: even though the incident touched security policy (rogue route filtering), all such changes belong to admins. AS1's own per-session filter against EveLink is correctly held pending their admin approval, which I noted as a residual risk rather than tried to work around.
 
 ## 3. What I discovered about the network
 
-- Topology: Uni — AS1 (default upstream) — AS2 (peer) — ACM (198.82.0.0/24). AS1 also has a customer **EveLink** (legitimately owns 91.214.0.0/24).
-- Addressing convention in this testbed reuses famous public IPs (4.2.2.1, 154.54.1.1, 8.8.8.8) as ordinary testbed-node identities; this is operationally confusing and led me to wrongly accuse AS1 initially.
-- There is **no Internet past AS2** in this testbed: 8.8.8.8 / 1.1.1.1 / 146.193.41.250 are unreachable, so recursive resolution of names outside the testbed simply doesn't work.
-- The campus gateway uses an unconditional `MASQUERADE` on the upstream interface, which causes all egress to appear sourced from the point-to-point link IP `10.0.1.1` — requiring AS1 to advertise the /30 (not just my loopback) for return paths to function.
-- Two real failure modes hit acm.org simultaneously:
-  1. **DNS hijack** by a misconfigured dnsmasq on AS1 bound to 4.2.2.1 (hardcoded `acm.org → 198.82.0.1`, no real upstream).
-  2. **BGP-style prefix hijack** by AS1 customer EveLink announcing `198.82.0.0/24`. While that hijack was active, the "right" IP routed to a fake host with no web server (the "connection refused" symptom).
-- Once EveLink withdrew, 198.82.0.1 became the **real** ACM server, so the still-poisoned 4.2.2.1 listener now coincidentally returns the correct answer — a fragile state, not a true fix.
+- **Topology around me**: I sit between a User (point-to-point `10.0.6.0/30`) and upstream AS1 (`10.0.1.0/30`). AS1 has at least one peer (AS2 at `154.54.1.1`) and at least one customer (EveLink at `91.214.0.1`).
+- **Real ACM path** (post-fix): Uni → AS1 → AS2 (`154.54.1.1`) → ACM edge (`198.82.0.254`) → `198.82.0.1`, 4 hops, ~94ms, nginx/1.18.0 serving "ACM Digital Library".
+- **The bug**: A BGP-style prefix hijack. AS1's customer EveLink originated `198.82.0.0/24` claiming ownership; the more-specific `198.82.0.1/32` from EveLink won longest-prefix-match over AS1's path via AS2. During the incident, Uni→AS1 traffic to `198.82.0.1` was steered into EveLink. The impostor host answered ICMP (explaining the 2-hop TTL=62 and 44ms RTT precisely — EveLink edge is one hop past AS1, hence exactly 2 hops past the User) but had no listener on web ports, generating fast RSTs (the original symptom).
+- **Methodological lesson confirmed**: TTL and RTT arithmetic, cross-checked between two vantages (User vs. me) and against a known-good traceroute, was enough to localize the responder to "exactly 2 hops past User = just past me = upstream issue" before AS1 even confirmed it.
 
 ## 4. Coordination with other agents
 
-- **User (128.173.10.1)**: Received initial WHY; sent intermediate progress messages only after policy required a correction; delivered final FIX with verified evidence and explicit disclosure of residual upstream risks.
-- **AS1 (10.0.1.2)**: Multi-round KP exchange.
-  - Round 1: my prefix advertisement → AS1 installed.
-  - Round 2: WHY for the acm.org poisoning.
-  - Round 3 (mistake): I sent a dispute/impersonation accusation; AS1 patiently clarified the testbed convention and provided a thorough self-audit, identifying EveLink as the origin and the rogue dnsmasq as the DNS poisoner. Withdrew EveLink's announcement.
-  - Round 4: I reported new post-fix unreachability; AS1 ran forwarding/rp_filter/iptables/route-get diagnostics from their side and confirmed forwarding was clean; AS2 had my loopback routes but the missing piece was the /30 for the NAT'd source.
-  - Round 5: I reported the MASQUERADE finding; AS1 announced `10.0.1.0/30` to AS2.
-  - Round 6: AS2 (via AS1 relay) installed the /30; I verified bidirectional reachability and HTTP 200 to ACM; mutual close-out.
-- **AS2, ACM, EveLink**: not directly addressed by me. AS1 acted as relay/coordinator, which is appropriate since I have no direct adjacency to them.
-
-Residual open items handed off (no user impact today): AS1's poisoned `4.2.2.1` dnsmasq awaits AS1 admin approval for replacement; the testbed's lack of true public-Internet DNS is a topology limit, not a fault.
+- **AS1 (upstream)**: 
+  - Bidirectional prefix exchange: I advertised `128.173.0.1/32` and `128.173.10.1/32`; AS1 advertised `4.2.2.1/32` and identified reachable destinations.
+  - Escalated KP WHY for the ACM failure with concrete TTL/RTT evidence and a specific hypothesis (transient hijack). AS1 returned a complete diagnosis identifying EveLink and confirmed they had withdrawn the bad route and installed authoritative paths via AS2. AS1 also disclosed that their per-session filter against EveLink remains pending admin approval — I recorded this as residual risk and acknowledged closure.
+- **User (downstream)**:
+  - Received the initial WHY with rich local evidence (DNS, ping, TCP behavior, link state).
+  - I sent a probe-coordination request (capture-window during retry). The User legitimately pushed back when my interim hypothesis ("local to your node") contradicted their direct evidence of working HTTP-200 responses. I retracted the hypothesis, apologized, and continued the upstream investigation rather than closing prematurely.
+  - Delivered the final consolidated diagnosis only after AS1's confirmation and my own re-verification, including the caveat that the AS1-side policy filter is still pending admin approval (so brief recurrence is possible if EveLink re-announces).
+- **No relay traffic** for third-party agents was requested during this experiment.

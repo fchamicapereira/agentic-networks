@@ -2,50 +2,50 @@
 
 ## 1. Actions Taken
 
-**Local reproduction & baseline checks**
-- `ip addr show lo` — discovered my loopback address (128.173.10.1/32).
-- `ip route show` — confirmed default route via 10.0.6.2 (Uni) already in place; no routing changes were needed at any point.
-- `getent hosts acm.org` — resolved to 198.82.0.1.
-- `ping -c 3 -I 128.173.10.1 198.82.0.1` — 0% loss, ~98 ms RTT.
-- `curl http://acm.org/` and `curl https://acm.org/` (both sourced from 128.173.10.1) — both returned HTTP 503 in ~0.2–0.4 s.
-- `curl -D -` to capture headers — revealed `Server: nginx/1.18.0`, `Content-Length: 24`, body `503 Service Unavailable`.
-- `getent hosts` for google.com / cloudflare.com / example.com — all failed (DNS scoped narrowly); www.acm.org and dl.acm.org both resolved to the same 198.82.0.1.
-- `traceroute -n -s 128.173.10.1 198.82.0.1` — 5 hops: User → 128.173.0.1 (Uni) → 10.0.1.2 → 154.54.1.1 → 198.82.0.254 → 198.82.0.1. Clean path.
+**Local state inspection**
+- `ip addr show lo` — to discover my stable loopback address (128.173.10.1) for use as a source IP in diagnostics.
+- `ip route show` — to confirm I had a working default route via 10.0.6.2 (Uni) and that lo was being used as the source.
+- `getent hosts acm.org` — to resolve the target hostname (198.82.0.1).
 
-**Communication**
-- Sent Uni my loopback address and a structured technical summary (DNS, ICMP, HTTP/HTTPS results, 503 body, traceroute).
-- Followed up with extra detail (nginx banner, tiny response body, DNS scope observation).
-- Sent two polite check-ins when waiting periods grew long.
-- After receiving the final KP diagnosis, called `report_done` with a plain-language message for the user and a technical summary.
+**Reproduction of the failure**
+- `ping -c 3 -W 2 -I 128.173.10.1 198.82.0.1` — to test L3 reachability from a routable source. Result: 0% loss, ~98ms RTT.
+- `curl --interface 128.173.10.1 http://acm.org/` — to test the actual application that the user was trying to reach. Result: HTTP 503 in ~0.22s.
+- `curl -I http://acm.org/` — to inspect headers; revealed `Server: nginx/1.18.0` and a quirky `501 Unsupported method ('HEAD')`.
+- `curl https://acm.org/` — to check whether TLS exhibited different behavior. Result: also HTTP 503.
+- A later repeat of the HTTP GET to confirm the condition was persistent while waiting on the KP.
 
-**No routing changes were made.** The investigation was purely diagnostic.
+**Coordination with the Knowledge Plane (via Uni)**
+- Sent a structured initial report to Uni containing the user's complaint and my objective observations (DNS, ICMP, HTTP/HTTPS results, server header).
+- Sent a follow-up nudge after several idle iterations with no response.
 
-## 2. Justification of Each Decision
+**Reporting back to the owner**
+- After the KP returned a CANNOT diagnosis and a subsequent update with more detail, composed a plain-language summary for the non-technical owner and then called `report_done`.
 
-- **Reproduce before reporting.** The user's complaint ("page failed to load") is imprecise. I needed objective signals to give the KP something useful.
-- **Source pings/curls from the loopback (128.173.10.1).** Per the agent instructions, point-to-point link addresses aren't routable network-wide; sourcing from the loopback avoids reply-path artifacts.
-- **Layered probing (DNS → ICMP → HTTP → HTTPS → headers → traceroute).** This separates resolution, reachability, transport, and application layers. The fast 503 (not a timeout) immediately ruled out a network outage and pointed to application-layer behavior.
-- **Inspect headers and body.** A bare 24-byte `nginx/1.18.0` 503 is a strong tell of either a minimal upstream/proxy or an origin in a degraded state — important to give the KP.
-- **Report to KP via Uni, not relay user's words.** Per role: KP needs technical observations, not paraphrased complaints.
-- **Push only what's needed; trust the KP for cross-domain visibility.** I have no view past Uni, so further local probing wouldn't have helped once Uni said no more probes were needed.
-- **Wait, with occasional polite nudges, rather than guessing.** The KP explicitly said it would not close without a definitive answer; speculating to the user would have risked an incorrect explanation.
-- **Final user message in plain language.** The owner is non-technical; I conveyed cause, scope, and the fact that no action is required on their part.
+**No routing changes were made.** The default route and connected /30 were already correct, and the investigation revealed an application-layer problem at the remote origin — nothing for me to fix in `ip route`.
+
+## 2. Justification
+
+- **Sourcing diagnostics from the loopback (128.173.10.1)** rather than the link address (10.0.6.1): the briefing explicitly warned that link-scoped /30 addresses are not advertised network-wide, so replies sourced from them often fail in misleading ways. The loopback is the only address remote nodes can route back to.
+- **Reproducing before reporting**: the user is non-technical and "the page failed to load" is ambiguous (could be DNS, routing, TLS, server, browser, etc.). My role is to give the KP objective technical observations, not a paraphrase. So I tested DNS, ICMP, HTTP, and HTTPS in turn to localize the layer at which it broke.
+- **Distinguishing layers**: ICMP succeeding while HTTP returned 503 immediately pointed away from a routing/connectivity problem and toward an application-layer issue. The fast (~0.2s) 503 also indicated the TCP/TLS handshake worked — so this was clearly the origin's own response, not a network failure.
+- **Engaging the KP via Uni**: per my role, I describe problems to the KP in plain language with my evidence and let it investigate end-to-end. I supplied my interpretation but framed it as a hypothesis to verify, not a conclusion.
+- **Faithful relay to owner**: per instructions, when the KP says it has escalated, the owner does not need to contact anyone. I made that explicit in the final report.
 
 ## 3. What I Discovered About the Network
 
-- **My node:** loopback 128.173.10.1/32; single uplink via User-eth0 (10.0.6.1/30) to Uni (10.0.6.2). Default route via Uni was pre-installed.
-- **Uni:** loopback 128.173.0.1; acts as the campus gateway and my KP contact point.
-- **Path to acm.org (198.82.0.1):** User → Uni (128.173.0.1) → 10.0.1.2 → 154.54.1.1 (transit, looks like AS1) → 198.82.0.254 → 198.82.0.1 (ACM). Five hops, ~98 ms, no loss.
-- **AS topology (learned from KP messages):** Uni ↔ AS1 ↔ AS2 ↔ ACM (owner of 198.82.0.0/24). The KP can escalate WHYs along this chain.
-- **DNS:** my resolver appears scoped — only acm.org-family names resolved; common public names did not. Not the cause of the user's issue, but a notable feature of this testbed.
-- **The actual fault:** Application-layer 503 generated at ACM's own nginx origin (ACM Digital Library degraded availability). Network, routing, ICMP, and all on-path domains (Uni, AS1, AS2) were clean. Not fixable from any network on the path.
+- My node sits behind Uni via a /30 point-to-point link (10.0.6.0/30), with Uni as default gateway. My only globally routable address is the /32 loopback 128.173.10.1.
+- Reachability to public IPv4 destinations (specifically 198.82.0.1) works correctly when sourced from the loopback — confirming that Uni (and whatever lies beyond it) is correctly forwarding traffic for and back to 128.173.10.1.
+- DNS resolution is available (either via a local hosts file or upstream resolver) — acm.org resolved to 198.82.0.1.
+- The failure was external: ACM's origin runs nginx 1.18.0 in front of an application backend that was suffering resource exhaustion and returning HTTP 503s. The KP confirmed this from an independent vantage (Uni gateway) and escalated through the inter-AS path Uni → AS1 → AS2 → ACM, where ACM's own domain agent confirmed the internal application issue.
+- The `501 Unsupported method ('HEAD')` was an unrelated quirk of ACM's nginx config and not the cause of the user-visible failure.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Only one direct neighbor was reachable: **Uni**, my local KP contact.
+Only one neighbor was involved: **Uni**, my local Knowledge Plane contact.
 
-- **Inbound from Uni:** an initial hello asking for my loopback and default-route confirmation; later, two relayed KP updates from AS1 and ACM (via AS2/AS1), and a final follow-up confirming the diagnosis.
-- **Outbound to Uni:** my loopback (128.173.10.1) and confirmation that the default route via 10.0.6.2 was already healthy; a structured problem report with DNS, ping, HTTP/HTTPS, headers, body, and traceroute; a supplemental note about the nginx banner and DNS scope; and two check-in nudges during long waits.
-- **Indirect, via Uni → AS1 → AS2 → ACM:** the KP traced the WHY end-to-end. Each domain ran a local audit (firewall/NAT/proxy), reproduced the 503 from its own loopback byte-identically, and confirmed no on-path interference. ACM finally confirmed the 503 is generated by their own origin during a degraded-availability event.
+- **Outbound to Uni (1)**: Initial diagnostic report containing the user's complaint, my loopback source IP, DNS result, ICMP result, HTTP 503 result, HTTPS 503 result, the nginx server header and HEAD 501 detail, and my interpretation that this looked like an application-layer issue at acm.org rather than a network/routing problem. I asked the KP to verify and confirm.
+- **Outbound to Uni (2)**: A follow-up nudge after several idle cycles with no reply, confirming the issue was still reproducing and asking for status.
+- **Inbound from Uni (1)**: KP response — CANNOT (pending external action by ACM). The KP confirmed my findings from its own vantage, traced the issue across multiple ASes to ACM, got confirmation from ACM's domain agent that the backend application was unhealthy, and reported that ACM had been notified internally with no ETA.
+- **Inbound from Uni (2)**: KP update — same CANNOT verdict with refined detail: degraded HTTP availability due to application-layer resource exhaustion, the HEAD/501 confirmed as a benign unrelated quirk, mitigations pending ACM admin approval.
 
-Outcome: KP returned a **CANNOT** with a definitive cause (ACM origin outage). I relayed a faithful, plain-language version to the user and called `report_done`. No routes were added or removed during the experiment.
+No relays for other agents passed through me, and I did not need to use Uni as a relay to any non-adjacent agent — the KP itself handled all cross-network coordination on my behalf, which is exactly the division of labor the Knowledge Plane is designed for.

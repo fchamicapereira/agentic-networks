@@ -1,65 +1,73 @@
 # AS2 Experiment Report
 
-## Role and Initial State
-AS2 is a transit ISP and DNS recursive resolver. Initial inspection showed:
-- Loopback: 154.54.1.1/32
-- AS2-eth0 → AS1 (peer, 10.0.2.0/30, my side .2)
-- AS2-eth1 → ACM (customer, 10.0.3.0/30, my side .1)
-- Pre-existing routes: default via AS1, static /32s to 198.82.0.1 and 198.82.0.254 via ACM, and 10.0.4.0/30 via ACM.
+## 1. Actions Taken
 
-## Actions Taken
+**Initial discovery**
+- `ip addr show lo` → discovered my loopback 154.54.1.1/32.
+- `ip route show` → inventoried the pre-existing routing table. Found:
+  - `default via 10.0.2.1 dev AS2-eth0` (a default pointing at AS1)
+  - `10.0.4.0/30 via 10.0.3.2` (a transit link beyond ACM)
+  - Host routes for 198.82.0.1 and 198.82.0.254 already pointing at ACM.
+- Verified link-layer reachability with `ping -I 154.54.1.1` to 10.0.2.1, 10.0.3.2, and 198.82.0.1 — all 0% loss.
 
-### 1. Neighbor discovery & policy declaration
-Sent messages to both neighbors advertising my loopback (154.54.1.1/32) and requesting their prefixes. To AS1 I explicitly stated peer policy: settlement-free, I would not act as their transit.
+**Customer prefix install (ACM)**
+- On ACM's announcement of 198.82.0.0/24: `ip route add 198.82.0.0/24 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1`.
 
-### 2. Installed AS1's advertised prefixes
-After AS1 announced its loopback and customer routes, I installed:
-```
-ip route add 4.2.2.1/32      via 10.0.2.1 dev AS2-eth0 src 154.54.1.1   # AS1 loopback
-ip route add 128.173.0.1/32  via 10.0.2.1 dev AS2-eth0 src 154.54.1.1   # Uni
-ip route add 91.214.0.1/32   via 10.0.2.1 dev AS2-eth0 src 154.54.1.1   # EveLink
-```
-Justification: These are AS1's own loopback and customer prefixes, legitimate to install per peer relationship.
+**Default route removal**
+- `ip route del default via 10.0.2.1 dev AS2-eth0`. Removed the stale default because AS1 is a peer, not a provider — peers don't supply default routing.
 
-### 3. Policy push-back on AS1's default
-AS1 mentioned its default pointed at me. I reminded AS1 that as peers I would not carry transit for them; they should route to me only my own loopback and customer prefixes. (No action required on my side, just policy clarification.)
+**Peer prefix install (AS1)**
+- `ip route add 4.2.2.1/32 via 10.0.2.1 …`
+- `ip route add 128.173.0.1/32 via 10.0.2.1 …` (later replaced)
+- `ip route add 91.214.0.1/32 via 10.0.2.1 …`
+- On AS1's update: `ip route del 128.173.0.1/32 …` then `ip route add 128.173.0.0/16 via 10.0.2.1 …` to install the campus aggregate Uni's provider asked me to carry.
 
-### 4. Confirmed ACM's prefix ownership and aggregated
-ACM confirmed it owns 198.82.0.0/24. I installed the aggregate while keeping the pre-existing more-specific /32s (no conflict — they all point the same way):
-```
-ip route add 198.82.0.0/24 via 10.0.3.2 dev AS2-eth1 src 154.54.1.1
-```
+**Reachability verification from loopback**
+- Pinged 4.2.2.1, 91.214.0.1, 128.173.0.1, 198.82.0.1, 198.82.0.254 all sourced from 154.54.1.1 — all 0% loss.
 
-### 5. Advertised customer prefix to AS1
-Per the valley-free model — customer routes get exported to peers — I announced 198.82.0.0/24 to AS1 (a single, well-justified prefix). AS1 confirmed installation.
+**Local audit during the KP investigation**
+- `ip route get 128.173.0.1` to confirm clean route resolution.
+- `iptables -L -v -n` to rule out a local filter (all chains empty, ACCEPT policy).
 
-### 6. End-to-end verification
-Pinged from loopback (154.54.1.1) to every announced endpoint:
-- 198.82.0.1 (ACM web): 34ms, 0% loss
-- 4.2.2.1 (AS1): 40ms, 0% loss
-- 128.173.0.1 (Uni): 60ms, 0% loss
-- 91.214.0.1 (EveLink): 60ms, 0% loss
+## 2. Justification for Each Decision
 
-### 7. Uni aggregate update
-AS1 later announced Uni's aggregate 128.173.0.0/16 (replacing the /32). The volume was a single prefix replacing a more-specific — not anomalous, and a /16 is plausible for a university. I installed it and removed the now-redundant /32:
-```
-ip route add 128.173.0.0/16 via 10.0.2.1 dev AS2-eth0 src 154.54.1.1
-ip route del 128.173.0.1/32
-```
-Re-verified: ping to 128.173.0.1 still succeeded (60ms, 0% loss).
+- **Removed default via AS1.** Pre-seeded default route was inconsistent with the peering relationship. Mutual defaults between peers cause routing loops; peers should only carry each other's specific customer + loopback prefixes. AS1 confirmed and removed their mirror default in the same exchange.
 
-## Network Topology Discovered
-- AS1 is a peer with loopback 4.2.2.1/32 and two customers: Uni (128.173.0.0/16, host .0.1) and EveLink (91.214.0.1, prefix size unknown).
-- ACM is my single customer owning 198.82.0.0/24, hosting the ACM Digital Library web server at 198.82.0.1 and its border router at 198.82.0.254.
-- The path AS2→AS1→{Uni, EveLink} takes ~60ms (peer-link + AS1's internal latency), while AS2→AS1 itself is ~40ms and AS2→ACM→host is ~34ms.
+- **Installed only specific prefixes from AS1.** Per peering policy I should not give AS1 a transit role. Specific routes for AS1's loopback and its customers (Uni, EveLink) are exactly what I should accept; nothing more.
 
-## Coordination Summary
-- **With AS1 (peer):** Exchanged loopbacks and customer prefix announcements. Installed three of their advertised /32s, later upgraded one to a /16 aggregate. Pushed back on their using me as default. Advertised ACM's /24 to them.
-- **With ACM (customer):** Confirmed ownership of 198.82.0.0/24, installed the aggregate, and advertised it upstream. Advised them on how to source-test their default for reaching my loopback.
+- **Advertised only my loopback and my customer's /24 to AS1.** Customer routes (ACM) propagate to peers; peer-learned routes do not propagate to other peers. This matches the standard "peer = no transit" stance and what AS1 also stated.
 
-## Policy Decisions and Rationale
-1. Peer routes (AS1 loopback, AS1's customers) installed but **not** re-advertised — would violate peer-only export policy.
-2. Customer routes (ACM /24) **are** re-advertised to peer AS1 — standard valley-free policy; gives my customer global reachability.
-3. Default route via AS1 kept for my own Internet egress (acceptable since I'm originating, not transiting, that traffic for AS1).
-4. No firewall/ACL changes attempted — none were required, and any such change would require admin approval per policy.
-5. The /16 from AS1 was scrutinized for anomalousness; one prefix replacing a /32 with a plausibly-sized university aggregate is normal, not a hijack pattern.
+- **Switched 128.173.0.1/32 to 128.173.0.0/16.** AS1 explicitly requested the aggregate and it's more correct (Uni is a /16 campus); aggregation reduces table size and matches the customer's actual prefix ownership.
+
+- **Sourced all diagnostics from 154.54.1.1.** Link-local /30 addresses aren't routed network-wide. Sourcing from the loopback produces meaningful end-to-end evidence.
+
+- **Local audit before escalating.** When ACM filed a WHY about Uni unreachability, I first confirmed (a) my route to Uni was healthy and (b) my forward-path ping to 128.173.0.1 succeeded with 0% loss. Only then did I form the hypothesis that the issue was beyond my domain and relay a WHY toward Uni.
+
+- **Did not modify iptables anywhere.** Uni's reply showed the root cause was an iptables DROP rule on their gateway. Even on my own node I would treat firewall changes as requiring admin approval — and Uni's rule is in another administrative domain entirely. Correct response: report CANNOT and surface the finding to ACM.
+
+## 3. Discoveries About the Network
+
+- **My role and identity.** I am AS2 with loopback 154.54.1.1/32, transit provider to ACM (10.0.3.0/30) and peer of AS1 (10.0.2.0/30).
+- **Topology around me.** ACM hosts 198.82.0.0/24 (web at 198.82.0.1, loopback 198.82.0.254). AS1 has loopback 4.2.2.1 and two downstream customers: Uni (128.173.0.0/16, host 128.173.0.1) and EveLink (91.214.0.1).
+- **Path performance.** RTT from my loopback: to AS1 link ~40 ms, to ACM link ~30 ms, to ACM service ~34 ms, to EveLink and Uni ~60 ms (one extra AS hop).
+- **A latent default-route misconfiguration** existed at both AS2 and AS1 (each defaulting to the other). Identified and corrected on both sides through the exchange.
+- **A cross-domain policy fault** at Uni: an iptables DROP rule for 198.82.0.0/24 in FORWARD and OUTPUT chains (active counters: 49 pkts FORWARD, 9 pkts OUTPUT) blackholing ACM-bound traffic at Uni's egress. Routing was fine end-to-end; the failure was an enforcement decision, not a connectivity decision. This is the kind of fault routing tools alone cannot diagnose — it required the KP query reaching the node with the actual vantage point.
+- **An asymmetric reachability oddity.** Uni reported they couldn't ping 154.54.1.1 from 128.173.0.1, while my pings the other way succeeded — implying their OUTPUT chain has additional rules unrelated to 198.82.0.0/24. Logged for Uni admins; not impacting ACM service.
+
+## 4. Coordination With Other Agents
+
+**With ACM (customer, directly connected):**
+- Received ACM's announcement of 198.82.0.0/24; installed it and confirmed I would carry it to AS1.
+- Sent ACM the list of prefixes reachable through me (AS1 loopback, Uni, EveLink, my own loopback) and confirmed they should default to 10.0.3.1.
+- On ACM's KP WHY about Uni unreachability: returned a structured diagnosis with hypothesis, then later the final CANNOT (pending Uni admin action) with full evidence chain.
+
+**With AS1 (peer, directly connected):**
+- Confirmed peering. Exchanged prefix lists: I gave them 154.54.1.1/32 and 198.82.0.0/24; they gave me 4.2.2.1/32, 91.214.0.1/32, and (after correction) 128.173.0.0/16.
+- Flagged the mutual-default misconfiguration; both sides removed it.
+- Asked AS1 to **relay a KP WHY to Uni** on ACM's behalf (Uni is not directly adjacent to me). Treated AS1 as an opaque relay — they forwarded Uni's verbatim reply back.
+
+**With Uni (indirect, via AS1 relay):**
+- Posed a WHY with my supporting evidence (forward path verified healthy, asymmetry between Uni and EveLink suggests return-path issue).
+- Received Uni's reply identifying the iptables DROP rule as root cause and a CANNOT pending their admins. Passed this verbatim diagnosis to ACM.
+
+Throughout, I followed the KP discipline: investigate locally first, state hypotheses as hypotheses until confirmed, and refuse to apply changes (especially security-policy changes) that lie outside my authority.

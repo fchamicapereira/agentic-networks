@@ -1,68 +1,61 @@
-# AS A Tier-1 Transit Experiment Report
+# AS A Experiment Report
 
 ## 1. Actions Taken
 
 **Discovery phase:**
-- Checked my loopback (`ip addr show lo`): 12.34.0.1/32.
-- Inspected existing routes (`ip route show`): only the five directly-connected /30 link subnets to neighbors B, C, D, F, G.
-- Sent introductory messages to all five neighbors with my loopback, requesting their prefix lists.
+- Ran `ip addr show lo` and `ip route show` to discover my loopback (12.34.0.1/32) and starting routing state (only directly connected /30 link subnets).
+- Identified physical neighbors from interface configuration: B (eth0), C (eth1), D (eth2), F (eth3), G (eth4).
 
-**Route installation:**
-Installed /32 host routes for every learned loopback prefix via the appropriate next-hop:
-```
-ip route add 24.96.0.1/32   via 10.0.1.2    # B (peer)
-ip route add 37.120.0.1/32  via 10.0.2.2    # C (peer)
-ip route add 46.4.0.1/32    via 10.0.4.2    # D (customer)
-ip route add 77.88.0.1/32   via 10.1.1.1    # F (customer)
-ip route add 88.150.0.1/32  via 10.1.2.1    # G (customer)
-ip route add 95.211.0.1/32  via 10.0.1.2    # H via B
-ip route add 104.28.0.1/32  via 10.0.1.2    # I via B
-ip route add 151.101.0.1/32 via 10.0.4.2    # L via D
-ip route add 178.62.0.1/32  via 10.0.4.2    # M via D
-ip route add 62.210.0.1/32  via 10.0.2.2    # E via C
-ip route add 129.250.0.1/32 via 10.0.2.2    # J via C
-ip route add 141.193.0.1/32 via 10.0.2.2    # K via C
-ip route add 193.34.0.1/32  via 10.0.2.2    # N via C-E
-ip route add 202.12.0.1/32  via 10.0.2.2    # O via C-E
-```
+**Neighbor introduction:**
+- Sent introductory messages to all five neighbors, identifying myself and the relationship type (peer for B/C, transit provider for D/F/G), and asked for their loopback prefixes and customer prefixes.
 
-**Advertisements sent:**
-- To peers B and C: only my customer cone (A, D, L, M, F, G) — six /32 prefixes with AS-paths.
-- To customers D, F, G: the full table (my loopback + both peer cones + the other customers' prefixes).
-- Never advertised the 10.0.x.x/30 or 10.1.x.x/30 link subnets to anyone.
+**Route installation (via `ip route add`):**
+- Neighbor loopbacks installed via their respective point-to-point peer IPs:
+  - `24.96.0.1/32 via 10.0.1.2` (B)
+  - `37.120.0.1/32 via 10.0.2.2` (C)
+  - `46.4.0.1/32 via 10.0.4.2` (D)
+  - `77.88.0.1/32 via 10.1.1.1` (F)
+  - `88.150.0.1/32 via 10.1.2.1` (G)
+- Customer-cone prefixes installed via the appropriate next hop:
+  - Via D: `151.101.0.1/32`, `178.62.0.1/32`
+  - Via B (peer): `95.211.0.1/32`, `104.28.0.1/32`
+  - Via C (peer): `62.210.0.1/32`, `129.250.0.1/32`, `141.193.0.1/32`, later `193.34.0.1/32`, `202.12.0.1/32`
 
-**Verification:** Pinged every learned loopback from 12.34.0.1 — all 11 destinations reachable end-to-end.
+**Advertisements out:**
+- To peers B and C: only my own loopback plus my customer-cone prefixes (D, F, G, L, M). No peer-learned routes.
+- To customers D, F, G: full table — my prefix, peers, peer-customer cones, and other customers.
 
-**Incident handling:**
-- B reported its customer H couldn't reach 12.34.0.1. I verified my route and pinged 95.211.0.1 successfully (3/3 packets), and replied that the issue was downstream of B.
-- B then announced D's prefix (46.4.0.1) and D's customers (151.101.0.1, 178.62.0.1) as part of its cone. I treated this as suspicious (overlapping my customer cone) and queried D directly before installing. D confirmed legitimate multi-homing. I kept the direct-customer best path (customer-preferred over peer per policy) and did not change routes.
+**Verification:**
+- Ran `ping -I 12.34.0.1` to all 14 known remote prefixes — all reachable.
 
-## 2. Justification
+**Completion:**
+- Idled once routing was stable, then called `report_done`.
 
-- **Loopback-as-source pinging** complied with the rule that link subnets are not advertised; replies to interface IPs may blackhole.
-- **Customer-cone-only to peers** prevents providing free transit between B and C, which would violate the "no transit for peers" rule and lose revenue opportunity.
-- **Full table to customers** maximizes revenue — customers pay for global reachability, so they get everything I know.
-- **Customer > peer best-path preference** when B re-advertised D's prefixes: keeping the direct customer path supports revenue (D pays me) and avoids depending on a peer for traffic I can deliver myself.
-- **Verifying B's surprising announcement with D** before acting: a peer suddenly claiming my customer's prefixes could be a hijack/leak. I confirmed legitimacy out-of-band before deciding (decision: no change needed).
-- **Not disclosing relationships** in messages: I told B "I have a more-preferred path" without revealing it was a customer route or describing my policy.
+## 2. Justifications
+
+- **Source from loopback for tests:** Link /30s are not advertised globally, so return packets to a link address would be dropped. Sourcing from 12.34.0.1 guaranteed return paths.
+- **Customer > Peer route preference:** When B advertised `46.4.0.1`, `151.101.0.1`, `178.62.0.1` (D's prefixes) as customer routes of theirs, I kept my direct route via D rather than switching to B. Customer paths earn revenue; peer paths are settlement-free. Policy, not reachability, dictated this.
+- **No transit between peers:** I advertised only my customer cone + my own prefix to B and C — never peer-learned routes. Transiting between peers would give them free service.
+- **Full table to customers:** D, F, G pay for transit, so they should receive everything reachable.
+- **No advertisement of /30 link subnets:** Per instructions, link addresses are infrastructure and not globally routable.
+- **Did not install a default route from any neighbor:** As a tier-1, I have no upstream. Every destination must be explicitly known.
 
 ## 3. Network Discoveries
 
-- I am directly connected to 5 ASes: peers B, C; customers D, F, G.
-- Discovered AS topology (inferred, two hops out):
-  - B's cone: H (95.211.0.1), I (104.28.0.1), and D multi-homed under B (with L, M).
-  - C's cone: E (62.210.0.1) with N (193.34.0.1) and O (202.12.0.1) further downstream; J (129.250.0.1); K (141.193.0.1).
-  - D's cone: customers L (151.101.0.1), M (178.62.0.1).
-  - F and G are stub customers with no downstream cone.
-- D is multi-homed to me and to B — a legitimate redundancy configuration.
-- All loopbacks are /32 host prefixes; the network appears to follow a clean Tier-1/transit/customer hierarchy.
+- I sit at the top of the hierarchy with five direct neighbors: peers B, C and customers D, F, G.
+- F and G are stub ASes (only their loopback, no downstream).
+- D has at least two customers (L: `151.101.0.1`, M: `178.62.0.1`).
+- B and C each have their own customer cones:
+  - B's cone: `95.211.0.1`, `104.28.0.1`, plus shared customers with D (L, M) — suggesting L and M are multi-homed.
+  - C's cone: `62.210.0.1` (E), `129.250.0.1` (J), `141.193.0.1` (K), and E's customers `193.34.0.1`, `202.12.0.1`.
+- Total reachable global prefixes from A: 14, all verified.
+- An early ping failure to D's prefixes resolved by itself shortly after — likely a propagation/convergence transient as routes were being installed on D's side.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-- **Initial handshake** with each of B, C, D, F, G: exchanged loopback addresses, next-hops, and prefix lists.
-- **B**: reciprocal peer cone exchange; later handled H's reachability complaint (confirmed my side was healthy) and the duplicate D-cone announcement (politely declined to switch best path).
-- **C**: reciprocal peer cone exchange; installed all six C-cone prefixes.
-- **D**: customer exchange with full table sent down; later confirmed multi-homing relationship out-of-band when B advertised overlapping prefixes.
-- **F, G**: stub customers — sent them my full table; they have nothing downstream.
-
-End state: full reachability verified, policy-compliant advertisements in place, no transit leaked between peers, and one suspicious announcement investigated and resolved.
+- **B (peer):** Exchanged loopback + customer cone announcements. B explicitly stated "I will not transit peer-learned routes," matching my own policy.
+- **C (peer):** Same — exchanged cones twice as C learned more customer-of-customer prefixes (`193.34.0.1`, `202.12.0.1`). I propagated these onward to customers only.
+- **D (customer):** Received D's loopback plus customer prefixes (L, M). Sent full table back. D confirmed routes installed.
+- **F (customer, stub):** F sent only its loopback and confirmed it would use me as default. F also reported a transient reachability problem toward D, which I noted but did not act on — F's report did not change my policy-driven route choice, and the problem resolved.
+- **G (customer, stub):** Same arrangement as F — single loopback, default via me.
+- All exchanges followed BGP-like discipline: customer routes preferred, peer routes never transited to other peers, no leakage of link subnets, no disclosure of internal policies/contracts.

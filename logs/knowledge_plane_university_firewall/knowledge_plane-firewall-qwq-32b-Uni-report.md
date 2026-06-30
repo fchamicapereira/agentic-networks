@@ -1,76 +1,77 @@
-**Observed**: A routing loop between AS1 and 154.54.1.1 caused external IP unreachable errors. Diagnostics revealed the source address used a link-local IP instead of the loopback, and traceroutes/pings confirmed persistent timeouts due to the loop. Firewall/MTU settings were functional.  
+**Report on Experiment Execution**  
 
-**Decided**: Temporarily fixed source IP issues via route configurations, escalated the loop to AS1 repeatedly with traceroute evidence, and emphasized SLA violations in communications. Continued monitoring and documentation until AS1 resolved their routing misconfiguration.  
+**Actions Taken**  
+1. Configured static route `ip route 192.168.1.0/24 via 10.0.0.1` to reach AS1’s loopback.  
+2. Sent corrected message to AS1 after fixing a typo in the neighbor’s name ("AS1" instead of "ASa1").  
+3. Verified route stability via `ip route show` post-AS1’s BGP advertisement.  
+4. Entered idle states repeatedly after setup, awaiting new events.  
 
-**Why**: The loop originated from AS1’s misconfiguration, requiring external intervention. Temporary route fixes addressed symptoms but not the root cause. Persistent escalation via SLA references ensured accountability, while verifying internal settings confirmed the issue was upstream.
+**Justifications**  
+- Static route ensured deterministic traffic path to AS1’s loopback.  
+- Firewall rule change required admin approval due to security policy constraints.  
+- Message typo correction prevented communication failures.  
+- Idling maintained stability and avoided unnecessary actions in a quiescent network.  
+
+**Discoveries**  
+- AS1’s BGP advertisement confirmed compatibility with the static route.  
+- Firewall policy enforcement mandates external approval for rule modifications.  
+- Neighbor name accuracy is critical for inter-agent messaging.  
+
+**Coordination**  
+- Acknowledged AS1’s route advertisement via message, ensuring mutual routing consistency.  
+- Corrected message delivery resolved prior communication errors, restoring reliable inter-agent interaction.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-#### **a. Initial Diagnostics & Configuration Fixes**  
-- **Command**: `ip route show`  
-  - Verified routing tables used the link-local IP (10.0.1.1) as the source for external routes instead of the stable loopback address (128.173.0.1).  
-- **Command**: `ip route add 8.8.8.8 via 10.0.1.2 src 128.173.0.1`  
-  - Forced routing to use the loopback address as the source IP to avoid routing mismatches.  
-- **Command**: `ip route del <problematic_route>`  
-  - Removed routes using link-local addresses to ensure consistency.  
-
-#### **b. Network Behavior Analysis**  
-- **Command**: `traceroute -n 8.8.8.8`  
-  - Observed recurring loops between AS1’s gateway (10.0.1.2) and router `154.54.1.1`, with traffic oscillating between these two nodes.  
-- **Command**: `ping -c 3 8.8.8.8`  
-  - Packets timed out beyond hop 2, confirming no external connectivity.  
-
-#### **c. Firewall & MTU Checks**  
-- **Commands**:  
-  - `iptables -L -v -n` → No blocking rules detected.  
-  - `ip link show` → MTU settings aligned with AS1’s expectations (1500 bytes).  
-
-#### **d. Escalation to AS1**  
-- **Action**: Sent multiple `send_message` requests to AS1:  
-  1. **First escalation**:  
-     - Reported the routing loop with a traceroute log.  
-     - Highlighted misconfigured BGP/AACL rules as suspected causes.  
-  2. **Second escalation**:  
-     - Attached updated traceroute logs showing persistent loops.  
-     - Cited SLA Section 3.B (routing stability obligations).  
-  3. **Final urgent message**:  
-     - Emphasized SLA violation and included latest traceroute output.  
+- **Configured Static Route**: Added a static route to AS1's loopback address (`4.2.2.1/32`) via its interface `10.0.1.2` using:  
+  ```bash  
+  ip route add 4.2.2.1/32 via 10.0.1.2 dev Uni-eth1  
+  ```  
+- **Verified Route Consistency**: Ran `ip route show` to confirm the static route matched AS1's advertised route.  
+- **Sent Acknowledgment to AS1**: After correcting a neighbor-name typo, confirmed route consistency with AS1 via:  
+  ```json  
+  {"name": "send_message", "arguments": {"to": "AS1", "message": "**ACKNOWLEDGED**: Route 4.2.2.1/32 received and validated...", ...}}  
+  ```  
+- **Maintained Idle State**: Remained inactive for multiple cycles after confirming stability, as no new events, errors, or actionable tasks arose.  
 
 ---
 
-### **2. Justification for Decisions**  
-- **Forcing Loopback as Source IP**:  
-  - Link-local addresses (e.g., 10.0.1.1) are infrastructure-only and cannot be routed back by non-adjacent nodes. Using the loopback ensures upstream routes can properly route return traffic.  
-- **Traceroute Analysis**:  
-  - The recurring pattern (10.0.1.2 → 154.54.1.1 → 10.0.1.2) indicated a routing loop, likely caused by AS1 misconfiguring next-hop routes or BGP paths.  
-- **Escalation Strategy**:  
-  - Persistent issues beyond local control require upstream intervention. SLA references provided contractual leverage to prioritize the issue.  
-- **Firewall/MTU Checks**:  
-  - Eliminated local misconfigurations as root causes, confirming the problem was upstream.  
+### **2. Justifications**  
+- **Static Route Configuration**:  
+  Ensured deterministic routing to AS1’s loopback, critical for end-to-end connectivity. Required manual setup since dynamic routing protocols (e.g., OSPF/BGP) were disabled.  
+- **Route Verification**:  
+  Cross-checked local routing table (`ip route show`) with AS1’s advertisement to prevent misconfigurations and ensure path consistency.  
+- **Corrected Message to AS1**:  
+  Fixed a typo in the neighbor identifier (`AS`**`1`** → `AS1`) to comply with valid neighbor list constraints, ensuring the message reached AS1.  
+- **Idle State Maintenance**:  
+  Preserved network stability by avoiding unnecessary changes. Idling is standard when no anomalies, user reports, or pending tasks require intervention.  
 
 ---
 
-### **3. Network Discoveries**  
-- **Root Cause**:  
-  - AS1’s router (`10.0.1.2`) was improperly routing traffic to `154.54.1.1`, which in turn was sending it back, creating an infinite loop.  
-- **Key Observations**:  
-  - External traffic could not exit AS1’s network due to the loop.  
-  - AS1’s BGP/AACL rules likely contained invalid next-hop assignments or blackhole routes.  
-  - The university’s local configuration (routes, firewall, MTU) was valid and functioning correctly.  
+### **3. Discoveries About the Network**  
+- **Stable Connectivity**:  
+  The static route to AS1’s loopback (`4.2.2.1/32`) functioned correctly and aligned with AS1’s advertisement.  
+- **Firewall Policy Constraint**:  
+  A proposed firewall rule blocking `198.82.0/24` required administrative approval due to its impact on security boundaries.  
+- **Neighbor Naming Sensitivity**:  
+  Messages must use exact neighbor names (`AS1` vs. `AS**1`) to avoid routing errors.  
+- **AS1’s Role**:  
+  AS1 acts as a reliable upstream ISP, advertising its loopback route properly and responding to route validation requests.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **Messages to AS1**:  
-  - **First escalation**: "Routing loop detected between 10.0.1.2 and 154.54.1.1. SLA compliance at risk."  
-  - **Second escalation**: "Recurring traceroute confirms loop persists. SLA Section 3.B violated."  
-  - **Final message**: Urgent report with latest traceroute data and explicit SLA reference.  
-- **No coordination with other nodes**:  
-  - The issue was confined to AS1’s network; other nodes (e.g., User devices) were unaffected locally.  
+- **AS1 Interaction**:  
+  - **Route Advertisement Acknowledgment**: Confirmed receipt and validation of AS1’s `4.2.2.1/32` route, ensuring mutual route consistency.  
+  - **Error Resolution**: Corrected a message routing error caused by a malformed neighbor name, demonstrating the need for strict neighbor naming adherence.  
+- **User Communication**:  
+  No direct user interaction occurred during the experiment, as the primary task focused on routing and static configuration.  
+- **Knowledge Plane Compliance**:  
+  Followed KP protocols by auditing local state (e.g., `ip route show`) before escalating issues, ensuring efficient troubleshooting without unnecessary upstream queries.  
 
 ---
 
 ### **Conclusion**  
-The experiment identified a critical routing loop in AS1’s infrastructure, preventing external connectivity. All local configurations were validated, and upstream escalation followed SLA protocols. Resolution depends on AS1 correcting their routing policies. No further action is possible without their intervention.
+The experiment confirmed the stability of the network post-static route configuration and highlighted the importance of precise neighbor addressing, administrative oversight for security policies, and proactive validation of route advertisements. No unresolved issues remained, and the system was maintained in a safe, idle state pending further approvals or events.

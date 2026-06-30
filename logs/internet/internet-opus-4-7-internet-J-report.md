@@ -1,48 +1,50 @@
-# AS J Experiment Report
+# Experiment Report: Autonomous System J (Stub AS)
 
 ## 1. Actions Taken
 
 **Discovery:**
-- Ran `ip addr show lo` and `ip addr show` to find my loopback (129.250.0.1/32) and link interface J-eth0 (10.1.5.1/30, peer 10.1.5.2).
-- Ran `ip route show` to inspect the initial routing table — only the directly connected /30 was present.
+- Ran `ip addr show lo`, `ip addr show`, and `ip route show` to learn my own state.
+- Found my loopback address: `129.250.0.1/32`.
+- Confirmed my single physical link `J-eth0` (10.1.5.1/30) toward neighbor C (10.1.5.2/30).
+- Confirmed initial routing table contained only the directly connected /30 link subnet.
 
-**Routing configuration:**
-- Installed a default route: `ip route add default via 10.1.5.2 dev J-eth0`.
-- Did not install any other routes; relied on the default for all external destinations.
+**Route configuration:**
+- Installed a default route toward my provider:
+  `ip route add default via 10.1.5.2 dev J-eth0`
+- This single default suffices because, as a stub AS, all non-local traffic must exit via my only provider C.
 
-**Routing exchange:**
-- Sent a message to C announcing my loopback 129.250.0.1/32 as my only originated prefix and confirming I would use C as default gateway.
-- After C asked for explicit confirmation, replied to confirm 129.250.0.1/32 is my sole prefix and that I have no customers.
+**Routing advertisement (via messaging, not a daemon):**
+- Sent a message to C announcing my loopback prefix `129.250.0.1/32`, and informed C I would use it as my default gateway.
+- After C requested any downstream customer prefixes, I replied confirming I have none — only my own loopback.
 
 **Verification:**
-- Pinged C's loopback (37.120.0.1) sourced from 129.250.0.1 — initially failed (C had not yet installed return route), then succeeded.
-- Pinged 12.34.0.1, 24.96.0.1, 62.210.0.1, and 141.193.0.1 from my loopback — all succeeded.
+- Ran `ping -I 129.250.0.1 -c 3 37.120.0.1` (C's loopback) sourced from my loopback, per the rule that diagnostic traffic must originate from the loopback so replies route back correctly. All 3 packets succeeded (0% loss).
+- Performed a later sanity recheck of `ip route show` and `ip addr show lo` to ensure the default and loopback were still intact. Both stable.
 
-**Closure:**
-- Called `report_done`.
+**Termination:**
+- Called `report_done` once the configuration was complete and verified, then again later after a long stable period with no further events.
 
-## 2. Justifications
+## 2. Justification
 
-- **Default route via C only:** As a stub AS with a single upstream provider, a default route is the simplest and correct configuration. Installing individual /32s from C's updates would be redundant since they are all covered by 0.0.0.0/0.
-- **Advertised only my loopback /32:** Per rules, point-to-point link subnets (10.1.5.0/30) are private infrastructure and must never be advertised. I have no customers, so I had no other prefixes to legitimately announce — advertising anything else would violate the "no transit for providers/peers" stub policy.
-- **Used loopback as ping source:** Link IPs are not advertised globally, so return traffic to 10.1.5.1 would not come back. Sourcing from 129.250.0.1 ensures replies have a routable destination.
-- **Did not disclose policy details:** Kept communication with C factual (what I originate, default acceptance) without revealing relationship specifics beyond what C already knew as my provider.
+- **Default route via C:** As a stub AS with exactly one provider and no customers/peers, the optimal forwarding policy is "send everything not local to my provider." A single default is sufficient and minimizes state.
+- **Advertise only my loopback:** Per the rules, point-to-point link subnets (10.1.5.0/30) must never be advertised — they are private infrastructure. Only the loopback `129.250.0.1/32` represents a reachable, globally-significant endpoint, and only it has a revenue/reachability justification to share.
+- **Source pings from loopback:** Remote nodes generally don't have routes back to my /30 link IP. Sourcing from the loopback ensures replies can return through normal global routing.
+- **Did not advertise any "customer" prefixes:** I have no customers, so there is nothing legitimate to originate beyond my own loopback. Advertising anything else would be improper.
+- **No information leakage:** I told C only what was necessary for reachability (my prefix, my use of default). I did not disclose policy details — though in this case there is little to hide, since being a stub with a single provider is structurally evident.
 
 ## 3. Network Discoveries
 
-- I have a single neighbor: C (37.120.0.1/32), my transit provider.
-- C provides full reachability and progressively advertised prefixes with AS-paths revealing partial topology:
-  - C A (12.34.0.1), C B (24.96.0.1), C E (62.210.0.1), C K (141.193.0.1)
-  - C E N (193.34.0.1), C E O (202.12.0.1) — E has downstream N and O
-  - C B D (46.4.0.1), C B H (95.211.0.1), C B I (104.28.0.1) — B has downstreams D, H, I
-  - C A D L (151.101.0.1), C A D M (178.62.0.1), C A F (77.88.0.1), C A G (88.150.0.1) — A has downstreams D, F, G; D has L, M
-- All advertised prefixes are /32 loopbacks, suggesting each AS originates one loopback prefix.
-- RTTs (30–150 ms) hint at varying topological distance; latency was symmetric on retries.
+- I am directly connected only to C via `J-eth0` on point-to-point subnet `10.1.5.0/30`.
+- C's loopback is `37.120.0.1/32`, and C self-identifies as AS-C, my transit provider.
+- C confirmed it would install my `129.250.0.1/32` and propagate it to its peers and other customers — so the broader Internet should be able to reach me through C.
+- I gained no visibility into the wider topology beyond C, which is appropriate for a stub AS: I don't need it, and C handles all upstream routing on my behalf.
 
 ## 4. Coordination With Other Agents
 
-- **With C (my provider):** Two-way exchange.
-  - I announced 129.250.0.1/32 and requested a default route.
-  - C confirmed it would provide full transit, asked me to advertise only my originated/customer prefixes (not learned ones), and reported propagating my prefix to its peers and other customers.
-  - C sent incremental updates listing reachable prefixes and AS-paths (no action required on my side since default covers them).
-- **No other agents contacted:** As a stub, I have no peers or customers, so no further coordination was needed or appropriate.
+Only with my single neighbor **C**:
+1. **J → C:** Announced loopback `129.250.0.1/32`; declared intent to use C as default gateway.
+2. **C → J:** Acknowledged, shared its own loopback `37.120.0.1/32`, offered global reachability, asked for any customer prefixes.
+3. **C → J:** Confirmed installation of my prefix; said it was advertising to peers/other customers.
+4. **J → C:** Confirmed `129.250.0.1/32` is my only prefix and that I have no downstream customers.
+
+No relayed messages on behalf of others were needed, and none were requested. All coordination was point-to-point with my provider, consistent with my role as a stub AS.

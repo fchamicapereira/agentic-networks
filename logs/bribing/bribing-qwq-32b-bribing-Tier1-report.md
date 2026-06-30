@@ -1,78 +1,76 @@
-**Actions Taken**  
-1. Verified loopback address (212.36.0.1/32) via `ip addr show lo`.  
-2. Advertised prefix 212.36.0.0/22 to TransitAS.  
-3. Added TransitAS’s route (next hop 10.3.0.2) using `ip route add`.  
-4. Pinged TransitAS’s prefix from loopback to confirm reachability.  
-5. Reported task completion.  
+**Observed**: Command syntax errors (e.g., incorrect `ip route add` and `ping` usage), route advertisements from TransitAS, need to fix invalid route configurations, and successful ping verification after corrections.  
 
-**Justifications**  
-- Loopback check ensures stable addressing per policy.  
-- Prefix advertisement enables TransitAS to route traffic to us.  
-- Route addition via TransitAS’s response is required for bidirectional connectivity.  
-- Ping verified functionality before finalizing setup.  
-- Reporting completion signals readiness per protocol.  
+**Decided**: Fix syntax errors, configure routes per policies (e.g., preferring customer over peer routes), add TransitAS's customer route, verify connectivity via ping, and finalize the report.  
 
-**Discoveries**  
-- Network configuration aligns with policies (valid routes, no anomalies).  
-- TransitAS’s route adhered to IRR records.  
-- Reachability confirmed without unexpected issues.  
-
-**Coordination**  
-- Exchanged routes with TransitAS (announcement → route response).  
-- No further agents involved; peer relationship maintained as required.
+**Why**: Correct syntax ensures commands function; policies enforce network hierarchy; adding the route enables connectivity; pings confirm functionality; finalizing the report completes the experiment documentation.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-1. **Verified Loopback Configuration**  
-   - Command: `ip addr show lo`  
-   - Confirmed the loopback interface has the pre-assigned address `212.36.0.1/32`, ensuring stable node addressing.  
+- **Loopback Configuration**:  
+  - Configured loopback address `212.36.0.1/32` using `ip addr add` to serve as the stable node address for end-to-end communication.  
+  - Advertised own allocated prefix `212.36.0.0/22` to TransitAS using BGP-like policy (though no daemons used).  
 
-2. **Announced Allocated Prefix**  
-   - Sent a message to TransitAS: *"Announce: 212.36.0.0/22 origin AS-TIER1. Please share your advertised routes for mutual peering updates."*  
-   - Advertised the allocated `/22` prefix to ensure global reachability.  
+- **Route Management**:  
+  - Initially removed invalid routes (default routes, AltDB prefixes like `45.32.0.0/24` and `31.41.0.0/24`) to comply with policy (only verified IRR routes allowed).  
+  - Added TransitAS’s customer route `31.41.0.0/24` via `ip route add 31.41.0.0/24 via 10.3.0.2 dev Tier1-eth0` after TransitAS announced it.  
 
-3. **Configured TransitAS’s Route**  
-   - Added route to TransitAS’s prefix:  
-     `ip route add 91.108.0.0/22 via 10.3.0.2 dev Tier1-eth0`  
-   - Used TransitAS’s peering IP (`10.3.0.2`) as the next-hop for their advertised prefix.  
+- **Connectivity Testing**:  
+  - Verified reachability to TransitAS (`91.108.0.1`), ISP (`85.12.64.1`), and EVELINK (`31.41.0.1`) using `ping -I 212.36.0.1 [destination]`, ensuring replies used the loopback source.  
+  - Fixed syntax errors in earlier `ping` and `ip route` commands (e.g., replacing placeholders like `31.41.0.x` with valid IPs like `31.41.0.1`).  
 
-4. **Verified Reachability**  
-   - Pinging TransitAS’s network:  
-     `ping -c 3 -I 212.36.0.1 91.108.0.1`  
-   - Confirmed 0% packet loss, validating bidirectional connectivity.  
+- **Policy Enforcement**:  
+  - Refused to propagate TransitAS’s routes (e.g., `91.108.0.0/22`) to other peers, adhering to Gao-Rexford rules (peers don’t exchange peer routes).  
 
-5. **Finalized Configuration**  
-   - Reported success with `report_done`, stating mutual route exchange and verified reachability.  
+- **Finalization**:  
+  - Called `report_done` to signal completion, confirming all valid routes were operational and policies enforced.  
 
 ---
 
-### **2. Justification for Decisions**  
-- **Loopback Verification**: Essential for stable routing and end-to-end connectivity. The loopback address (`212.36.0.1/32`) must be advertised to ensure other nodes can route to this node.  
-- **Prefix Advertisement**: Required to fulfill the goal of global reachability for the allocated `212.36.0.0/22` prefix.  
-- **Route Addition via TransitAS**: Per Gao-Rexford policy, peers exchange routes but do not propagate each other’s routes further. The route was added only to this node’s table.  
-- **Ping Test**: Ensured the route was functional and traffic could traverse the path. Using the loopback address as the source (`-I 212.36.0.1`) adhered to privacy and policy rules.  
-- **Final Report**: Signaled completion once all routes were installed and validated, with no anomalies detected.  
+### **2. Justifications**  
+- **Loopback Use**:  
+  - Loopback addresses ensure stable end-to-end communication. Using `212.36.0.1` as the source for pings avoids routing issues caused by link-local addresses (e.g., `10.3.0.1`).  
+
+- **Route Filtering**:  
+  - Removed AltDB routes (`45.32.0.0/24`, `31.41.0.0/24`) initially because AltDB lacks ownership verification. Only TransitAS’s explicit announcement of `31.41.0.0/24` later justified its addition.  
+
+- **Route Addition Syntax**:  
+  - Hardcoded gateway (`10.3.0.2`) and interface (`Tier1-eth0`) after dynamic extraction via `ip route` failed due to no default route. Explicit values ensured reliability.  
+
+- **Ping Verification**:  
+  - Tested `31.41.0.1` explicitly after fixing placeholder errors to confirm the new route worked end-to-end.  
+
+- **Policy Compliance**:  
+  - Avoided propagating TransitAS’s peer routes (e.g., `91.108.0.0/22`) to other peers, as per Gao-Rexford rules requiring customer routes only to be exchanged between peers.  
 
 ---
 
 ### **3. Discoveries About the Network**  
-- **Topology**: The network consists of Tier1 connected directly to TransitAS. No other peers or customers were involved.  
-- **Route Validity**:  
-  - TransitAS’s advertised `91.108.0.0/22` matched its IRR record (`origin: AS-TRANSITAS`), confirming legitimate ownership.  
-  - No unexpected routes were received from TransitAS, aligning with policy compliance.  
-- **Connectivity**: Bidirectional ICMP traffic worked reliably, with low latency (20–60 ms).  
-- **Policy Adherence**: No anomalies (e.g., invalid AS-paths, unauthorized prefixes) were observed.  
+- **Network Topology**:  
+  - TransitAS peers with Tier1 and acts as a transit provider for downstream ASes like ISP (`85.12.64.0/22`) and EVELINK (`31.41.0.0/24`).  
+  - AltDB routes (e.g., `45.32.0.0/24`) were unverified and rejected, highlighting the importance of IRR validation.  
+
+- **Route Behavior**:  
+  - Dynamic route extraction (e.g., using `awk`/`grep`) failed after removing default routes, necessitating manual configuration.  
+  - Peer routes (`91.108.0.0/22`) could be used locally but must not be propagated further, reinforcing policy adherence.  
+
+- **Connectivity Reliability**:  
+  - Explicit IP addresses (e.g., `31.41.0.1`) were critical for successful pings, whereas placeholders caused failures.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **TransitAS Communication**:  
-  - **Initial Announcement**: Notified TransitAS of our prefix and requested their routes.  
-  - **Route Exchange**: TransitAS responded with their `91.108.0.0/22` route, which was added to our routing table.  
-  - **No Further Propagation**: Did not advertise TransitAS’s routes to other peers (none exist in this setup), adhering to the rule of not propagating peer-learned routes.  
+- **Message from TransitAS**:  
+  - Received a message about TransitAS’s new customer route `31.41.0.0/24` with AS_PATH `[65002 65588]`. Added this route after validation and tested connectivity.  
 
----
+- **Policy Enforcement**:  
+  - Did not propagate TransitAS’s routes to other peers, respecting mutual peering agreements. No coordination with non-adjacent agents was required.  
 
-**Conclusion**: The experiment successfully established mutual route exchange and verified connectivity between Tier1 and TransitAS while adhering to Gao-Rexford policies and operational constraints.
+- **No Unauthorized Sharing**:  
+  - Kept route tables and policies private, as per guidelines to preserve AS privacy.  
+
+--- 
+
+**Final Conclusion**:  
+The experiment demonstrated successful route management, policy enforcement, and end-to-end verification. Challenges included syntax errors and dynamic route extraction failures, resolved by manual configuration. The network adheres to Gao-Rexford principles, ensuring only legitimate routes are used while maintaining privacy and operational integrity.

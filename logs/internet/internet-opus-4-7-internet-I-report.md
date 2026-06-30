@@ -1,53 +1,53 @@
-# Experiment Report — AS I (Stub AS)
+# Experiment Report — Node I (Stub AS)
 
 ## 1. Actions Taken
 
-**Discovery / Inspection:**
-- Ran `ip addr show lo` and `ip addr show` to identify my loopback (104.28.0.1/32) and link interface (I-eth0, 10.1.4.1/30, peer 10.1.4.2).
-- Ran `ip route show` to confirm only the directly connected /30 was present initially.
+1. **Initial discovery**
+   - Ran `ip addr show lo`, `ip addr show`, `ip route show`.
+   - Found my loopback `104.28.0.1/32`, my single physical link `I-eth0` (10.1.4.1/30) to peer B (10.1.4.2), and only the directly-connected route in the table.
 
-**Route configuration:**
-- Installed a single default route toward my provider B:
-  `ip route add default via 10.1.4.2`
-- No other static routes were added — I rely entirely on B for transit.
+2. **Default route installation**
+   - `ip route add default via 10.1.4.2 dev I-eth0`
+   - This points all non-local traffic at B, my upstream provider.
 
-**Routing exchanges (via send_message, no daemons):**
-- Sent B my loopback advertisement: 104.28.0.1/32, origin AS I, no customer prefixes.
-- Confirmed reachability and asked B which destinations were reachable through it.
-- Received from B a list of known prefixes (B, customers D/H and their downstream L/M, peers A/C and the cones behind them).
+3. **Advertisement to provider B**
+   - Sent a message to B announcing my loopback `104.28.0.1/32` as my sole originated prefix.
+   - When B asked again for my prefix list, I confirmed: only `104.28.0.1/32`, no customers.
 
-**Verification:**
-- Pinged from my loopback (`ping -I 104.28.0.1 ...`) to:
-  - B (24.96.0.1), D (46.4.0.1), H (95.211.0.1), A (12.34.0.1), C (37.120.0.1)
-  - Newly learned: 151.101.0.1, 178.62.0.1, 77.88.0.1, 88.150.0.1, 62.210.0.1, 193.34.0.1, 202.12.0.1, 129.250.0.1, 141.193.0.1
-- All succeeded (one initial transient miss on 12.34.0.1 cleared on retry).
+4. **Connectivity verification**
+   - First ping to B's loopback (`24.96.0.1`) from `104.28.0.1` failed (B had not yet installed a return route).
+   - Retried after B acknowledged my advertisement — succeeded (~12 ms RTT).
+   - Pinged 6 remote prefixes B advertised (46.4.0.1, 95.211.0.1, 12.34.0.1, 37.120.0.1, 151.101.0.1, 178.62.0.1) sourced from my loopback — all reachable.
 
-## 2. Justification of Each Decision
+5. **Suppression of unnecessary updates**
+   - Told B I rely on the default route and don't need per-prefix updates.
 
-- **Default route via B only:** I am a stub AS with a single provider. A default is the simplest and cheapest forwarding state — no need to track per-prefix routes from B since there is no alternative path to choose.
-- **Advertised only 104.28.0.1/32 to B:** I have no customers, so the only revenue/utility I get from B is reachability for my own prefix. Advertising the /30 link subnet was deliberately avoided per policy (point-to-point infrastructure is private).
-- **No re-advertisement of B's routes to anyone:** I have no other neighbors, but as a stub AS I would not provide transit regardless — re-advertising provider routes would mean paying B to carry someone else's traffic for free.
-- **Sourced all pings from the loopback:** Link IPs are not advertised globally, so replies to them may be black-holed. The loopback is the only address that is end-to-end reachable.
-- **No routing daemon used:** All exchanges happened via send_message and routes via `ip route`, as required.
+6. **Reported completion** via `report_done`.
+
+## 2. Justifications
+
+- **Default route only, no specific prefixes**: As a stub AS with a single upstream, a default route via B is sufficient and optimal. Installing each specific prefix B advertises would add table churn with no benefit — the next hop is identical.
+- **Advertising only the loopback**: The point-to-point link 10.1.4.0/30 is private infrastructure and must never be announced. My loopback is the only globally-routable prefix I own.
+- **Not re-advertising B's routes**: I am a stub and must not provide transit to my provider or to anyone else. I therefore announce nothing back upstream beyond my own loopback.
+- **Sourcing pings from loopback**: Link IPs (10.1.4.1) are not advertised network-wide, so replies sourced to them might be dropped. Using `-I 104.28.0.1` ensures the reply path exists in remote routing tables.
+- **First ping failure was expected**: A short race before B installed the route to 104.28.0.1/32; not a real problem, and it resolved itself once B processed my advertisement.
 
 ## 3. Network Discoveries
 
-From B's updates I built up a partial map of the topology (without ever seeing it directly):
-- **B (my provider)** has loopback 24.96.0.1/32.
-- **B's customers:** D (46.4.0.1) and H (95.211.0.1). D in turn has customers L (151.101.0.1) and M (178.62.0.1).
-- **B's peers:** A (12.34.0.1) and C (37.120.0.1).
-  - Behind A: F (77.88.0.1), G (88.150.0.1).
-  - Behind C: E (62.210.0.1), J (129.250.0.1), K (141.193.0.1), and via C→E further N (193.34.0.1) and O (202.12.0.1).
-- All 13 remote loopbacks were reachable from my loopback through the single default route, confirming B is providing full transit as expected.
-- RTTs varied (≈12 ms to B, ≈36 ms to H, ≈90–112 ms to more distant ASes), suggesting a multi-hop topology behind B.
+- I have exactly one neighbor: **B (AS B)**, my provider, loopback `24.96.0.1/32`.
+- B's customer cone (as advertised to me) includes at least:
+  - `46.4.0.1/32` (customer D)
+  - `95.211.0.1/32` (customer H)
+  - `151.101.0.1/32`, `178.62.0.1/32` (further customer cone)
+- B has peers including AS A (`12.34.0.1/32`) and AS C (`37.120.0.1/32`).
+- Additional prefixes reachable via B: 77.88.0.1, 88.150.0.1, 62.210.0.1, 129.250.0.1, 141.193.0.1.
+- RTTs ranged from ~12 ms (B itself) to ~112 ms (37.120.0.1 via peer C), consistent with multi-hop transit through B's peers.
+- All B-advertised destinations tested were reachable end-to-end from my loopback.
 
 ## 4. Coordination With Other Agents
 
-Only with **B**, my sole neighbor:
-1. I sent: loopback advertisement (104.28.0.1/32), confirmation of reachability, and a request for the list of reachable destinations.
-2. B replied with: its own loopback, next-hop instructions (10.1.4.2), acknowledgment of my prefix, and two progressively larger lists of prefixes reachable via it (initial 5, later 14 total).
-3. I did not disclose policy details (e.g., that B is my provider, that I won't transit, etc.) — kept exchanges to operationally necessary information only, consistent with the privacy guidance.
+Only with **B** (my only neighbor):
+- **Sent**: initial hello with loopback advertisement; confirmation that 104.28.0.1/32 is my single originated prefix and I have no customers; final note that I rely on default and don't need per-prefix updates.
+- **Received**: B's hello with its loopback 24.96.0.1/32, default-route offer, and successive updates listing customer-cone and peer-learned prefixes reachable via B.
 
-No relay requests were received, and I initiated none — all destinations were reachable via the default route and no further coordination was required.
-
-Final state: one default route via 10.1.4.2, one prefix originated (104.28.0.1/32), full global reachability confirmed.
+No relay requests were received, and no direct messages were exchanged with non-adjacent agents — appropriate for a stub AS whose only role is to originate/receive its own traffic via its single provider.

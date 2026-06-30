@@ -1,51 +1,70 @@
-# ACM Node — Experiment Report
+# ACM Agent — Experiment Report
 
 ## 1. Actions Taken
 
-**Local audit (first action):**
-- `ip addr show lo` → discovered my stable loopback: 198.82.0.254/32
-- `ip addr show` → confirmed interfaces ACM-eth0 (10.0.3.2/30 to AS2) and ACM-eth1 (10.0.4.1/30 to Web)
-- `ip route show` → found pre-installed routes:
-  - `default via 10.0.3.1 dev ACM-eth0` (upstream to AS2)
-  - `198.82.0.1 via 10.0.4.2 dev ACM-eth1` (to Web host)
-  - Connected /30 prefixes on both links
+**Initial local audit**
+- `ip addr show lo` / `ip addr` / `ip route show` to discover my own state.
+- Confirmed loopback 198.82.0.254/32, two point-to-point links (ACM-eth0 to AS2 on 10.0.3.0/30, ACM-eth1 to Web on 10.0.4.0/30), default route already via 10.0.3.1, and a host route to 198.82.0.1 via 10.0.4.2.
 
-**Connectivity verification:**
-- `ping -c 2 10.0.3.1` → AS2 link healthy (~30 ms)
-- `ping -c 2 -I 198.82.0.254 198.82.0.1` → Web reachable from my loopback (~4 ms, 0% loss)
-- `curl --interface 198.82.0.254 http://198.82.0.1/` → HTTP 200 in ~9 ms (service healthy)
-- `ping -c 2 -I 198.82.0.254 154.54.1.1` → AS2's loopback reachable via default route (0% loss)
+**Internal verification**
+- `ping -c 2 -I 198.82.0.254 198.82.0.1` — 0% loss, ~4 ms. Confirmed the Web server in my AS was reachable from my loopback.
 
-**Routing changes:** None required. The routing table was already correct on arrival.
+**Upstream announcement**
+- Sent AS2 a routing update announcing **198.82.0.0/24** (covering both my loopback 198.82.0.254 and Web's service 198.82.0.1). I did not install any new routes locally because my default already pointed at AS2 and my /32 to Web was already correct.
 
-## 2. Justification
+**External reachability tests** (all sourced from 198.82.0.254):
+- 154.54.1.1 (AS2): 0% loss, ~30 ms
+- 4.2.2.1 (AS1): 0% loss, ~70 ms
+- 91.214.0.1 (EveLink): 0% loss, ~90 ms
+- 128.173.0.1 (Uni): 100% loss
 
-- **Audit before action.** The KP guidance says to inspect locally first. I checked addresses, interfaces, and routes before responding to any neighbor request. This revealed that the routes both Web and AS2 were asking about already existed, so no `ip route add/del` was needed.
-- **Source from loopback for diagnostics.** Per the addressing guidance, remote nodes don't have routes back to point-to-point /30 addresses, so I used `-I 198.82.0.254` for any ping/curl beyond directly connected addresses.
-- **Confirm prefix ownership to AS2.** AS2 needed to know which prefixes to advertise. I confirmed 198.82.0.0/24 as our aggregate (covering both .254 and .1) so AS2 could announce a single clean prefix to AS1 rather than two /32s.
-- **No autonomous security/policy changes.** Nothing in this experiment required touching ACLs or filters, so admin approval was not needed; the work was confined to verification and routing coordination.
-- **Verify before reporting success.** Before calling `report_done`, I confirmed end-to-end with both an HTTP 200 from the service and an explicit ack from Web that the reverse direction also worked.
+**KP escalation**
+- Issued a WHY to AS2 about the isolated Uni failure.
+- After AS2's findings, accepted CANNOT (pending Uni admin action) and informed Web.
+
+**Periodic re-verification** during steady state
+- Re-ran pings to Web and AS2, and re-checked `ip route show` and `ip -br link show` to confirm nothing had silently changed.
+
+**No firewall, ACL, or route-table mutations were made.** The only configuration change was the prefix advertisement sent to AS2 via message; the kernel-level state I inherited was already correct.
+
+## 2. Justification of Each Decision
+
+- **Local audit first.** Per the "investigate locally before escalating" principle: a routing table and interface check is cheap and rules out self-inflicted problems before bothering neighbors.
+- **Source pings from the loopback.** The brief notes that link-scoped IPs (10.0.3.2, 10.0.4.1) aren't reachable from remote nodes; sourcing from 198.82.0.254 gives valid end-to-end tests rather than misleading failures.
+- **Announce 198.82.0.0/24, not /32s.** A single covering /24 announcement is the natural aggregate for both ACM-internal addresses; smaller, more numerous announcements would clutter the global table without benefit.
+- **No local route changes.** The default and the /32 to Web were already correct. The rule is "manage routes exclusively with `ip route add/del`" — but only when a change is actually needed. Touching a working table is needless risk.
+- **Multiple external pings before drawing a conclusion.** Reaching AS2, AS1, and EveLink proves my /24 propagated through AS1; the Uni-only failure is therefore not "my announcement failed", it is downstream-specific. This evidence-based narrowing is exactly the "hypothesis requires evidence" rule.
+- **Escalate to AS2, not directly attempt a fix.** I cannot send messages to non-adjacent agents, and the failure is outside my AS. AS2 is both my upstream and my only relay path.
+- **Accept CANNOT on the Uni rule.** Modifying iptables on Uni's gateway is firmly a security-policy change at another organization — not something any agent should override. This matches the admin-approval policy.
+- **Share status, not internals, with external parties.** Messages to AS2 stated only public-facing facts (announcement, reachability test results). I did not reveal anything about Web's internal configuration.
+- **Periodic light health checks during long idle.** Confirms nothing has silently degraded without spamming neighbors or changing state.
 
 ## 3. Network Discoveries
 
-- **My role:** Border router for AS ACM, sitting between upstream transit (AS2) and the internal Web host hosting acm.org.
-- **Topology around me:**
-  - AS2 (10.0.3.1, loopback 154.54.1.1/32) is my upstream transit, providing default-route Internet access.
-  - Web (10.0.4.2, loopback 198.82.0.1/32) is the internal acm.org HTTP server, with its default route pointing at me.
-- **Address plan:** Our organization owns 198.82.0.0/24. Within it: 198.82.0.254 is my border loopback, 198.82.0.1 is the public service. AS2 already had static routes to both /32s via me and added an aggregate 198.82.0.0/24 to advertise outward.
-- **Service health:** acm.org at 198.82.0.1 is healthy (HTTP 200, ~9 ms from the border).
-- **Upstream reachability:** AS2's loopback is reachable from my loopback via the default route — no explicit /32 needed.
+- I sit at the boundary of a small content-provider AS: my loopback (198.82.0.254) and a single internal host (Web, 198.82.0.1) sharing the same /24.
+- My only path to the wider Internet is via AS2.
+- AS2 connects upstream to AS1, which has at least two customers: **Uni (128.173.0.0/16, .0.1 loopback)** and **EveLink (91.214.0.1)**.
+- AS2's own DNS resolver / loopback is 154.54.1.1.
+- RTT profile suggests a roughly linear AS path: ACM ~30 ms to AS2 ~40 ms more to AS1 ~20 ms more to AS1 customers.
+- The Uni failure was **not** routing: forward path AS2→AS1→Uni works fine from AS2's loopback. Root cause (as relayed by Uni via AS1 via AS2) was a deliberate iptables DROP rule on 198.82.0.0/24 in Uni's gateway FORWARD and OUTPUT chains, with active hit counters (49 pkts/2964 B and 9 pkts/732 B). This is a Uni security policy, not a malfunction.
+- Uni also reported they could not ping AS2's loopback 154.54.1.1 — AS2 audited and confirmed its own side was clean, suggesting another Uni-local issue. Outside my scope.
 
 ## 4. Coordination With Other Agents
 
-**With Web (internal host):**
-- Web asked me to install 198.82.0.1/32 via 10.0.4.2 and advertise it upstream.
-- I replied that the route was already installed and that I had verified the service end-to-end (ping + HTTP 200). I noted AS2 would handle the upstream advertisement as 198.82.0.0/24.
-- Web confirmed back that ping in the reverse direction (198.82.0.1 → 198.82.0.254) also worked, closing the loop on bidirectional reachability.
+**With Web (internal, same organization):**
+- Web proactively informed me of its loopback (198.82.0.1) and asked me to advertise it upstream.
+- I confirmed I had it routed, that I had announced the covering /24, and shared the multi-vantage reachability results.
+- Web independently corroborated the same symptom (Uni 100% loss, others healthy) from the server's own loopback — strengthening the diagnosis with a second vantage point inside ACM.
+- After the final diagnosis, Web acknowledged closure.
 
-**With AS2 (upstream transit):**
-- AS2 asked which prefixes we own/host and to confirm the static routes to 198.82.0.1 and 198.82.0.254 were ours.
-- I confirmed both /32s, declared 198.82.0.0/24 as our aggregate, and asked AS2 to advertise that /24 to AS1 and other peers.
-- AS2 replied that it had installed 198.82.0.0/24 via me and is now advertising it externally, and noted that its loopback 154.54.1.1/32 is reachable through my existing default route — which I verified with a sourced ping.
+**With AS2 (upstream ISP):**
+- I announced 198.82.0.0/24 to AS2; AS2 installed it via 10.0.3.2 and advertised onward to AS1.
+- AS2 told me the prefixes I should expect to reach via them (AS1, Uni, EveLink, AS2's own loopback) and that my default should be 10.0.3.1 (already the case).
+- I sent AS2 a KP WHY for the Uni failure. AS2 performed its own local audit (its forward path to Uni was fine), inferred the asymmetry pointed to a Uni-side return-path issue, and relayed a WHY to Uni via AS1.
+- AS2 returned a final diagnosis identifying the Uni iptables DROP rule and reporting CANNOT (pending Uni admin).
+- I acknowledged the CANNOT and closed the exchange.
 
-**Outcome:** ACM's border is correctly configured, both neighbor relationships are coordinated and verified, the ACM Digital Library is reachable end-to-end, and 198.82.0.0/24 is being announced to the broader Internet by AS2.
+**With Uni (indirect, via AS2 relay):**
+- All communication was through AS2's KP relay; I never spoke to Uni directly. The relay returned a clean root-cause attribution plus a policy reason for non-remediation, which is exactly the KP design pattern (CANNOT + admin notification).
+
+**Final outcome:** ACM Digital Library is globally reachable. The one black spot (Uni clients) is a deliberate, documented policy at Uni's gateway, properly diagnosed end-to-end through the Knowledge Plane and correctly left pending Uni administrator action.

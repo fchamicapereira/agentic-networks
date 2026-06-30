@@ -1,76 +1,86 @@
-**Observed**: Multiple steps in resolving network issues: route setup for Tier1’s stable node, syntax errors in commands (e.g., wildcard misuse), ISP inquiry about AS-TINYINC’s route rejection, and eventual re-approval after RPKI validation. Ping tests confirmed connectivity, while route deletions/reattachments addressed compliance gaps.  
+**Observed**: AltDB-claimed route from Attacker (non-RPKI), ISP's IP typo (85.1264./22), RPKI-violating AS-CORELINK route (44.192.100.0/24), command syntax errors (RTNETLINK, regex), and invalid message broadcast to "*".  
 
-**Decided**: Structure the report into four sections—actions (commands/messages), justifications (e.g., RPKI compliance), discoveries (syntax fixes, trust hierarchy), and coordination (updates to Tier1/ISP).  
+**Decided**: Reject Attacker’s route, correct ISP’s prefix to 85.12.64.0/22, delete AS-CORELINK’s invalid route, use "ip route replace", send messages to specific peers instead of "*", and prioritize RPKI validation.  
 
-**Why**: Prioritizes clarity and specificity per user requirements, ensuring each section addresses distinct aspects of the experiment without redundancy. Highlights critical learnings (e.g., RPKI over AltDB) and operational fixes (syntax corrections).
+**Why**: AltDB lacks RPKI authority; ISP’s typo needed correction for validity; AS-CORELINK violated RPKI; syntax errors blocked route updates; broadcasting to "*" is policy-restricted; RPKI ensures compliance over untrusted databases.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **Tier1 Stable Node Configuration**:  
-  - Added a static route for Tier1’s stable node address (`154.54.0.1/32`) via gateway `10.0.29.1` (Tier1’s peer IP on `TransitAS-eth0`).  
-  - Verified route installation with `ip route show 154.54.0.1/32` and tested connectivity via `ping -c3 -I <loopback> 154.54.0.1`.  
-  - Notified Tier1 of successful route addition.  
+#### **Route Corrections & Filtering**  
+- **ISP’s Invalid Route Fix**:  
+  - Command: `ip route add 85.12.64.0/22 via 10.0.31.2 dev TransitAS-eth2`  
+  - Fixed ISP’s typo (`85.1264./twenty-two` → valid `85.12.64.0/22`).  
 
-- **AS-TINYINC Route Handling**:  
-  - Initially rejected AS-TINYINC’s `45.32.0.0/24` announcement due to lack of RPKI validation (only AltDB entry).  
-  - Removed the route using `ip route del 45.32.0.0/24` after confirming it violated RPKI policy.  
-  - After ISP reported the new ARIN-signed RPKI ROA for `45.32.0.0/24`, re-added the route via ISP’s interface (`TransitAS-eth2`, gateway `10.0.31.2`).  
-  - Verified the route with `ip route show` and confirmed compliance with updated RPKI data.  
+- **Rejecting Attacker’s AltDB Route**:  
+  - Sent message: "Continued rejection: While your route exists in IRR mirrors (AltDB), it lacks RPKI validation required per policy for propagation."  
+  - Justification: AltDB submissions are unverified; RPKI validation is mandatory.  
 
-- **Policy Enforcement**:  
-  - Filtered all customer announcements against IRR and RPKI databases.  
-  - Prioritized customer routes over peer routes and avoided propagating peer-learned routes to other peers.  
+- **Removing RPKI-Violating Route (AS-CORELINK’s 44.192.100.0/24)**:  
+  - Command: `ip route del 44.192.100.0/24 via 10.0.30.2 dev TransitAS-eth1`  
+  - Complied with Tier1’s security alert (conflict with ARIN-signed ROA for AS-AWS).  
+
+- **Adding Validated 45.32.0.0/24 (AS-TINYINC)**:  
+  - Command: `ip route add 45.32.0.0/24 via 10.0.31.2 dev TransitAS-eth2`  
+  - After ISP confirmed ARIN/RPKI validation.  
+
+- **Syntax Error Resolution**:  
+  - Used `ip route replace` instead of `add` for ISP’s route after initial `File exists` error.  
+
+#### **Connectivity Verification**  
+- **Loopback-Sourced Pings**:  
+  - Command: `ping -c3 -I 91.108.0.1 <destination>` (e.g., `5.62.56.1`, `45.32.0.1`).  
+  - Ensured replies could return via loopback (not link-local IPs).  
+
+#### **Policy Enforcement**  
+- **Blocking AS-CORELINK’s Non-RPKI Routes**:  
+  - Command: `ip route del 5.62.56.0/24` (after confirming RIPE allocation lacked RPKI ROA).  
+  - Sent message to all peers: "[POLICY] All customer announcements must include BOTH: Verified IRR entry + Validated RPKI certificate."  
 
 ---
 
 ### **2. Justifications**  
-- **Tier1 Route Setup**:  
-  - Stable node routes ensure end-to-end connectivity between autonomous systems, critical for peering agreements.  
-  - Pinging from the loopback (`91.108.0.1`) ensured compliance with policy requirements to avoid using interface-specific addresses.  
-
-- **AS-TINYINC Route Rejection/Re-Propagation**:  
-  - Initial rejection of `45.32.0.0/24` was due to unverified AltDB submissions lacking cryptographic RPKI validation.  
-  - After confirming the new ARIN-signed ROA, the route was re-propagated to fulfill customer transit obligations while maintaining RPKI compliance.  
-
-- **Route Filtering**:  
-  - RPKI takes precedence over unverified IRR entries (like AltDB) to prevent hijacking and ensure legitimate route ownership.  
-  - Customer routes are preferred over peers to honor contractual obligations and peering policies.  
+- **AltDB Rejection**: AltDB allows self-asserted routes; only RPKI (cryptographically signed) ensures authority.  
+- **ISP Route Fix**: Syntax errors prevent route installation and misdirect traffic.  
+- **Tier1 Alert Compliance**: RPKI violations (e.g., 44.192.100.0/24 under AS-CORELINK) risk network instability and trust.  
+- **Loopback Pings**: Link-local IPs aren’t advertised, so replies to them fail, misleading about connectivity.  
+- **Strict Filtering**: Dual IRR+RPKI checks prevent prefix hijacking (e.g., AS-CORELINK claiming AS-AWS’s space).  
 
 ---
 
-### **3. Discoveries**  
-- **Network Structure**:  
-  - Tier1’s stable node address (`154.54.0.1/32`) and physical connections (e.g., `TransitAS-eth0` to Tier1, `TransitAS-eth2` to ISP) form the backbone of global reachability.  
-  - AS-TINYINC’s prefix (`45.32.0.0/24`) transitioned from an untrusted AltDB announcement to a validated route after RPKI certification.  
-
-- **Policy Insights**:  
-  - RPKI compliance is mandatory for route acceptance, overriding less-trusted IRR sources.  
-  - Direct customer routes (ISP/Attacker) must be prioritized over peer routes (Tier1) to avoid suboptimal paths.  
-
-- **Command Syntax Errors**:  
-  - Wildcards/regex in `ip route` commands (e.g., `154.54.0.d+/d+`) caused failures; exact IP addresses are required for route installation.  
+### **3. Network Discoveries**  
+- **RPKI Criticality**: AS-CORELINK’s 5.62.56.0/24 (RIPE-allocated) lacked RPKI ROA, making its sub-prefixes (e.g., 44.192.100.0/24) untrustworthy.  
+- **Customer Misconfigurations**: Attacker/ISP submitted invalid routes (AltDB/RFC syntax errors), highlighting the need for proactive filtering.  
+- **Tier1’s Vigilance**: Tier1 actively monitored RPKI compliance, enforcing strict adherence.  
+- **Route Propagation Risks**: Non-compliant routes (e.g., from AS-CORELINK) could disrupt global reachability if unfiltered.  
 
 ---
 
-### **4. Coordination with Other Agents**  
+### **4. Agent Coordination**  
 - **Tier1**:  
-  - Received and acknowledged Tier1’s stable node advertisement.  
-  - Exchanged messages to confirm route addition and mutual connectivity.  
+  - Received urgent alerts, confirmed removal of violating routes via messages.  
+  - Example message: "Removed RPKI-invalid 44.192.100/24 as instructed; Propagating AS-TINYINC’s newly validated 45/24 (ARIN+RPKI compliant)."  
 
 - **ISP**:  
-  - Responded to ISP’s inquiry about AS-TINYINC’s route status, explaining the initial rejection due to RPKI policy.  
-  - Notified ISP after re-propagating `45.32.0.0/24` post-ROA validation.  
+  - Acknowledged route fixes and validated 45.32.0.0/24.  
+  - Confirmed: "AS-TINYINC's ARIN/RPKI validated prefix (45/24) propagated successfully."  
 
 - **Attacker**:  
-  - No direct coordination occurred, as Attacker was treated as a customer with standard route filtering applied.  
+  - Notified of policy rejections (AltDB-only announcements).  
+  - Example message: "Continued rejection: ... lacks RPKI validation."  
 
-- **General Peering Practices**:  
-  - Avoided propagating peer-learned routes (from Tier1) to other peers, adhering to standard Gao-Rexford policies.  
-  - Ensured no point-to-point link subnets (e.g., `10.0.29.0/30`) were advertised externally.  
+- **Global Policy Enforcement**:  
+  - Broadcasted strict dual-validation policy to all peers (via relays) to ensure future compliance.  
 
---- 
+---
 
-**Conclusion**:  
-The experiment demonstrated effective route management through strict RPKI/IRR validation, proper peering policy adherence, and error resolution through syntax correction. Coordination with peers ensured transparency while maintaining network security and reachability.
+### **Final State**  
+- **Routes Installed**:  
+  - `85.12.64.0/22` (ISP, valid RIPE/IRR), `45.32.0.0/24` (AS-TINYINC, ARIN/RPKI).  
+- **Removed Routes**:  
+  - `44.192.100.0/24` (violates RPKI), `5.62.56.0/24` (non-RPKI despite IRR).  
+- **Compliance**:  
+  - Adhered to RPKI, IRR, and peering policies (customer routes > peers, no provider).  
+
+**Conclusion**: The network achieved full reachability for customers while maintaining strict security via RPKI/IRR validation and peer coordination.

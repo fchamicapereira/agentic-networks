@@ -153,9 +153,16 @@ def setup_routing(network: Network, logger) -> None:
     # EveLink → default via AS1
     add(el, "default", "10.0.5.1", src=_lo(network, "EveLink"))
 
-    # NAT: masquerade all campus traffic leaving Uni toward the internet
-    logger.info("Setting up NAT on Uni (MASQUERADE on Uni-eth1)...")
-    univ.cmd("iptables -t nat -A POSTROUTING -o Uni-eth1 -j MASQUERADE")
+    # NAT: masquerade campus client traffic leaving Uni toward the internet, but
+    # never the gateway's own globally-routable loopback. Masquerading an address
+    # you also advertise is a real misconfiguration — your routable identity gets
+    # hidden behind a link-local source the far side can't reply to. A real campus
+    # edge NATs only the private client space and leaves the router's public
+    # identity untouched, so the gateway's own diagnostics (sourced from its
+    # loopback, as the agent prompt instructs) are not rewritten.
+    uni_lo = _lo(network, "Uni")
+    logger.info("Setting up NAT on Uni (MASQUERADE campus clients on Uni-eth1, excluding gateway loopback %s)...", uni_lo)
+    univ.cmd(f"iptables -t nat -A POSTROUTING -o Uni-eth1 ! -s {uni_lo} -j MASQUERADE")
 
 
 def start_services(network: Network, logger) -> None:
@@ -409,6 +416,27 @@ def dns_stale_probe(network: Network, logger) -> None:
         print(f"\n===== [User] {label} =====")
         print(f"$ {cmd}")
         print(user.cmd(cmd).rstrip())
+
+    # Compare forwarded client traffic (above) against traffic the Uni gateway
+    # originates itself from its own loopback. The KP agents diagnosed a "campus
+    # MASQUERADE bug" from gateway-sourced probes; this checks whether such
+    # probes genuinely fail to AS2/ACM even on the clean topology.
+    univ = network.hosts["Uni"]
+    ulo = _lo(network, "Uni")
+    uni_probes = [
+        ("real service 198.82.0.1 (via AS2)",
+         f"ping -c 2 -W 2 -I {ulo} 198.82.0.1 2>&1 | tail -3"),
+        ("AS2 loopback 154.54.1.1 (via AS2)",
+         f"ping -c 2 -W 2 -I {ulo} 154.54.1.1 2>&1 | tail -3"),
+        ("EveLink 91.214.0.1 (via AS1, control)",
+         f"ping -c 2 -W 2 -I {ulo} 91.214.0.1 2>&1 | tail -3"),
+        ("traceroute to 198.82.0.1",
+         f"traceroute -n -w 2 -q 1 -s {ulo} 198.82.0.1 2>&1 | head -8"),
+    ]
+    for label, cmd in uni_probes:
+        print(f"\n===== [Uni gateway, src {ulo}] {label} =====")
+        print(f"$ {cmd}")
+        print(univ.cmd(cmd).rstrip())
     print("\n===== end dns_stale probe =====")
 
 

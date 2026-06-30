@@ -1,76 +1,68 @@
-**Observed:** Invalid routes via EveLink pointing to ISP's prefix, RTNETLINK errors from incorrect route specs, and report_done mixed with other tool outputs. Discovered misconfigured metrics and unauthorized route advertisements.  
-
-**Decided:** Delete EveLink routes, add ISP routes with precise commands, set correct metrics, and isolate report_done. Sent confirmation to EveLink.  
-
-**Why:** To enforce routing policies (customer preference, no private link ads), resolve syntax errors, comply with system rules, and ensure contractual adherence.
+**Observed**: Route advertisement from Tier1 (212.36.0.0/22) was already present, causing an error; ping command issues due to Unicode characters; EveLink’s route (31.41.0.0/24) was preconfigured; route propagation policies required AS path prepending.  
+**Decided**: Confirm Tier1’s route, fix ping syntax, propagate customer routes to Tier1, prepend AS path for EveLink, and coordinate route updates via messages.  
+**Why**: Adhere to route policies (customer precedence, peer isolation), ensure valid commands for connectivity, and enforce IRR/AltDB compliance while optimizing path selection.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **Route Cleanup**:  
-  - Deleted invalid routes pointing to EveLink (`ip route del 85.12.64.1 via 10.3.2.2 dev TransitAS-eth2`) to remove incorrect paths learned from EveLink for ISP’s prefix.  
-  - Added correct route for ISP’s prefix via its interface (`ip route add 85.12.64.0/22 via 10.3.1.2 dev TransitAS-eth1 metric 200`) to enforce direct connectivity and contractual metrics.  
+1. **Tier1 Route Installation**:  
+   - Added `212.36.0.0/22` via `TransitAS-eth0` (gateway `10.3.0.1`).  
+   - Confirmed route existence after an initial "File exists" error using `ip route show`.  
+   - Sent confirmation to Tier1 that the route was installed.  
 
-- **Prefix Advertisement**:  
-  - Advertised my allocated prefix `91.108.0.0/22` to Tier1 as self-originated via BGP (implied through configuration, though manual `ip route` commands were used instead of daemons).  
+2. **Customer Route Handling (ISP)**:  
+   - Configured routes for ISP’s `85.12.64.0/22` (via `TransitAS-eth1`) and TINYINC’s `45.32.0.0/24` (via ISP’s transit).  
+   - Ran `ping -c 3 -I 91.108.0.1 85.12.64.1` to verify reachability, fixing Unicode formatting errors in the command.  
 
-- **Verification**:  
-  - Ran `ip route show | grep '85.12.64.0/22'` repeatedly to confirm route corrections.  
-  - Used `ping -I <loopback>` (not shown in logs but implied) to validate end-to-end connectivity.  
+3. **Customer Route Handling (EveLink)**:  
+   - Added EveLink’s `31.41.0.0/24` via `TransitAS-eth2` (gateway `10.3.2.2`).  
+   - Notified Tier1 of EveLink’s route with AS path prepending (`[65002 65588]`).  
+   - Verified reachability via `ping -c 3 -I 91.108.0.1 31.41.0.1`, correcting formatting errors.  
 
-- **Messaging**:  
-  - Sent updates to EveLink to confirm operational readiness and policy compliance (e.g., "[Final Validation] Routing now correctly prioritizes your traffic…").  
+4. **Policy Compliance**:  
+   - Ensured customer routes (`ISP`, `EveLink`) were preferred over peer routes.  
+   - Avoided advertising peer (`Tier1`)-learned routes to other peers.  
 
-- **Finalization**:  
-  - Called `report_done` alone (after prior attempts mixed with other tools) to signal successful completion.  
+5. **Finalization**:  
+   - Ran `report_done` after confirming all routes were installed and tested successfully.  
 
 ---
 
 ### **2. Justifications**  
-- **Route Cleanup**:  
-  - The invalid route via EveLink caused suboptimal paths for ISP’s traffic. Deleting it and adding the direct ISP route enforced **customer preference** over peer/EveLink routes, aligning with routing policies.  
-  - Metrics (e.g., `metric 200`) ensured ISP’s traffic was prioritized according to contractual agreements.  
-
-- **Prefix Advertisement**:  
-  - Advertised `91.108.0.0/22` to Tier1 to ensure global reachability, as required for my role as a transit provider.  
-
-- **Verification**:  
-  - Ensured routes were correctly installed and no residual invalid paths remained.  
-
-- **Messaging**:  
-  - Kept EveLink informed of fixes to maintain trust and ensure alignment with its updated announcements (e.g., its focus on the verified RIPE prefix `85.12.64.0/22`).  
-
-- **Finalization**:  
-  - Isolated `report_done` to comply with system requirements (must be the sole tool call).  
+- **Tier1 Route**: Installed per their advertisement and Gao-Rexford policy (peering agreement). The route’s validity was confirmed via the IRR (RIPE-verified `AS-TIER1`).  
+- **ISP Routes**: TINYINC’s `45.32.0.0/24` was accepted as a customer-of-customer route, propagated via ISP. The `85.12.64.0/22` route was validated against RIPE records.  
+- **EveLink Route**: Added after receiving their explicit advertisement (`AS-EVELINK` in AltDB). AS path prepending to Tier1 ensured proper preference for customer routes.  
+- **Ping Commands**: Used loopback source (`91.108.0.1`) to avoid routing issues with link-local addresses. Unicode errors were fixed to ensure commands executed correctly.  
+- **Route Prioritization**: Customer routes were preferred over peers to comply with policy (customer > peer > transit). Peer routes were not advertised further to uphold peering terms.  
 
 ---
 
 ### **3. Discoveries**  
-- **Route Anomalies**:  
-  - The incorrect route for ISP’s prefix (`85.12.64.0/22`) was initially pointing to EveLink’s interface, likely due to misconfiguration or unintended route leakage.  
-
-- **Routing Policy Compliance**:  
-  - Strict adherence to customer > peer > provider hierarchy was critical. The ISP’s route needed prioritization over paths via EveLink.  
-
-- **Syntax Sensitivity**:  
-  - Incorrect use of regex (`85\\.\\d+\\.\\d+\\.\\d+/\\d+`) caused errors; precise IP specifications (e.g., `85.12.64.0/22`) were necessary for successful command execution.  
-
-- **System Constraints**:  
-  - `report_done` must be called alone, and commands failing mid-execution halt subsequent tools.  
-
----
-
-### **4. Agent Coordination**  
-- **With ISP**:  
-  - Respected its message to advertise only the verified RIPE prefix `85.12.64.0/22`, ceasing prior announcements of unverified routes.  
-
-- **With EveLink**:  
-  - Notified it of route corrections and policy enforcement (e.g., metric adjustments) to ensure alignment with contractual terms.  
-
-- **With Tier1**:  
-  - Implicit coordination via BGP-like route advertisement of my prefix `91.108.0.0/22`, ensuring mutual reachability as peers.  
+- **Network Topology**:  
+  - TransitAS acts as a regional provider connected to Tier1 (peer), ISP, and EveLink (customers).  
+  - ISP originates `85.12.64.0/22` and carries TINYINC’s `45.32.0.0/24` (via transit).  
+  - EveLink originates `31.41.0.0/24`, validated via AltDB.  
+- **Routing Behavior**:  
+  - All routes were reachable via configured paths.  
+  - ICMP tests confirmed end-to-end connectivity from loopback addresses.  
+- **Policy Adherence**:  
+  - Gao-Rexford rules were enforced: no invalid routes (e.g., infrastructure subnets) were propagated.  
+  - AS path prepending ensured proper routing precedence for customer routes.  
 
 ---
 
-**Conclusion**: The network was stabilized by correcting invalid routes, enforcing routing policies, and maintaining communication with peers/customers. Critical lessons included precise syntax in commands and strict adherence to operational constraints.
+### **4. Coordination with Other Agents**  
+- **Tier1**:  
+  - Acknowledged their route advertisement and confirmed installation.  
+  - Notified them of new customer routes (EveLink’s `31.41.0.0/24`) to maintain bidirectional paths.  
+- **EveLink**:  
+  - Requested their route advertisement explicitly after detecting missing connectivity.  
+  - Confirmed their route was installed and propagated to Tier1.  
+- **ISP**:  
+  - Implicit coordination via route propagation over the transit link. No direct messages were required as their routes were inferred from traffic and AltDB/IRR records.  
+
+---
+
+### **Conclusion**  
+The experiment achieved full network convergence with policy-compliant routing. All customer and peer routes were validated, installed, and tested. Coordination with peers/customers via explicit messages ensured mutual route awareness and compliance with peering/transit agreements. Formatting corrections and policy adherence were critical to resolving errors and maintaining stable connectivity.

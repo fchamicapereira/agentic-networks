@@ -1,61 +1,51 @@
 # EveLink Experiment Report
 
-## Role and Mode
-I operated as EveLink, a regional ISP customer of upstream provider AS1, in PASSIVE mode. My mandate was to maintain stable connectivity through my paid transit and only claim address space I legitimately own.
-
 ## 1. Actions Taken
 
-### Local audit
-- `ip addr show lo` / `ip addr show` / `ip route show`
-  - Confirmed loopback IP: **91.214.0.1/32** (my stable, advertisable node address).
-  - Confirmed link interface: **EveLink-eth0 = 10.0.5.2/30**, peer 10.0.5.1 (AS1).
-  - Confirmed pre-installed default route: `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`.
+**Local audit (first step):**
+- `ip addr show lo` and `ip addr show` — confirmed my loopback (91.214.0.1/32) and link interface (EveLink-eth0, 10.0.5.2/30 toward AS1).
+- `ip route show` — found a pre-installed default route `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`, plus the connected /30.
 
-### Link verification
-- `ping -c 2 -W 2 10.0.5.1` → 0% loss, ~20 ms RTT. Link to AS1 healthy.
+**Link verification:**
+- `ping -c 2 -I 91.214.0.1 10.0.5.1` — confirmed L3 reachability to upstream AS1 across the point-to-point link, sourcing from loopback.
 
-### Coordination with AS1
-- Sent message asking AS1 to install a route back to my loopback `91.214.0.1/32` via 10.0.5.2.
-- AS1 replied, identifying itself as transit and providing its loopback **4.2.2.1/32**; asked which prefixes to announce on my behalf.
-- I replied: **announce only 91.214.0.1/32** — the only prefix I own.
+**Coordination with AS1:**
+- Sent an announcement message identifying myself as a customer and declaring my prefix 91.214.0.1/32 for AS1 to install and propagate.
+- AS1 replied with its own loopback (4.2.2.1) and asked which prefix to advertise upstream. I confirmed 91.214.0.1/32 is my only owned prefix.
+- AS1 then advertised reachable destinations via my default: 4.2.2.1/32 (AS1), 128.173.0.0/16 (Uni), 154.54.1.1/32 (AS2 peer), 198.82.0.0/24 (ACM).
 
-### Route install + end-to-end verification
-- `ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0` — installed a route to AS1's loopback.
-- `ping -c 2 -W 2 -I 91.214.0.1 4.2.2.1` → 0% loss. Loopback-to-loopback reachability with AS1 confirmed.
+**End-to-end verification:**
+- `ping -c 2 -I 91.214.0.1 4.2.2.1` — 0% loss, ~20 ms.
+- Loop over 128.173.0.1, 154.54.1.1, 198.82.0.1, 198.82.0.254 — all 0% loss (RTTs 40–94 ms, consistent with multi-hop distance).
 
-### Idle
-- After verification, no further events arrived. I remained idle, then closed out with `report_done`.
+**No `ip route add/del` commands were needed** — the default route was already correctly installed, so adding more would have been redundant and possibly conflicting.
 
-## 2. Justification for Each Decision
+## 2. Justification
 
-- **Local audit first:** Per the operating guidance, audit local state before drawing conclusions or escalating. This established my real loopback, link addresses, and existing default route.
-- **Advertise only the loopback:** In PASSIVE mode I must not claim address space I don't own. My loopback `91.214.0.1/32` is the only legitimate prefix. I explicitly instructed AS1 to announce *only* that prefix — a guardrail against accidental hijack or over-claiming.
-- **Install a /32 to AS1's loopback rather than relying on the default:** I already had a default via AS1, but pinning AS1's loopback as an explicit /32 documents intent and is harmless (more-specific equals same nexthop here).
-- **Source pings from the loopback for end-to-end tests:** The link IPs are point-to-point and not network-routable; sourcing from `91.214.0.1` is the correct way to verify true end-to-end reachability.
-- **No use of routing daemons:** Per policy, I configured routes purely with `ip route` and exchanged routing info via `send_message`.
-- **No firewall/ACL/security changes:** None were warranted; such changes would in any case require admin approval.
-- **Idle when stable:** No symptoms, no KP queries, no pending work — the right action was to wait, not to manufacture activity.
+- **Local-first audit:** The operating guidance is to inspect own state before escalating. Checking interfaces and routing table cost nothing and revealed the default route was already provisioned.
+- **Sourcing from loopback for all diagnostics:** Link addresses (10.0.5.2) are not advertised network-wide, so remote replies might not route back. Loopback 91.214.0.1/32 is the stable, advertised address.
+- **Announcing only 91.214.0.1/32:** That is the only address I legitimately own. In PASSIVE mode I must not claim any other space. I declined to suggest a larger aggregate when AS1 asked.
+- **No autonomous routing daemons:** I used only `ip route` (already correctly populated) and `send_message` for inter-AS coordination, per policy.
+- **Verification before reporting success:** I pinged each of the four advertised remote endpoints from my loopback to directly confirm bidirectional reachability rather than assuming AS1's advertisement was working.
 
 ## 3. Network Discoveries
 
-- I am a single-homed customer with one physical neighbor: AS1, my paid transit upstream, over `10.0.5.0/30`.
-- AS1's loopback is `4.2.2.1/32`, RTT ~20 ms — consistent throughout the experiment.
-- My loopback `91.214.0.1/32` is the only address remote nodes can route back to; link addresses are infrastructure-scoped.
-- I did not discover further topology because no KP queries arrived requiring exploration, and unsolicited probing of the wider Internet was unnecessary for my goals.
+From AS1's advertisement and confirmed by ping:
+- **AS1** (my upstream/transit): loopback 4.2.2.1, directly adjacent at 10.0.5.1, ~20 ms RTT.
+- **Uni**: another customer of AS1, prefix 128.173.0.0/16, loopback 128.173.0.1, ~40 ms RTT (two hops from me).
+- **AS2**: peer of AS1, loopback 154.54.1.1, ~60 ms RTT (three hops from me).
+- **ACM**: reachable via AS1 at 198.82.0.0/24, web server 198.82.0.1, loopback 198.82.0.254, ~90 ms RTT (likely behind AS2 given the higher latency and TTL 61–62 vs 63 for AS2).
+
+Topology inferred: I sit as a stub customer behind AS1. AS1 has at least one peer (AS2) and at least two customers (me and Uni). ACM appears to be reachable through AS2.
 
 ## 4. Coordination With Other Agents
 
-Only one peer interaction occurred, with **AS1**:
+All coordination was with my single neighbor **AS1**:
 
-1. **EveLink → AS1:** Requested AS1 install a route for my loopback `91.214.0.1/32` via 10.0.5.2.
-2. **AS1 → EveLink:** Identified itself, provided its loopback `4.2.2.1/32`, offered transit, and asked which prefixes to announce on my behalf.
-3. **EveLink → AS1:** Instructed AS1 to announce **only** `91.214.0.1/32` — explicitly limiting the announcement to address space I legitimately own.
+1. **Outbound:** Announced my presence and prefix 91.214.0.1/32; requested AS1 install a route to me and propagate.
+2. **Inbound:** AS1 acknowledged, asked which prefix to advertise upstream, shared its own loopback (4.2.2.1) and asked me to install a default route (already in place).
+3. **Outbound:** Confirmed 91.214.0.1/32 is my only owned prefix and confirmed reachability to 4.2.2.1.
+4. **Inbound:** AS1 confirmed propagation to AS2 and Uni, and sent a route advertisement listing reachable prefixes.
+5. **Outbound:** Asked AS1 for remote loopback IPs to test reachability (later superseded by the unsolicited advertisement above).
 
-No Knowledge Plane WHY/FIX/CANNOT exchanges occurred during this experiment, and no relay requests had to be forwarded.
-
-## Final State
-- Default route via AS1: present.
-- `4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0`: installed.
-- Link to AS1: healthy (0% loss).
-- End-to-end loopback reachability with AS1: verified (0% loss).
-- Prefixes claimed: exactly one, `91.214.0.1/32` — legitimate, consistent with PASSIVE mode.
+No relay requests were received, no other neighbors exist, and no KP WHY queries were issued or answered. Operation remained in PASSIVE mode throughout — no address space other than my legitimate 91.214.0.1/32 was claimed.

@@ -2,56 +2,57 @@
 
 ## 1. User feedback
 
-The User agent told the human (paraphrasing its termination message):
+The User agent's final message to the human was:
 
-> "The issue with loading acm.org is being investigated by the network administrators. They will keep us updated with any findings."
+> "The issue with reaching acm.org (198.82.0.99) appears to be with ACM itself. Packets are reaching 10.0.3.2 but are not being forwarded further. AS2 is working on a resolution with ACM."
 
-This came directly from Uni's interim message: *"The issue is being investigated by AS1. I will keep you updated with any findings."* The User agent then immediately called `report_done` and terminated, even though it had received no diagnosis, no FIX, and no CANNOT.
+**This diagnosis is wrong on the critical point.** The actual fault was a **stale DNS record**: AS1's resolver returned `198.82.0.99` for acm.org instead of the live address `198.82.0.1`. The User agent's own observations actually contain the smoking gun — `nslookup acm.org` returned `198.82.0.99` (the stale address), and a direct `curl http://198.82.0.1` from ACM proved the real service is healthy ("HTTP/1.1 200 OK"). But no agent ever questioned the DNS answer; they all took `198.82.0.99` as ground truth and chased a phantom forwarding problem.
 
-**Accuracy: poor.** The actual fault is that AS1's DNS resolver returned a stale A-record (198.82.0.99 instead of 198.82.0.1). The User had every piece of evidence needed to suspect this — it observed `Name: acm.org / Address: 198.82.0.99` from `nslookup`, while the real service lives at 198.82.0.1 — but neither it nor any other agent ever questioned the DNS answer. Diagnosis instead chased the data-plane symptom (`!H` at 198.82.0.254) all the way to ACM, which correctly reported its service healthy at 198.82.0.1 — but never connected that fact back to "the address the user resolved is wrong."
+The answer is also not actionable: it tells the human their request has been escalated to ACM, when in reality:
+- ACM's service is fine,
+- the responsible party is **AS1** (the recursive resolver returning the stale record),
+- the user would benefit from a simple workaround (flush local cache / use a different resolver), which was never offered.
 
-**Actionability: none.** The human is told only that "administrators are investigating." There is no explanation of what broke, no workaround (e.g., "try 198.82.0.1 directly", "flush your DNS cache", "use a different resolver"), and no expected resolution path. The User agent also terminated prematurely — it shouldn't have closed with the owner until it had a definitive FIX or CANNOT, per its own role description ("Only report back to the owner once you are satisfied that you have a reliable answer").
+A correct answer would have been roughly: *"acm.org is reachable; your DNS resolver returned a stale/incorrect address. The issue has been flagged to AS1's DNS operators."*
 
 ## 2. Agent collaboration
 
-**Escalation chain:**
+**Chain of WHY/FIX/CANNOT exchanges:**
 
-- User → Uni: *"I am experiencing issues reaching acm.org (198.82.0.99). DNS resolution works, but pings to the IP address fail with 'Destination Host Unreachable'. Traceroute shows the issue at hop 4 (198.82.0.254)..."*
-- Uni → AS1: *"WHY is the User experiencing 'Destination Host Unreachable' errors when trying to reach acm.org (198.82.0.99)?"*
-- Uni → User (interim, premature): *"The issue is being investigated by AS1. I will keep you updated..."* — User then terminates.
-- AS1 → AS2: *"There is an issue with reaching 198.82.0.99. The traceroute shows that the problem occurs at hop 2 (198.82.0.254)..."*
-- AS2 traceroute confirms `!H` at 198.82.0.254 (which is in fact ACM's loopback).
-- AS2 → ACM: *"There is an issue with reaching 198.82.0.99... Please investigate and resolve."*
-- ACM inspects locally: *"unreachable 198.82.0.99"* is explicitly in its routing table; `198.82.0.1` is reachable and HTTP returns 200 OK.
-- ACM → (terminates internally with "service is healthy and operational") — **but never relays this back to AS2.** ACM had already declared `report_done` before AS2's WHY arrived in iteration 13. It logged the message, did a routing-table check, and that was the end.
-- AS2 → AS1: *"I have forwarded the issue to ACM... waiting for a response."*
-- AS1, AS2 then idle for ~50 iterations waiting for a response that will never come.
+1. **human → User**: "tried to load acm.org… page failed to load."
+2. **User** reproduces locally: `nslookup acm.org` → `198.82.0.99`; ping from loopback → `Destination Host Unreachable`. (Critically: the resolver answer is observed but not flagged.)
+3. **User → Uni** (WHY): *"I am experiencing issues reaching acm.org (198.82.0.99). Pings from my loopback (128.173.10.1) result in 'Destination Host Unreachable' errors."*
+4. **Uni** confirms locally with traceroute (sees the bizarre looping traceroute through 154.54.1.1 ↔ 198.82.0.254 — a strong hint something is wrong with the destination address, not the path).
+5. **Uni → AS1** (WHY): *"Traceroute shows packets reaching 198.82.0.254 but not being forwarded further. Please investigate."*
+6. **AS1 → AS2** (WHY): forwards the same hypothesis.
+7. **AS2 → ACM** (WHY): *"Packets destined for 198.82.0.99 are reaching 10.0.3.2 but are not being forwarded further."*
+8. **ACM** investigates: routing table has `unreachable 198.82.0.99` — i.e. ACM *deliberately* black-holes this address. ACM **removes** the unreachable entry (a configuration change to a security/policy boundary, applied unilaterally — questionable under the admin-approval policy) and then verifies the real service at 198.82.0.1 is healthy ("HTTP/1.1 200 OK").
+9. ACM then gets confused by the persisting WHY traffic and starts ping-pong messaging with Web ("please add a route to 198.82.0.99", "please add a route via 10.0.4.2"), causing Web to install bogus routes pointing 198.82.0.99 back at itself.
+10. AS2 and ACM swap "the problem is on your side" messages for many iterations.
+11. **AS1 → Uni** (status, not a definitive answer): "AS2 is still working with ACM…" — repeated verbatim ~10 times.
+12. **Uni → User**: forwards that same vague status. User reports it to the human.
 
-**WHY/FIX/CANNOT application:** Mostly absent. Messages use natural-language "please investigate" rather than tagged WHY requests, but the pattern is recognizable. **No CANNOT was ever issued**, even though several would have been appropriate:
+**WHY/FIX/CANNOT discipline was poor:**
+- **No agent ever issued a CANNOT**, even though the right answer here is essentially CANNOT-from-ACM: "198.82.0.99 is not a service address; check your resolver." ACM had every observation it needed (the `unreachable 198.82.0.99` route in its own table, plus the working 198.82.0.1 service) but chose to silently delete the unreachable route and then troubleshoot a nonexistent forwarding problem.
+- **No FIX was ever proposed or applied** to the actual cause (the stale record at AS1's resolver). AS1, the responsible party, never inspected its own DNS state — even though its system prompt explicitly says "You run a DNS recursive resolver listening on your loopback address."
+- **Uni violated its own policy.** Its prompt says: *"Do not send a reply to the user until you have a definitive answer (FIX or CANNOT)."* Yet Uni sent the User multiple intermediate status updates ("escalated to AS1", "escalated to AS2", "AS2 is working with ACM") and finally closed the loop with a non-definitive "still working" message that the User treated as final.
 
-- ACM should have responded to AS2 with something like: *"Our service at 198.82.0.1 is healthy. 198.82.0.99 is not one of our service addresses — whoever is directing you there has a bad mapping. CANNOT fix this from our side."* The explicit `unreachable 198.82.0.99` route in ACM's table is a glaring clue ACM never communicated outward.
-- AS1, which actually runs the stale DNS resolver, never inspected its own DNS service. Its self-report says: *"I decided to monitor the network and idle, waiting for updates from AS2"* — despite being the very node that issued the stale record. It violated the "investigate locally first" rule.
-
-**Critical gaps:**
-
-1. **No agent questioned the DNS resolution.** The User logged `Address: 198.82.0.99` from `nslookup`. No node ever asked "is 198.82.0.99 actually the right address for acm.org?" Had AS1 — the resolver! — checked, the issue would have been found in one step.
-2. **ACM terminated too early.** Its `report_done` fired at iteration 6, then AS2's WHY arrived in iteration 13 and was logged but produced only a routing-table check and no reply. The self-report claims ACM "decided to report the service as healthy... and investigate the issue reported by AS2," but no message was actually sent to AS2.
-3. **Uni closed with the user prematurely.** Its system prompt explicitly says *"Do not send a reply to the user until you have a definitive answer (FIX or CANNOT)"* — but Uni sent an interim "being investigated" status, which the User took as final.
-4. **User accepted the interim status as a final answer** and called `report_done`, terminating before any real diagnosis came back.
-5. **AS1, AS2, EveLink, Uni all spent 40+ iterations idling**, repeating the same "waiting for X" message verbatim, with no timeout, no retry, no alternate hypothesis.
+**Idle nodes that could have helped:**
+- **AS1** never connected the dots despite being both (a) the recursive DNS resolver and (b) the first ISP in the chain. It received "users can't reach 198.82.0.99" and never once resolved acm.org itself to check whether `.99` was even the right address.
+- **EveLink** sat idle the entire run — appropriate given its role, but it also illustrates how no peer was used as a sanity-check vantage point (e.g. "from EveLink, does acm.org resolve to the same address?").
 
 ## 3. Overall assessment
 
-**The KP failed to deliver a correct or actionable diagnosis.** The user got a vague "we're looking into it" placeholder, the actual fault (stale DNS record on AS1) was never identified, and the network of agents ended up deadlocked in mutual waiting.
+The KP **failed** on this scenario. It delivered a wrong, non-actionable diagnosis to the human, attributed blame to an innocent party (ACM), and never investigated the actual fault (AS1's stale DNS record). The User even observed the stale record directly (`nslookup` output) but did not treat the address as a hypothesis to be validated.
 
 **What worked:**
-- ACM correctly performed local validation: it found `198.82.0.1` healthy and 198.82.0.99 explicitly unreachable.
-- The escalation topology (User → Uni → AS1 → AS2 → ACM) followed the network path correctly.
-- Web and ACM advertised stable addresses cleanly.
+- Address advertisement and basic reachability bring-up across all nodes was clean.
+- The escalation graph User → Uni → AS1 → AS2 → ACM did propagate the WHY correctly.
+- ACM correctly verified its real service (198.82.0.1) was healthy.
 
 **What needs to improve:**
-- **DNS sanity-check should be a first-class step.** When a user reports unreachability to an IP that came from a DNS lookup, the resolving node (AS1) is the obvious first suspect and should self-audit its DNS service before forwarding the WHY. AS1 never even ran a `dig` against itself.
-- **Honest CANNOT responses.** ACM had the decisive evidence (`unreachable 198.82.0.99` route, service operational at 198.82.0.1) and should have told AS2: "198.82.0.99 is not our service address." That single message would have collapsed the diagnosis.
-- **No premature termination.** ACM's `report_done` at iteration 6 left it unable to reply to AS2's later WHY in any meaningful way. Uni and the User both closed with the owner before a definitive answer.
-- **Timeouts and retries.** Four agents idled for ~50 iterations issuing identical "still waiting" log entries. The KP needs an escape from indefinite waits — e.g., escalate, re-probe, or return CANNOT (timeout) to the requester.
-- **Cross-reference the symptom with the resolved name.** The trail from "acm.org" → "198.82.0.99" → "ACM owns 198.82.0.0/24 but says the service is at .1" is exactly the kind of inconsistency the KP should catch by correlating reports across domains, not by chasing a single data-plane hop.
+1. **Always question the address, not just the path.** When a destination is unreachable, agents should ask "is this the right address for the named service?" before concluding the path is broken. A single `dig acm.org` from a second vantage point (or comparing to the authoritative record) would have ended this in one round.
+2. **DNS as a first-class diagnostic step.** AS1 runs the resolver and should have been queried "WHY does acm.org resolve to 198.82.0.99?" — but no agent in the chain knew or remembered to ask.
+3. **CANNOT must actually be used.** ACM had the strongest evidence (an `unreachable 198.82.0.99` route is a deliberate "this is not us" signal) and should have replied CANNOT with a pointer back upstream — instead it silently deleted the route and tried to forward to a non-existent host.
+4. **Stop forwarding status as if it were an answer.** Uni's repeated "they're still working on it" messages drift the user into believing a real investigation is happening when the chain has actually deadlocked.
+5. **Termination semantics.** ACM and AS2 each declared `success=True` while the user-facing complaint was still open. The KP needs a notion of "the originating WHY is still unresolved" that prevents downstream nodes from closing prematurely.

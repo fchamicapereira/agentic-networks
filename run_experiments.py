@@ -2,7 +2,6 @@
 
 import argparse
 import subprocess
-import sys
 
 import tomli as tomllib
 from pathlib import Path
@@ -42,15 +41,12 @@ def experiment_to_args(
 
 def build_command(
     exp: dict,
-    docker: bool,
     exp_args_overrides: dict,
 ) -> list[str]:
+    """Build the command to run an experiment (always via the Docker runner)."""
     script = exp["script"]
     exp_args = experiment_to_args(exp, exp_args_overrides)
-    if docker:
-        return ["bash", str(DOCKER_RUNNER), script] + exp_args
-    else:
-        return [sys.executable, script] + exp_args
+    return ["bash", str(DOCKER_RUNNER), script] + exp_args
 
 
 def find_final_report(
@@ -66,7 +62,6 @@ def find_final_report(
 
 def run_experiment(
     exp: dict,
-    docker: bool,
     index: int,
     total: int,
     exp_args_overrides: dict,
@@ -80,7 +75,7 @@ def run_experiment(
         print(f"{BOLD}{CYAN}{'='*60}{RESET}")
         print(f"  {existing}")
         return
-    cmd = build_command(exp, docker, exp_args_overrides)
+    cmd = build_command(exp, exp_args_overrides)
     print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
     print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']}{RESET}")
     print(f"{BOLD}{CYAN}{'='*60}{RESET}\n")
@@ -110,7 +105,6 @@ def parse_args():
     parser.add_argument("--model", "-m", required=True, choices=models, metavar="MODEL", help=f"Model to use for all experiments. Choices: {{{', '.join(models)}}}")
     parser.add_argument("--filter", "-f", nargs="+", metavar="NAME", help="Run only experiments with these exact names")
     parser.add_argument("--list", "-l", action="store_true", help="List available experiment names and exit")
-    parser.add_argument("--docker", "-d", action="store_true", help=f"Run each experiment via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
     parser.add_argument("--debug", action="store_true", help="Pass --log-level DEBUG to each experiment")
     parser.add_argument("--print-commands", "-p", action="store_true", help="Print the command for each experiment and exit without running")
     parser.add_argument("--vllm-host", metavar="HOST", help="vLLM server host to pass to each experiment (overrides TOML value)")
@@ -145,17 +139,16 @@ def main():
 
     if args.print_commands:
         for exp in selected:
-            cmd = build_command(exp, docker=args.docker, exp_args_overrides=overrides)
+            cmd = build_command(exp, exp_args_overrides=overrides)
             print(f"# {exp['name']}")
             print(" ".join(cmd))
         return
 
-    print(f"Running {len(selected)} experiment(s)" + (f" in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}" if args.docker else ""))
+    print(f"Running {len(selected)} experiment(s) in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
 
     for i, exp in enumerate(selected, 1):
         run_experiment(
             exp,
-            docker=args.docker,
             index=i,
             total=len(selected),
             exp_args_overrides=overrides,

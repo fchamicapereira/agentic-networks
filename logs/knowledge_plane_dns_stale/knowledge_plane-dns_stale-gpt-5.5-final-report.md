@@ -1,77 +1,63 @@
-# Knowledge Plane Analysis: `dns_stale` fault
+# Knowledge Plane Analysis: dns_stale fault
 
 ## 1. User feedback
 
-The User agent's final message to the human was:
+The User agent's final report to the human owner was:
 
-> "I investigated the acm.org loading failure. The laptop and university link are working, and general upstream connectivity is OK. The problem is not on your laptop: the network resolver is currently returning the wrong/stale address for acm.org (198.82.0.99), and that address is no longer a valid reachable ACM web-service address, causing traffic to loop/fail upstream. The Knowledge Plane confirmed the working ACM service address is 198.82.0.1, and I verified that 198.82.0.1 is reachable from this laptop. The issue has already been escalated to the upstream administrators to approve and apply the DNS fix. In the meantime, use http://198.82.0.1/ directly, or use a DNS resolver that returns 198.82.0.1 for acm.org."
+> "I reproduced the acm.org failure from the laptop. DNS here resolves acm.org to 198.82.0.99, but that host is unreachable behind ACM's gateway (198.82.0.254); direct HTTP to the IP also fails, so this is not a browser problem and no change is needed on the laptop. The Knowledge Plane confirmed the issue upstream: another resolver points acm.org to 198.82.0.1, which is reachable, while AS1's resolver currently returns the unreachable 198.82.0.99. AS1 has already notified the administrators and is waiting for ACM/admin approval to correct the customer DNS/service configuration. A separate default-route issue was also found for general off-campus connectivity, but it is separate from the acm.org failure."
 
-**Accuracy.** This matches the injected fault almost perfectly. The fault description states that "AS1's DNS resolver returns a stale record for acm.org: 198.82.0.99 instead of the current 198.82.0.1," and the user is told exactly that. The diagnosis correctly attributes the symptom to DNS staleness, identifies the right responsible domain (AS1's resolver), and confirms that the real service at 198.82.0.1 is operational.
+**Accuracy:** The diagnosis is **essentially correct** and matches the injected fault. AS1's resolver is indeed returning a stale `198.82.0.99` instead of the correct `198.82.0.1`, and the user's HTTP requests do fail because `198.82.0.99` is rejected. The agent correctly identified:
+- The symptom (DNS returns an address that yields no route to host).
+- The responsible domain (AS1's resolver).
+- That no laptop-side change is warranted.
 
-**Actionability.** The message explains both *what broke* (stale DNS for `acm.org`) and *what the human can do about it* (use the correct IP directly, or switch resolver). It also correctly conveys that admins have already been notified — exactly the behavior the role prompt mandates ("if the KP says it has escalated the matter to administrators, it has already done so — the owner does not need to contact anyone themselves").
+**One minor inaccuracy in attribution:** The User says AS1 "is waiting for ACM/admin approval to correct the customer DNS/service configuration." The fault is purely an AS1 DNS resolver issue — ACM's approval is not required. This phrasing slightly muddles which administrator is responsible, but the user is still correctly told that a network administrator (upstream) has been notified and that no user action is needed.
 
-One minor imperfection: the message says traffic "loop/fail upstream," which mixes in an artifact (the AS1↔AS2 loop for the now-withdrawn `198.82.0.99`) that is somewhat tangential to the actual DNS root cause. But this does not mislead the user; the core diagnosis and remedy are correct.
+**Actionability:** Appropriately so — there is nothing the human can do, and the agent says so plainly while explaining the cause in lay terms.
 
 ## 2. Agent collaboration
 
-**First escalation.** User reproduced the failure locally and escalated to its KP contact Uni:
+**Escalation chain.** The User agent first issued the WHY upward:
 
-> User → Uni: "KP problem report from User: The laptop owner reported acm.org failed to load… DNS resolves acm.org to 198.82.0.99. ping … gets Destination Host Unreachable… curl … fail … with 'No route to host' connecting to 198.82.0.99."
+> User → Uni: *"Please ask the Knowledge Plane to diagnose this... DNS resolves acm.org to 198.82.0.99; ping... gets ICMP Destination Host Unreachable from 198.82.0.254..."*
 
-Uni audited locally first (routing, forwarding, iptables/NAT, ping to AS1 loopback), found Uni clean, and escalated upward to AS1:
+Uni performed local audit (route, `ip_forward`, iptables, NAT, ping reproduction) before escalating, as the policy requires.
 
-> Uni → AS1: "KP WHY request from Uni on behalf of User 128.173.10.1: acm.org resolves to 198.82.0.99 and is unreachable… Please investigate upstream reachability/routing for 198.82.0.99/acm.org and reply with FIX or CANNOT; relay further if AS2/ACM owns the fault."
+**Key message sequence:**
 
-**Key message exchanges (approximate order):**
+1. User → Uni: WHY — acm.org unreachable, DNS=198.82.0.99, ICMP host-unreachable from 198.82.0.254.
+2. Uni → AS1: WHY (with local audit attached) — Uni forwarding is healthy; failure is upstream.
+3. AS1 (local audit): `dig @4.2.2.1 acm.org A` → `198.82.0.99`; `dig @154.54.1.1 acm.org A` → `198.82.0.1`. AS1 finds its own dnsmasq process: `--address=/acm.org/198.82.0.99 --listen-address=4.2.2.1`.
+4. AS1 → AS2: WHY — asking ACM's side to confirm intended address.
+5. AS2 → ACM: WHY relay.
+6. ACM → Web: internal WHY — confirm service health and that 198.82.0.99 is not local.
+7. Web → ACM: *"lo has 198.82.0.1/32 only; 198.82.0.99 is not assigned... HTTP GET... returned HTTP 200... Diagnosis: user outage is consistent with incorrect DNS A record acm.org=198.82.0.99 at the AS1 resolver, not a Web service failure."*
+8. ACM → AS2 → AS1: authoritative diagnosis — `acm.org` should be `198.82.0.1`; `198.82.0.99` is invalid.
+9. AS1 → Uni: CANNOT pending admin approval.
+10. Uni → User: CANNOT, explained in plain terms.
 
-- User → Uni: WHY (acm.org fails, DNS = 198.82.0.99, no route to host).
-- Uni → AS1: WHY (escalates after local audit clean).
-- AS1: local audit — `dig @4.2.2.1 acm.org` returns `198.82.0.99`; `198.82.0.1` reachable & HTTP 200; pings to `198.82.0.99` get ICMP Redirect from `154.54.1.1` (loop).
-- AS1 → AS2: WHY/escalation (loop on withdrawn `198.82.0.99`).
-- AS2: audits, finds default route sends `198.82.0.99` back to AS1; installs `blackhole 198.82.0.99/32`.
-- AS2 → AS1: FIX response (blackhole installed).
-- AS1: deeper DNS audit — finds `dnsmasq … --address=/acm.org/198.82.0.99` static override.
-- AS1 → Uni: CANNOT (DNS override change requires AS1 admin approval).
-- ACM ↔ AS2 ↔ AS1: parallel WHY/FIX chain confirming the same DNS root cause; ACM also sends a relay FIX request via AS2 asking AS1 to correct the resolver.
-- Uni → User: definitive CANNOT with workaround.
-- User → human: final report.
+**WHY/FIX/CANNOT discipline.** All agents applied the pattern correctly. The key CANNOT from AS1:
 
-**WHY / FIX / CANNOT pattern.** Applied correctly throughout:
+> *"Changing AS1 resolver configuration affects customer DNS service, so I will not change it without ACM confirmation/admin approval... CANNOT pending admin approval/action."*
 
-- WHYs were used for upward queries (User→Uni→AS1; AS1→AS2 for the loop; ACM→AS2→AS1 for DNS).
-- A FIX was applied where the domain had authority and the change was low-risk: AS2's blackhole for the withdrawn `/32`:
+This is a defensible application of policy — AS1's resolver serves many customers, so unilaterally rewriting an A record (even a clearly stale one) is reasonably gated on admin sign-off. However, one could argue the agent could have been more decisive: AS1 had direct evidence its own dnsmasq was misconfigured, ACM (the authoritative party) confirmed the right address, and the "fix" (remove a stale static override) is low risk and reversible. The conservative CANNOT is policy-correct but means the outage persists until a human acts.
 
-  > AS2: "I installed a local blackhole host route for 198.82.0.99/32 at AS2 so the withdrawn/unowned address is not returned to AS1."
-
-- CANNOT was used correctly by AS1 for the DNS override, because changing customer-facing recursive DNS answers crosses an admin/security boundary:
-
-  > AS1: "Because changing recursive DNS answers affects customers/other parties, administrators have been notified and this requires approval. CANNOT apply DNS fix autonomously; pending admin action."
-
-This is the right call under the admin-approval policy. Note, however, that the override is *clearly wrong* (`acm.org` is misdirected to an unowned address), so an argument could be made that reverting an obvious misconfiguration is closer to "fix a corrupted local entry" than to a deliberate security decision. The policy as written ("Changes to access control or security enforcement… always require admin approval") arguably doesn't even cover DNS data, but AS1 chose the conservative interpretation. Either reading is defensible.
-
-**Gaps.** No agent sat idle inappropriately:
-
-- EveLink had no role to play and correctly stayed quiet after its local checks.
-- Web responded fully and accurately to ACM about service health.
-- ACM independently used `dig` against both resolvers (`@154.54.1.1 → 198.82.0.1`, `@4.2.2.1 → 198.82.0.99`), which corroborated AS1's findings from an external vantage.
-
-The main inefficiency: AS1, Uni, and ACM all then sat idle for ~30+ iterations polling for admin approval that would never arrive, when the diagnosis and CANNOT had already been delivered. Calling `report_done` after the CANNOT was the right move (and the User and AS2 agents did), but Uni and AS1 ran to max iterations.
+**Gaps / noise.**
+- AS1 and AS2 also discovered an unrelated default-route loop (peer-to-peer default routing). AS2 self-corrected its side; AS1 escalated its side as CANNOT. This was diagnosed and reported but inflated the message volume.
+- After termination, AS1 spent many idle iterations re-deciding to do nothing, which is harmless but wasteful.
+- No agent went idle on the actual fault path — every node that could contribute did so promptly.
 
 ## 3. Overall assessment
 
-The KP delivered a **correct and timely** answer for this fault. Within roughly three iterations after User's initial complaint, Uni had relayed the WHY to AS1, AS1 had pinpointed both the routing-loop artifact and the stale DNS as root cause, and a workaround was on the way back to the human. The cross-domain investigation extended naturally to ACM and AS2, who validated the same diagnosis from independent vantages (ACM: "AS2 resolver 154.54.1.1 returned 198.82.0.1 … AS1 resolver 4.2.2.1 returned stale 198.82.0.99").
+The KP delivered a **correct and timely diagnosis**, completing the full causal chain (User symptom → Uni audit → AS1 local DNS discovery → AS2 corroboration → ACM authoritative confirmation → Web internal verification) in roughly 4 minutes. The human-facing message correctly explained the cause and absolved the laptop.
 
 **What worked well:**
+- Local-first audit discipline (Uni checked forwarding/firewall/NAT before escalating).
+- Cross-vantage corroboration: comparing AS1's resolver answer with AS2's resolver answer immediately localized the fault.
+- ACM/Web maintained organizational boundary discipline — Web shared full health internally, ACM shared only the service status externally.
+- User agent reproduced the failure objectively (DNS, ping, curl, TTL-limited probes) instead of relaying the human's complaint verbatim.
 
-- Strict local-first auditing at every hop (Uni's iptables/NAT/forwarding check; AS1's `ss`/`ps` discovery of the actual `dnsmasq --address=/acm.org/198.82.0.99` override) — this avoided premature finger-pointing.
-- A genuinely low-risk, reversible fix (AS2's `/32` blackhole) was applied autonomously to remove a routing-loop side effect, while the security-sensitive DNS change was correctly deferred.
-- The User agent translated technical observations into a clear, non-technical, actionable summary for the human, including a usable workaround.
-- Service-status reporting from ACM stayed within the organizational boundary policy: it reported its public service as healthy without leaking internal details.
-
-**What would need to improve:**
-
-- **Admin-approval modeling for obvious misconfiguration.** A static override pointing `acm.org` at an unowned address is unambiguous misconfiguration. A more nuanced policy might let the KP propose a specific revert (with diff and audit log) and apply it under a "self-correcting obvious mistake" rule, rather than block indefinitely on admin approval. As implemented, the user is permanently stuck with a workaround.
-- **Termination semantics.** AS1 and Uni continued to spin idle for dozens of iterations after delivering their final CANNOT, wasting tokens and adding KP chatter. Agents should `report_done` once they have a definitive answer and no remaining authoritative action.
-- **Separating symptom from cause in user-facing messages.** The User agent's final answer slightly conflates the (already-fixed) AS1↔AS2 loop with the (still-unfixed) DNS staleness. For reliability across more complex scenarios, the final summary should clearly distinguish the active root cause from incidental, already-mitigated artifacts.
-
-Overall, for a DNS-staleness fault — exactly the type of cross-domain, non-local problem the Knowledge Plane was designed for — the KP succeeded: it identified the right cause, attributed it to the right domain, took the only safe autonomous action available, and gave the human a working answer.
+**What needs improvement:**
+- **Action vs. CANNOT calibration.** A stale local DNS override that the owning resolver itself confirms is wrong, with the authoritative content provider confirming the correct value, is exactly the case where automated remediation would be most valuable. The KP gathered all the information needed to fix the outage in seconds, then stopped. Policy should distinguish "remove a demonstrably stale static override" from "change customer-facing DNS policy" so trivial fixes can self-heal.
+- **Minor attribution slip** in the user-facing message (saying ACM approval is awaited) — agents should be precise about which administrator owns which fix.
+- **Idle-loop overhead.** AS1 spent ~45 iterations idling after CANNOT. A "done pending external action" terminal state would save tokens.

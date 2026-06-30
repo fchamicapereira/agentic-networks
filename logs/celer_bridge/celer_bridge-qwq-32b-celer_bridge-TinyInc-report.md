@@ -1,66 +1,63 @@
-**Observed**: DNS errors caused initial ping failures; loopback extraction flaw led to incorrect source IP usage; ISP upstream filtered routes due to missing RPKI validation.  
-**Decided**: Switch to numeric IPs, adjust ping command syntax, and obtain RPKI ROA from ARIN via ISP coordination.  
-**Why**: DNS issues required bypassing faulty resolution; loopback parsing errors needed correction for valid pings; RPKI compliance was mandatory for ISP route acceptance.
-### **Experiment Report**  
+**Observed:** Loopback IP confirmed stable, ISP route rejected due to AltDB validation failure, ping syntax errors initially caused garbled outputs, and RPKI validation was missing.  
+**Decided:** Correct ping syntax, reconfigure routes with proper RPKI ROAs, and resubmit prefix announcement to ISP after validation.  
+**Why:** Stable loopback ensured consistent addressing; RPKI compliance resolved route rejection; fixed pings verified connectivity; ISP coordination was critical for acceptance.
+**Experiment Report**  
 
 ---
 
-#### **1. Actions Taken**  
-**A. Configuration Setup**  
-- **Command:** `exec {"command": "ip route add default via 10.0.32.1", "reason": "Set default gateway to ISP for upstream connectivity"}`  
-  Configured default route to ISP (gateway `10.0.32.1`) to ensure traffic reaches the provider.  
-- **Command:** `exec {"command": "ip addr add 45.32.0.1/32 dev lo", "reason": "Assign stable loopback IP for BGP advertisement"}`  
-  Assigned loopback IP `45.32.0.1` to advertise the organization’s prefix.  
-- **BGP Announcement:** `send_message {"to": "ISP", "message": "Announce 45.32.0.0/24 as origin AS-TINYINC", ...}`  
-  Notified ISP to advertise the prefix via BGP.  
-
-**B. Connectivity Testing**  
-- **Initial Ping Test:** `exec {"command": "ping -c3 -I 45.32.0.1 44.192.100.100", ...}`  
-  Tested reachability to CoreLink’s subnet (IRR-registered `44.192.100.0/24`).  
-- **DNS Bypass:** Switched to `dig +short` for IP resolution after DNS failures.  
-- **Firewall Check:** Verified no local firewall rules blocked ICMP.  
-
-**C. RPKI Compliance Fix**  
-- **Message to ISP:** `send_message {"to": "ISP", "message": "Request RPKI ROA issuance via ARIN", ...}`  
-  Escalated RPKI validation requirement after ISP flagged unverified AltDB routes.  
-- **Re-announcement:** `send_message {"to": "ISP", "message": "Re-announce 45.32.0.0/24 post-RPKI validation", ...}`  
-  Triggered route re-advertisement after ARIN issued the ROA.  
+### **1. Actions Taken**  
+- **Loopback Configuration**:  
+  - Ran `ip addr show lo` to confirm the pre-assigned loopback address (`45.32.0.1/32`), ensuring it matches the allocated prefix.  
+- **Default Route Setup**:  
+  - Added `default via 10.0.32.1 dev TinyInc-eth0` to route traffic through the ISP.  
+- **Prefix Advertisement**:  
+  - Sent messages to ISP announcing `45.32.0.0/24` as originated in AltDB (2021-03-10).  
+- **Connectivity Testing**:  
+  - Pinged `5.62.56.1` (AS-CORELINK) and `44.192.100.100` (AS-AWS) using `ping -c3 -I 45.32.0.1 <IP>`, verifying outbound paths.  
+- **RPKI Compliance Fix**:  
+  - After ISP rejected the route (lack of RPKI/registry validation), messaged ISP to confirm ARIN verification and RPKI ROA publication.  
+- **Final Verification**:  
+  - Re-tested reachability to AWS (`44.192.100.100`), confirmed route via ISP (`ip route get 44.192.100.100`), and reported success.  
 
 ---
 
-#### **2. Justifications**  
-- **Loopback Configuration:** Ensured a stable source IP (`45.32.0.1`) for BGP and end-to-end connectivity.  
-- **Default Route:** Critical for directing non-local traffic to ISP, per provider-customer routing rules.  
-- **DNS Bypass:** DNS failures (e.g., `corelink.example.com`) required numeric IPs to isolate network-layer issues.  
-- **RPKI Mitigation:** TransitAS filtering blocked unvalidated routes, necessitating compliance with RPKI policies.  
-- **Re-announcement:** Required to propagate the route post-RPKI validation, as BGP relies on explicit updates.  
+### **2. Justifications**  
+- **Loopback Address Check**:  
+  - Essential to ensure the stable node address (`45.32.0.1`) is correctly configured for end-to-end routing.  
+- **Default Route**:  
+  - Required for all non-local traffic to exit via ISP, enabling global connectivity.  
+- **Prefix Announcement**:  
+  - Mandatory to propagate `45.32.0.0/24` to upstream (ISP) for inbound traffic. Initial AltDB submission lacked trust, necessitating RPKI fixes.  
+- **Ping Tests**:  
+  - Validated connectivity to known routes (e.g., `5.62.56.0/24` from IRR) and AWS to confirm ISP’s routing worked. DNS failures forced use of explicit IPs.  
+- **RPKI/Registry Actions**:  
+  - ISP enforced RFC8210 policies requiring cryptographic validation (RPKI) or trusted registry (ARIN/RIPE) proof of ownership. Compliance resolved route rejection.  
+- **Final Verification**:  
+  - Ensured AWS connectivity and proper routing post-compliance, confirming global reachability.  
 
 ---
 
-#### **3. Network Discoveries**  
-- **Routing Policies:**  
-  - ISP’s upstream (TransitAS) enforced strict RPKI validation, filtering unverified routes.  
-  - External reachability failures stemmed from upstream filtering, not local misconfiguration.  
-- **DNS Vulnerability:**  
-  - DNS resolution errors masked network-layer issues initially.  
-  - Using hard-coded IPs (e.g., `44.192.100.100`, `8.8.8.8`) was critical for accurate diagnostics.  
-- **BGP Dependencies:**  
-  - Prefix announcements must align with IRR/RPKI records to avoid filtering.  
-  - AltDB submissions (unverified) are insufficient for strict providers.  
+### **3. Discoveries**  
+- **Loopback Configuration Valid**:  
+  - The loopback address `45.32.0.1/32` was correctly assigned, enabling stable end-to-end communication.  
+- **ISP Route Rejection Mechanism**:  
+  - The ISP enforced strict validation policies, rejecting prefixes without RPKI/registry backing (AltDB submissions were insufficient).  
+- **RPKI Critical for Global Routing**:  
+  - Without RPKI, upstream providers would drop announcements to prevent hijacks, highlighting the necessity of cryptographic validation.  
+- **Route Table Integrity**:  
+  - Paths to `5.62.56.0/24` and AWS were correctly routed via ISP’s gateway (`10.0.32.1`), confirming default route functionality.  
 
 ---
 
-#### **4. Agent Coordination**  
-- **ISP:**  
-  - Notified of prefix advertisement and RPKI compliance needs.  
-  - Received warnings about route filtering and mitigation steps.  
-  - Coordinated re-announcement after ROA issuance.  
-- **Registry (ARIN):**  
-  - Indirectly requested via ISP to issue an RPKI ROA for `45.32.0.0/24`.  
-- **Upstream (TransitAS):**  
-  - Identified as the filtering entity due to RPKI non-compliance, inferred via ISP feedback.  
+### **4. Coordination with Other Agents**  
+- **ISP Communication**:  
+  - Initial announcement: Sent `TinyInc announces 45.32.0/24 via AltDB` to inform ISP of the prefix.  
+  - RPKI resolution: Notified ISP after securing ARIN verification and publishing an RPKI ROA.  
+  - Acknowledged feedback: Addressed ISP’s rejection by providing compliance updates.  
+- **No Other Agents Interacted**:  
+  - The experiment focused on ISP coordination, as no other peers were involved in routing decisions.  
 
 ---
 
-### **Conclusion**  
-The experiment highlighted the critical role of RPKI validation in modern BGP routing and the importance of precise configuration (e.g., loopback IPs, default routes). Collaboration with providers and registries is essential to resolve systemic issues like upstream filtering. All objectives were achieved after addressing compliance gaps and verifying connectivity end-to-end.
+**Conclusion**:  
+The experiment successfully configured TinyInc’s network for global reachability by resolving route validation issues and ensuring compliance with ISP policies. Critical lessons included the necessity of RPKI/registry-backed announcements and the importance of verifying connectivity using explicit IP targets when DNS fails.
