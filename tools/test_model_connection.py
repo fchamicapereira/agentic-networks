@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root on path
 
 from agentic_networks.agentic_network import MODELS
 from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
