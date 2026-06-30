@@ -72,26 +72,72 @@ UNICODE_REPLACEMENTS = {
     "⚠": "[!]",   # ⚠ warning sign
     "️": "",      # variation selector-16 (emoji presentation, invisible)
     "\U0001f6a8": "",  # 🚨 police car light
+    # Fullwidth / CJK punctuation -> ASCII equivalents (agents that switch to
+    # Chinese also emit the matching fullwidth punctuation).
+    "：": ":", "，": ",", "。": ".", "．": ".", "、": ",",
+    "（": "(", "）": ")", "；": ";", "？": "?", "！": "!", "＝": "=",
+    "「": '"', "」": '"', "『": '"', "』": '"', "【": "[", "】": "]",
+    # Superscripts (joining the existing "¹") and subscript x (joins the
+    # subscript digits above).
+    "⁰": "^0", "²": "^2", "³": "^3", "⁴": "^4", "⁵": "^5",
+    "⁶": "^6", "⁷": "^7", "⁸": "^8", "⁹": "^9",
+    "ₓ": "x",
+    # Circled digits used as inline list markers.
+    "①": "(1)", "②": "(2)", "③": "(3)", "④": "(4)", "⑤": "(5)",
+    "⑥": "(6)", "⑦": "(7)", "⑧": "(8)", "⑨": "(9)",
+    # Misc math / typographic punctuation.
+    "·": "*",      # · middle dot (used as a bullet / separator)
+    "⋅": "*",      # ⋅ dot operator
+    "⁄": "/",      # ⁄ fraction slash
+    "‑": "-",      # ‑ non-breaking hyphen
+    "─": "-",      # ─ box-drawing horizontal
+    "✖": "[X]",    # ✖ heavy multiplication x
+    "⇄": "<->",    # ⇄ rightwards-over-leftwards arrow
+    "\ufeff": "",  # zero-width no-break space / BOM
 }
 
 _REPLACE_RE = re.compile("|".join(re.escape(c) for c in UNICODE_REPLACEMENTS))
+# A run of consecutive non-ASCII characters left after applying the map above.
+# Whole runs (e.g. a Chinese phrase) collapse to a single placeholder rather than
+# one marker per character.
+_UNMAPPED_RUN_RE = re.compile(r"[^\x00-\x7f]+")
 
 
-def sanitize(text: str, source: str) -> str:
-    """Replace known non-ASCII characters with ASCII; warn on any others."""
+def sanitize(text: str, source: str, unmapped: str = "placeholder",
+             placeholder: str = "?") -> str:
+    """Map known non-ASCII to ASCII, then handle anything left over.
+
+    Most non-ASCII has an ASCII equivalent in UNICODE_REPLACEMENTS. What remains
+    (chiefly CJK ideographs and emoji that can't be transliterated) would break a
+    pdfLaTeX build, so by default each run is collapsed to ``placeholder``. Modes:
+    ``placeholder`` (default), ``strip`` (drop them), ``keep`` (leave as-is —
+    LaTeX may fail). Whatever is found is summarised on stderr.
+    """
     text = _REPLACE_RE.sub(lambda m: UNICODE_REPLACEMENTS[m.group()], text)
-    warn_unmapped(text, source)
+    leftover = [c for c in text if ord(c) > 127]
+    if leftover:
+        report_unmapped(leftover, source, unmapped, placeholder)
+        if unmapped == "placeholder":
+            text = _UNMAPPED_RUN_RE.sub(placeholder, text)
+        elif unmapped == "strip":
+            text = _UNMAPPED_RUN_RE.sub("", text)
     return text
 
 
-def warn_unmapped(text: str, source: str) -> None:
-    """Print a warning for any non-ASCII character left after sanitizing."""
-    seen = set()
-    for ch in text:
-        if ord(ch) > 127 and ch not in seen:
-            seen.add(ch)
-            print(f"WARNING: unmapped non-ASCII U+{ord(ch):04X} {ch!r} in {source}",
-                  file=sys.stderr)
+def report_unmapped(leftover: list[str], source: str, unmapped: str,
+                    placeholder: str) -> None:
+    """Summarise the non-ASCII characters with no ASCII mapping for `source`."""
+    from collections import Counter
+    counts = Counter(leftover)
+    action = {
+        "placeholder": f"replaced (per run) with {placeholder!r}",
+        "strip": "stripped",
+        "keep": "KEPT — pdfLaTeX will likely fail",
+    }[unmapped]
+    sample = " ".join(ch for ch, _ in counts.most_common(10))
+    print(f"NOTE: {len(leftover)} occurrence(s) of {len(counts)} unmapped non-ASCII "
+          f"char(s) {action} in {source} (e.g. {sample}). "
+          f"Run tools/scan_unicode.py for the full inventory.", file=sys.stderr)
 
 
 def extract_system_prompt(log_path: Path) -> str | None:
@@ -170,6 +216,15 @@ def main() -> int:
     parser.add_argument("--raw", action="store_true",
                         help="Copy reports/prompts verbatim without replacing "
                              "non-ASCII characters with ASCII equivalents.")
+    parser.add_argument("--unmapped", choices=["placeholder", "strip", "keep"],
+                        default="placeholder",
+                        help="What to do with non-ASCII that has no ASCII mapping "
+                             "(chiefly CJK/emoji): 'placeholder' collapses each run "
+                             "to --placeholder (default), 'strip' drops it, 'keep' "
+                             "leaves it (pdfLaTeX may fail).")
+    parser.add_argument("--placeholder", default="?",
+                        help="Replacement for unmapped non-ASCII runs when "
+                             "--unmapped=placeholder (default: '?').")
     args = parser.parse_args()
 
     if not args.logs_dir.is_dir():
@@ -193,7 +248,8 @@ def main() -> int:
         if info["final_report"].exists():
             report = info["final_report"].read_text(encoding="utf-8", errors="replace")
             if not args.raw:
-                report = sanitize(report, f"{name}/report.md")
+                report = sanitize(report, f"{name}/report.md",
+                                  args.unmapped, args.placeholder)
             (dest / "report.md").write_text(report, encoding="utf-8")
         else:
             print(f"WARNING: missing final report for {name}", file=sys.stderr)
@@ -205,7 +261,8 @@ def main() -> int:
                 print(f"WARNING: no system prompt in {log_path}", file=sys.stderr)
                 continue
             if not args.raw:
-                prompt = sanitize(prompt, f"{name}/{host}-prompt.txt")
+                prompt = sanitize(prompt, f"{name}/{host}-prompt.txt",
+                                  args.unmapped, args.placeholder)
             (dest / f"{host}-prompt.txt").write_text(prompt, encoding="utf-8")
             n_prompts += 1
             total_prompts += 1
