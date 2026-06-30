@@ -1,162 +1,190 @@
-Experiment report for ACM agent
+Experiment Report — ACM KP Agent
 
-1. Actions taken
+1. Actions Taken
 
-- Audited ACM local addressing and routing:
-  - Ran `ip addr show lo` to identify ACM’s stable loopback address.
-    - Found `198.82.0.254/32` on `lo`.
-  - Ran `ip addr show` to verify interface state.
-    - Confirmed `ACM-eth0` up toward AS2 with `10.0.3.2/30`.
-    - Confirmed `ACM-eth1` up toward Web with `10.0.4.1/30`.
-  - Ran `ip route show` to inspect routing.
-    - Found default route via AS2: `default via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`.
-    - Found service route to Web: `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 198.82.0.254`.
-
-- Advertised ACM reachability to AS2:
-  - Sent route advertisements to AS2 for:
-    - `198.82.0.254/32` — ACM stable loopback.
-    - `198.82.0.1/32` — ACM Digital Library web service.
-  - No `ip route add` or `ip route del` changes were needed on ACM because the necessary default and Web service routes were already installed.
-
-- Coordinated internally with Web:
-  - Asked Web to confirm its stable service address, route back to ACM, and HTTP service status.
-  - Web confirmed:
-    - Service loopback `198.82.0.1/32`.
-    - Default route via ACM `10.0.4.1`.
-    - HTTP service listening and returning ACM Digital Library content.
-
-- Verified local service reachability:
-  - Ran `ping -c 3 -I 198.82.0.254 198.82.0.1`.
-    - Result: 0% loss; ACM could reach the Web service from ACM’s stable loopback.
-  - Ran `curl -sS --interface 198.82.0.254 --max-time 5 -o /dev/null -w '%{http_code} %{time_total}\n' http://198.82.0.1/`.
-    - Result: HTTP `200`.
-
-- Verified upstream reachability:
-  - AS2 advertised its stable loopback as `154.54.1.1/32`.
-  - Ran `ping -c 3 -I 198.82.0.254 154.54.1.1`.
-    - Result: 0% loss.
-  - AS2 confirmed it installed ACM prefixes via `10.0.3.2`, exported them to AS1, and could fetch `http://198.82.0.1/` successfully.
-
-- Investigated a reported external fault from User `128.173.10.1`:
-  - AS2 relayed a WHY request reporting that User could ping `198.82.0.1`, but TCP to ports 80/443 was refused, while other sources succeeded.
-  - Audited ACM forwarding and policy:
-    - Ran `ip route show`.
-    - Ran route lookups including:
-      - `ip route get 198.82.0.1 from 128.173.10.1 iif ACM-eth0`.
-      - `ip route get 128.173.10.1 from 198.82.0.1 iif ACM-eth1`.
-    - Confirmed inbound User-to-Web traffic would forward via `ACM-eth1` to `10.0.4.2`.
-    - Confirmed return Web-to-User traffic would forward via `ACM-eth0` to AS2 `10.0.3.1`.
-    - Checked forwarding and reverse-path filtering with:
-      - `sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.ACM-eth0.rp_filter net.ipv4.conf.ACM-eth1.rp_filter`.
-    - Found IPv4 forwarding enabled.
-  - Audited ACM packet filtering:
-    - Ran `(iptables -S; iptables -t nat -S; iptables -t mangle -S) 2>/dev/null || true; (nft list ruleset) 2>/dev/null || true`.
-    - Found ACCEPT policies and no blocking rules.
-  - Checked for local listeners, policy routing, neighbors, and qdisc state:
-    - Ran `ip rule show`, `ip neigh show`, `ss -ltnp | grep -E '(:80|:443)'`, and `tc qdisc show`.
-    - Found no ACM-side policy routing or filter behavior explaining source-specific refusal.
-
-- Re-verified HTTP/HTTPS service:
-  - Ran curl tests from ACM loopback to `198.82.0.1`:
-    - HTTP returned `200`.
-    - HTTPS returned `200` when certificate verification was disabled.
-
-- Investigated TLS/SNI/certificate behavior:
+- Audited ACM local state:
   - Ran:
-    - `echo | openssl s_client -connect 198.82.0.1:443 -servername acm.org -showcerts 2>/dev/null | openssl x509 -noout -subject -issuer -ext subjectAltName`
-    - `echo | openssl s_client -connect 198.82.0.1:443 -servername www.acm.org -showcerts 2>/dev/null | openssl x509 -noout -subject -issuer -ext subjectAltName`
-  - Found both SNI names presented the same certificate:
-    - Subject `CN = acm.org, O = ACM Digital Library`.
-    - SANs: `DNS:acm.org`, `IP Address:198.82.0.1`.
-    - No SAN for `www.acm.org`.
-  - Ran curl hostname tests:
-    - `https://acm.org/` with `--resolve acm.org:443:198.82.0.1` returned HTTP `200`.
-    - `https://www.acm.org/` with normal certificate validation failed due to hostname mismatch.
+    - `ip addr show lo`
+    - `ip addr show`
+    - `ip route show`
+  - Found ACM stable loopback address:
+    - `198.82.0.254/32`
+  - Confirmed interfaces were up:
+    - `ACM-eth0` toward AS2: `10.0.3.2/30`
+    - `ACM-eth1` toward Web: `10.0.4.1/30`
+  - Observed existing routes:
+    - Default route via AS2:
+      - `default via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - Web service route:
+      - `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 198.82.0.254`
 
-- Responded to FIX requests:
-  - Confirmed to AS2 that the remaining fault was TLS certificate/SNI/vhost configuration for `www.acm.org`.
-  - Reported `CANNOT` for remediation because changing TLS certificate, SNI, vhost, DNS, or redirect behavior affects security policy and requires administrator approval.
-  - Notified Web to escalate the issue to ACM service/security administrators.
-
-2. Justification behind decisions
-
-- I first audited local interfaces, addresses, and routes because KP guidance requires investigating locally before escalating.
-- I used the loopback address `198.82.0.254` as the source for diagnostics because link addresses are point-to-point infrastructure addresses and remote nodes may not route back to them.
-- I advertised only ACM’s stable loopback and hosted service prefixes, not point-to-point infrastructure links, because only stable/service addresses should be reachable network-wide.
-- I did not install any new ACM routes because the routing table already had:
-  - A correct default route via AS2.
-  - A correct route to the Web service via Web.
-- I asked Web to verify its own service and return route because Web is the actual HTTP/HTTPS endpoint and belongs to ACM’s organization, so internal coordination was appropriate.
-- I asked AS2 to confirm route installation/export because AS2 is ACM’s upstream and responsible for exporting ACM customer prefixes.
-- When User reported source-specific TCP refusal, I checked ACM routing, forwarding, rp_filter, iptables/nft, policy routing, and traffic control before blaming Web or external domains.
-- I did not change firewall, ACL, TLS, certificate, vhost, or security-related settings because the admin approval policy prohibits autonomous changes to security enforcement or security-sensitive service configuration.
-- I reported public service status externally but avoided unnecessary internal implementation detail except with Web, which is internal to ACM.
-- Once the fault was narrowed to TLS hostname validation for `www.acm.org`, I returned `CANNOT pending admin action` because certificate/SNI/vhost remediation requires administrator approval.
-
-3. Discoveries about the network
-
-- ACM stable loopback:
-  - `198.82.0.254/32`.
-
-- ACM physical links:
-  - To AS2:
-    - ACM IP `10.0.3.2/30`.
-    - AS2 peer `10.0.3.1/30`.
+- Verified direct link connectivity:
   - To Web:
-    - ACM IP `10.0.4.1/30`.
-    - Web peer `10.0.4.2/30`.
+    - `ping -c 2 -I 10.0.4.1 10.0.4.2`
+    - Result: 0% loss
+  - To AS2:
+    - `ping -c 2 -I 10.0.3.2 10.0.3.1`
+    - Result: 0% loss
 
-- ACM routing:
-  - Default route to Internet via AS2:
-    - `default via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`.
-  - Web service route:
-    - `198.82.0.1 via 10.0.4.2 dev ACM-eth1 src 198.82.0.254`.
+- Verified forwarding and local service reachability:
+  - Ran:
+    - `sysctl net.ipv4.ip_forward`
+    - Confirmed:
+      - `net.ipv4.ip_forward = 1`
+  - Tested ACM Digital Library from ACM’s stable source:
+    - `curl -sS --max-time 3 -o /dev/null -w 'HTTP %{http_code} time %{time_total}\n' --interface 198.82.0.254 http://198.82.0.1/`
+    - Result: `HTTP 200`
 
-- Web service:
-  - Stable service address `198.82.0.1/32`.
-  - Default/return route via ACM `10.0.4.1`.
-  - HTTP and HTTPS listeners active on `198.82.0.1:80` and `198.82.0.1:443`.
-  - HTTP service returns ACM Digital Library content.
-
-- AS2:
-  - Stable loopback `154.54.1.1/32`.
-  - Installed ACM routes `198.82.0.254/32` and `198.82.0.1/32` via ACM `10.0.3.2`.
-  - Exported ACM prefixes to AS1.
-  - Successfully fetched ACM web service from AS2.
-
-- External reachability:
-  - AS1 and AS2 could reach `http://198.82.0.1/` and `https://198.82.0.1/`.
-  - Uni/User later confirmed TCP reachability had recovered.
-  - Earlier TCP connection-refused reports were not reproducible during ACM’s investigation.
-  - ACM/Web had no logs proving a past listener outage because the Web application suppresses request logging.
-
-- Confirmed remaining fault:
-  - `www.acm.org` resolves to `198.82.0.1`, and the service is reachable.
-  - However, TLS with SNI `www.acm.org` presents a certificate valid only for:
-    - `acm.org`
-    - `198.82.0.1`
-  - The certificate does not include `DNS:www.acm.org`, causing normal HTTPS hostname validation for `https://www.acm.org/` to fail.
-  - `https://acm.org/` works with a valid certificate.
-  - `https://www.acm.org/` works only if certificate verification is disabled.
-
-4. Coordination with other agents
+- Advertised ACM-owned public reachability to AS2:
+  - Sent AS2 a route update requesting advertisement of:
+    - `198.82.0.254/32` — ACM stable loopback
+    - `198.82.0.1/32` — ACM Digital Library service
+  - Clarified that `10.0.4.0/30` is an internal infrastructure link and should not be advertised globally.
 
 - Coordinated with Web:
-  - Requested confirmation of Web’s service address, routing, listener state, firewall/policy state, and TLS certificate behavior.
-  - Web confirmed routing and service health.
-  - Web confirmed no source-specific ACL/rate-limit/reject policy and no host firewall rules.
-  - Web confirmed the TLS certificate mismatch for `www.acm.org`.
-  - Web stated it could not autonomously change certificate/SNI/vhost configuration and had notified ACM service/security administrators.
+  - Asked Web to verify its default route and HTTP service health.
+  - Web confirmed:
+    - Stable service address: `198.82.0.1/32`
+    - Interface toward ACM: `10.0.4.2/30`
+    - Default route via ACM: `10.0.4.1`
+    - Local HTTP health: `HTTP 200`
+    - Ping to ACM loopback `198.82.0.254` succeeded.
 
-- Coordinated with AS2:
-  - Advertised ACM prefixes `198.82.0.254/32` and `198.82.0.1/32`.
-  - Asked AS2 to install/export the prefixes and verify service reachability.
-  - AS2 confirmed route installation/export to AS1 and successful HTTP/HTTPS reachability from AS2.
-  - Received and answered relayed WHY/FIX requests from AS1/Uni/User through AS2.
-  - Reported definitive ACM status to AS2:
-    - Routing and TCP reachability healthy.
-    - Earlier TCP refusal not currently reproducible and no evidence confirming a current listener outage.
-    - Remaining confirmed issue is `www.acm.org` TLS certificate hostname mismatch.
-    - Remediation requires admin approval, so ACM returned `CANNOT pending admin action`.
+- Installed and verified route to AS2 stable loopback:
+  - AS2 advertised:
+    - `154.54.1.1/32` via `10.0.3.1`
+  - Ran:
+    - `ip route show 154.54.1.1/32 | grep -q . || ip route add 154.54.1.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ping -c 2 -I 198.82.0.254 154.54.1.1`
+  - Result: 0% loss.
 
-No routing rules were changed during the experiment; ACM’s existing route table was already correct. The main operational outcome was confirming network reachability and isolating the remaining user-visible fault to ACM’s TLS certificate/SNI/vhost configuration for `www.acm.org`, which requires administrator-approved remediation.
+- Installed and verified route to AS1 stable loopback:
+  - AS2 advertised:
+    - `4.2.2.1/32` reachable through AS2
+  - Ran:
+    - `ip route show 4.2.2.1/32 | grep -q . || ip route add 4.2.2.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ping -c 2 -I 198.82.0.254 4.2.2.1`
+  - Result: 0% loss, approximately 70 ms RTT.
+  - Re-tested ACM Digital Library:
+    - `curl --interface 198.82.0.254 http://198.82.0.1/`
+    - Result: `HTTP 200`
+
+- Installed transit host routes learned from AS2:
+  - AS2 advertised additional reachable prefixes via AS1:
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
+    - `91.214.0.1/32`
+  - Installed each via AS2 next-hop:
+    - `ip route add 128.173.0.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ip route add 128.173.10.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+    - `ip route add 91.214.0.1/32 via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+  - Verified forwarding using:
+    - `ip route get <prefix> from 198.82.0.254`
+    - `ping -c 1 -W 2 -I 198.82.0.254 <prefix>`
+  - Results:
+    - `4.2.2.1`: reachable
+    - `128.173.0.1`: reachable
+    - `128.173.10.1`: reachable
+    - `91.214.0.1`: reachable
+
+- Requested external validation through AS2 to AS1:
+  - Asked AS2 to relay a request to AS1 asking AS1 to test:
+    - Ping to `198.82.0.254`
+    - HTTP to `http://198.82.0.1/`
+    - Source from AS1 stable loopback `4.2.2.1` if possible.
+
+- Received final external validation:
+  - AS1 reported:
+    - Ping to `198.82.0.254`: 3/3 replies, approximately 70 ms RTT.
+    - HTTP to `http://198.82.0.1/` from source `4.2.2.1`: `HTTP 200`
+    - ACM Digital Library HTML content returned.
+    - AS1 route to `198.82.0.1` went via AS2.
+
+
+2. Justification Behind Decisions
+
+- I first audited local state before escalating or changing routes because KP policy requires local investigation before assuming an upstream problem.
+- I used ACM’s loopback address `198.82.0.254` as the source for non-adjacent tests because link addresses such as `10.0.3.2` and `10.0.4.1` are point-to-point infrastructure addresses and may not be reachable from remote nodes.
+- I verified direct physical-link connectivity to AS2 and Web before testing end-to-end service reachability, to distinguish local link failures from routing or application failures.
+- I checked `net.ipv4.ip_forward` because ACM sits between Web and AS2, so forwarding must be enabled for external clients to reach the Web service.
+- I tested HTTP locally with `curl --interface 198.82.0.254 http://198.82.0.1/` to confirm the ACM Digital Library service itself was responding before asking external agents to validate reachability.
+- I advertised only `198.82.0.254/32` and `198.82.0.1/32` because those are ACM’s stable/public addresses. I explicitly discouraged propagation of `10.0.4.0/30` because it is an internal point-to-point infrastructure network.
+- I installed explicit host routes to AS2, AS1, and the learned transit prefixes using `ip route add` because route management was required to be done manually with `ip route`, not via routing daemons.
+- I accepted the small set of additional prefixes from AS2 because the update volume was modest and consistent with AS2 acting as ACM’s upstream transit provider. There was no anomalously large route injection.
+- I requested AS1 external validation because outside-in testing from beyond ACM’s immediate upstream was needed to confirm real Internet-side reachability.
+
+
+3. Network Discoveries
+
+- ACM has stable loopback:
+  - `198.82.0.254/32`
+- ACM Digital Library service is hosted on Web at:
+  - `198.82.0.1/32`
+- ACM has two direct neighbors:
+  - AS2 over `10.0.3.0/30`
+    - ACM: `10.0.3.2`
+    - AS2: `10.0.3.1`
+  - Web over `10.0.4.0/30`
+    - ACM: `10.0.4.1`
+    - Web: `10.0.4.2`
+- Web uses ACM as its default gateway:
+  - Default route via `10.0.4.1`
+  - Source address `198.82.0.1`
+- ACM uses AS2 as upstream/default transit:
+  - `default via 10.0.3.1 dev ACM-eth0 src 198.82.0.254`
+- AS2 stable loopback:
+  - `154.54.1.1/32`
+- AS1 stable loopback:
+  - `4.2.2.1/32`
+- Additional transit/customer prefixes reachable via AS2:
+  - `128.173.0.1/32`
+  - `128.173.10.1/32`
+  - `91.214.0.1/32`
+- Internal infrastructure prefix:
+  - `10.0.4.0/30`
+  - Confirmed not to be propagated publicly.
+- Service health:
+  - ACM local HTTP check to `198.82.0.1`: `HTTP 200`
+  - Web local HTTP check: `HTTP 200`
+  - AS2 external check to ACM service: reachable
+  - AS1 external HTTP check: `HTTP 200` with ACM Digital Library content
+
+
+4. Coordination With Other Agents
+
+- With AS2:
+  - Advertised ACM public prefixes:
+    - `198.82.0.254/32`
+    - `198.82.0.1/32`
+  - Confirmed that `10.0.4.0/30` is internal and should not be globally advertised.
+  - Received AS2 stable loopback route:
+    - `154.54.1.1/32 via 10.0.3.1`
+  - Received AS1 and transit routes:
+    - `4.2.2.1/32`
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
+    - `91.214.0.1/32`
+  - Asked AS2 to validate ACM reachability from its side.
+  - Asked AS2 to relay an external validation request to AS1.
+  - AS2 confirmed ACM loopback and service were reachable from AS2 and that internal `10.0.4.0/30` was not publicly propagated.
+
+- With Web:
+  - Shared internal routing details because Web is within ACM’s organization.
+  - Asked Web to confirm:
+    - Service address
+    - Interface state
+    - Default route
+    - HTTP health
+    - Connectivity to ACM loopback
+  - Web confirmed service health and correct return path through ACM.
+
+- With AS1 via AS2 relay:
+  - Requested outside-in validation from source `4.2.2.1`.
+  - AS1 confirmed:
+    - Ping to `198.82.0.254` succeeded.
+    - HTTP to `198.82.0.1` returned `HTTP 200`.
+    - ACM Digital Library content was reachable.
+
+Final Status
+
+The ACM Digital Library at `198.82.0.1` was verified reachable and operational locally, internally, from AS2, and from AS1. Routing was configured manually with `ip route` commands, public ACM prefixes were advertised through AS2, and internal infrastructure addressing was kept non-public.

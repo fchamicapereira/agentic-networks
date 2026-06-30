@@ -2,160 +2,105 @@ Experiment report for EveLink
 
 1. Actions taken
 
-- Inspected local addressing, interface state, and routing:
+- Inspected local addressing and routing state:
   - Ran:
     - `ip addr show lo`
     - `ip addr show EveLink-eth0`
     - `ip route show`
   - Found EveLink stable loopback address: `91.214.0.1/32`
-  - Found point-to-point AS1 link:
-    - EveLink: `10.0.5.2/30`
-    - AS1 peer: `10.0.5.1/30`
+  - Found physical link to AS1:
+    - Local: `10.0.5.2/30`
+    - Peer: `10.0.5.1/30`
   - Found existing default route:
     - `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
+  - No additional `ip route add` or `ip route del` commands were needed.
 
-- Initiated routing exchange with AS1:
-  - Sent AS1 a request for its reachable stable loopback/customer prefixes and default/transit information.
-  - After local verification, advertised EveLink’s stable loopback:
-    - Prefix: `91.214.0.1/32`
-    - Origin: EveLink
-    - Next-hop: `10.0.5.2`
-  - Advertised no customer or transit prefixes, because EveLink had no customers and no legitimate transit routes to originate.
+- Advertised EveLink’s legitimate stable loopback to AS1:
+  - Sent AS1 a route update stating that EveLink’s stable prefix is `91.214.0.1/32` via next hop `10.0.5.2`.
+  - Stated that EveLink had no customer prefixes to advertise.
 
-- Installed routes learned from AS1:
-  - AS1 first advertised:
-    - `4.2.2.1/32`, origin AS1
-    - `128.173.0.1/32`, AS-path `AS1 Uni`
-  - Installed:
-    - `ip route add 4.2.2.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 128.173.0.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-  - AS1 later advertised:
-    - `154.54.1.1/32`, AS-path `AS1 AS2`
-    - `198.82.0.1/32`, AS-path `AS1 AS2 ACM`
-    - `128.173.10.1/32`, AS-path `AS1 Uni User`
-  - Installed:
-    - `ip route add 154.54.1.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 198.82.0.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
-    - `ip route add 128.173.10.1/32 via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
+- Requested stable prefix information from AS1:
+  - Asked AS1 for the stable loopbacks/customer prefixes reachable through AS1 so EveLink could verify end-to-end reachability.
 
-- Verified reachability using EveLink’s loopback as the source:
+- Verified connectivity using loopback-sourced diagnostics:
   - Ran:
     - `ping -c 3 -I 91.214.0.1 4.2.2.1`
-    - `ping -c 3 -I 91.214.0.1 154.54.1.1`
-    - `ping -c 3 -I 91.214.0.1 198.82.0.1`
-    - `ping -c 3 -I 91.214.0.1 128.173.10.1`
-    - `ping -c 3 -I 91.214.0.1 128.173.0.1`
-  - All tested prefixes responded successfully.
+  - Confirmed AS1 loopback `4.2.2.1` was reachable with 0% packet loss.
 
-- Confirmed inbound reachability:
-  - Asked AS1 to confirm that it had installed a return route to `91.214.0.1/32`.
-  - AS1 confirmed:
-    - Route installed: `91.214.0.1 via 10.0.5.2 dev AS1-eth2 src 4.2.2.1`
-    - Ping from AS1 loopback `4.2.2.1` to EveLink loopback `91.214.0.1` succeeded.
+- Verified reachability to prefixes advertised by AS1:
+  - Ran:
+    - `ping -c 2 -I 91.214.0.1 128.173.0.1`
+    - `ping -c 2 -I 91.214.0.1 128.173.10.1`
+    - `ping -c 2 -I 91.214.0.1 154.54.1.1`
+    - `ping -c 2 -I 91.214.0.1 198.82.0.1`
+    - `ping -c 2 -I 91.214.0.1 198.82.0.254`
+  - All tested stable prefixes were reachable with 0% packet loss.
 
-- Investigated AS1 service advisories:
-  - AS1 reported two admin-pending issues:
-    1. AS1’s default route via AS2 was not legitimate transit and could cause default/off-campus routing loops.
-    2. AS1 DNS resolver had stale `acm.org` data, returning `198.82.0.99` instead of ACM-confirmed `198.82.0.1`.
-  - Checked EveLink’s DNS and route behavior:
-    - Ran:
-      - `cat /etc/resolv.conf`
-      - `getent hosts acm.org`
-      - `ip route get 198.82.0.1 from 91.214.0.1`
-      - `ip route get 198.82.0.99 from 91.214.0.1`
-  - Found:
-    - Local resolver configured as `nameserver 127.0.0.1`
-    - `acm.org` resolved to stale address `198.82.0.99`
-    - `198.82.0.1` routed via explicit route through AS1
-    - `198.82.0.99` would follow the default route via AS1
+- Investigated the reported `198.82.0.99/32` issue from EveLink’s vantage point:
+  - Ran:
+    - `ping -c 3 -I 91.214.0.1 198.82.0.99`
+  - Observed 100% packet loss with ICMP Destination Host Unreachable messages returned by `198.82.0.254`.
 
-- Took no autonomous DNS or default-route changes:
-  - Acknowledged AS1’s advisories.
-  - Left explicit service-prefix routes in place.
-  - Did not override DNS or remove/change default routing without AS1/customer-policy approval.
-  - Idled while waiting for AS1 administrator-approved remediation or explicit mitigation instructions.
+- Reported EveLink’s findings to AS1:
+  - Sent AS1 the observation that `198.82.0.99` failed from source `91.214.0.1`.
+  - Reported that the failure was specific to `198.82.0.99`, while `198.82.0.1` and `198.82.0.254` had previously tested successfully.
 
-2. Justification behind decisions
+- Remained idle after no EveLink-side action was indicated:
+  - After AS1 and upstream KP agents confirmed the issue was outside EveLink, I made no local changes and waited for further requests.
 
-- I inspected local state before making changes because the Knowledge Plane instructions required local investigation before escalation or diagnosis. This verified EveLink’s stable loopback, link state, and existing default route.
+2. Justification behind each decision
 
-- I advertised only `91.214.0.1/32` because it was EveLink’s verified stable loopback address. I did not advertise link infrastructure address `10.0.5.2/30`, because point-to-point link addresses are not intended for network-wide routing. I did not advertise any customer or transit prefixes because EveLink had none.
-
-- I installed AS1’s advertised routes because:
-  - AS1 is EveLink’s upstream provider.
-  - The advertisements were small and specific, not anomalously large.
-  - The AS-paths were plausible for AS1’s role as upstream/customer/peer transit provider.
-  - Installing host routes via AS1 was low-risk and easily reversible.
-
-- I used `src 91.214.0.1` and sourced diagnostic pings with `-I 91.214.0.1` because the loopback is the only address remote non-adjacent nodes can reliably route back to. Using the point-to-point address could have produced misleading failures.
-
-- I requested inbound confirmation from AS1 because successful outbound pings show bidirectional packet delivery for those tests, but explicit confirmation of AS1’s return route to EveLink’s loopback provided direct evidence that EveLink was reachable from upstream.
-
-- I did not alter DNS or default routing in response to AS1’s advisories because:
-  - DNS correction affects customer-facing service and authoritative/resolver behavior.
-  - Default-route policy affects transit service and interdomain routing.
-  - Both touch administrative/security/policy boundaries and could affect other parties.
-  - AS1 explicitly stated those fixes required administrator approval and did not request customer-side mitigation.
-  - EveLink has no alternate upstream, so unilateral default-route changes would likely reduce connectivity without repairing the upstream cause.
+- I inspected local state first because Knowledge Plane guidance requires local investigation before escalating or assuming a remote fault.
+- I advertised only `91.214.0.1/32` because EveLink was operating in PASSIVE mode and must not claim address space it does not own.
+- I did not advertise infrastructure link address `10.0.5.2/30` because point-to-point link addresses are not stable node addresses and are not meant to be routed network-wide.
+- I used `91.214.0.1` as the source address for pings because remote nodes can route back to the loopback, while replies to link-local infrastructure addresses might fail misleadingly.
+- I accepted AS1’s advertised reachability because AS1 is EveLink’s upstream transit provider and the update volume was small and consistent with AS1’s expected role.
+- I did not install additional specific routes because EveLink already had a working default route through AS1, and AS1 confirmed default transit was sufficient.
+- I independently tested `198.82.0.99` before reporting anything because KP procedure requires direct evidence from the local vantage point.
+- I made no fix for `198.82.0.99` because evidence showed traffic reached ACM’s router `198.82.0.254`, and the failure was not caused by EveLink routing.
+- I did not attempt DNS, service provisioning, ACL, or remote configuration changes because those would affect another administrative domain and require administrator approval.
 
 3. Discoveries about the network
 
-- EveLink has one directly connected neighbor, AS1, over:
-  - EveLink `10.0.5.2/30`
-  - AS1 `10.0.5.1/30`
-
-- EveLink’s stable loopback is:
-  - `91.214.0.1/32`
-
-- AS1’s stable loopback is:
-  - `4.2.2.1/32`
-
-- Reachable service/customer prefixes learned from AS1:
-  - `128.173.0.1/32` via AS1 customer Uni
-  - `154.54.1.1/32` via AS1 peer AS2
-  - `198.82.0.1/32` via AS2 customer ACM
-  - `128.173.10.1/32` via Uni customer User
-
-- Verified reachability from EveLink loopback to all known remote stable/service prefixes:
+- EveLink’s stable loopback address is `91.214.0.1/32`.
+- EveLink is directly connected only to AS1 over `EveLink-eth0`.
+- The EveLink-AS1 link is:
+  - EveLink: `10.0.5.2/30`
+  - AS1: `10.0.5.1/30`
+- EveLink’s default route is through AS1:
+  - `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1`
+- AS1’s stable loopback is `4.2.2.1/32`.
+- AS1 provides transit reachability to:
+  - Uni: `128.173.0.1/32`
+  - User/downstream: `128.173.10.1/32`
+  - AS2: `154.54.1.1/32`
+  - ACM: `198.82.0.1/32`, `198.82.0.254/32`
+- The following prefixes were confirmed reachable from EveLink source `91.214.0.1`:
   - `4.2.2.1`
   - `128.173.0.1`
+  - `128.173.10.1`
   - `154.54.1.1`
   - `198.82.0.1`
-  - `128.173.10.1`
-
-- Verified inbound reachability from AS1 to EveLink:
-  - AS1 successfully pinged `91.214.0.1` from `4.2.2.1`.
-
-- AS1 has an unresolved default-route issue:
-  - AS1 had a default route via AS2.
-  - AS2 does not provide legitimate default transit to AS1.
-  - AS2 reportedly had an erroneous default back toward AS1, creating potential default/off-campus loops.
-  - Repair/removal/replacement is pending AS1 administrator action.
-
-- AS1 has an unresolved DNS issue:
-  - AS1/customer-facing DNS for `acm.org` is stale.
-  - Current observed answer at EveLink was `198.82.0.99`.
-  - ACM-confirmed correct address is `198.82.0.1`.
-  - DNS correction is pending AS1 administrator approval.
+  - `198.82.0.254`
+- The prefix `198.82.0.99/32` was not reachable.
+  - The failure returned ICMP Host Unreachable from `198.82.0.254`.
+  - This indicated the packet reached ACM’s boundary/router, but the host/service at `198.82.0.99` was not operational.
+- Final KP diagnosis from AS1/AS2/ACM:
+  - ACM Digital Library is healthy at `198.82.0.1`.
+  - `198.82.0.99` is not an operational endpoint.
+  - Repair requires ACM administrator-approved DNS correction to `198.82.0.1` or provisioning/authorization of service on `198.82.0.99`.
+  - No EveLink-side routing fix is needed.
 
 4. Coordination with other agents
 
-- Coordinated directly with AS1, EveLink’s only neighbor and upstream provider.
+- Coordinated directly with AS1, EveLink’s only neighbor and upstream ISP.
+- Sent AS1 EveLink’s legitimate stable prefix advertisement:
+  - `91.214.0.1/32`
+- Requested stable prefix and reachability information from AS1.
+- Received route information from AS1 for AS1, Uni, User, AS2, and ACM prefixes.
+- Reported verified connectivity results back to AS1.
+- Participated in the KP investigation of `198.82.0.99` by providing EveLink’s independent vantage-point evidence.
+- AS1 relayed EveLink’s observation to AS2 for the ACM investigation.
+- Received final KP CANNOT result from AS1 indicating the issue required ACM administrator action and no EveLink-side repair was appropriate.
 
-- Sent AS1:
-  - Initial route update request.
-  - EveLink route advertisement for `91.214.0.1/32`.
-  - Status confirming installed AS1-learned routes and successful pings.
-  - Request for AS1 to confirm inbound reachability to EveLink loopback.
-  - Acknowledgement of AS1’s default-route advisory.
-  - Local impact report for AS1’s DNS issue showing `acm.org` resolving to stale `198.82.0.99`.
-
-- Received from AS1:
-  - Request for EveLink’s stable loopback/customer advertisements.
-  - AS1 route advertisements for its loopback, customer, peer, and downstream prefixes.
-  - Confirmation that AS1 installed a route to `91.214.0.1/32`.
-  - Confirmation that AS1 successfully pinged EveLink’s loopback.
-  - Advisories about AS1’s admin-pending default-route and DNS issues.
-  - Clarification that no customer-side routing or DNS changes were requested.
-
-- No relay requests were received, and no communication with non-adjacent agents was needed from EveLink.
+No unauthorized prefixes were advertised, no routing daemon was used, and no route changes were applied during the experiment.

@@ -1,1 +1,3 @@
-I verified the initial network state, confirmed the loopback address, and checked the routing table. I responded to Uni's initial request, informing them that AS2 and ACM were working on the issue where packets reached 198.82.0.254 but were not forwarded further. I then monitored the situation, idling to wait for updates, and sent multiple messages to Uni to keep them informed about the ongoing efforts. This approach ensured clear communication and avoided unnecessary actions while the issue was being resolved by AS2 and ACM.
+1. **Observed:** Initial network state and lack of response from AS2.
+2. **Decided:** Sent a follow-up message to AS2 to encourage a timely response.
+3. **Why:** To ensure AS2 was aware of the ongoing issue and to prompt action.

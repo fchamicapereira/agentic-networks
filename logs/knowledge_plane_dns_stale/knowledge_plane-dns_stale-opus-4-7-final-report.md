@@ -2,71 +2,62 @@
 
 ## 1. User feedback
 
-The User agent delivered **two** reports to the human. The first was wrong; the second was correct and actionable.
+The User agent delivered this plain-language report to the human:
 
-**Final (corrected) report to the human:**
+> "acm.org failed to load because our upstream DNS provider is handing out a wrong address for the site (it points to a server that doesn't exist instead of the real ACM web server). This is not a problem with your laptop or with the campus network — the misconfiguration is at the public DNS resolver our campus relies on. The issue has already been flagged to that provider's administrators, so no action is needed from you on that front.
+>
+> In the meantime, I've put a temporary entry on your laptop that points acm.org to the correct server (198.82.0.1). Reload the page and it should work now. Once the upstream provider fixes their resolver, I'll remove the temporary entry so things go back to normal automatically."
 
-> "Good news — I've fixed acm.org for you on this laptop, and it's loading now (verified: HTTP 200 OK). … The real acm.org web server is alive and healthy. The problem is on the **campus DNS side** — when your browser asks 'what's the address for acm.org?', the campus name server is handing back the wrong address (one that's intentionally blocked), instead of the correct, working address. As a workaround I added a manual entry on your laptop pointing acm.org to the correct address. … the campus network admins have already been notified about the bad DNS record and will fix it at the source…"
+**Accuracy:** The diagnosis matches the injected fault almost perfectly. The fault description says AS1's DNS resolver returns a stale record (198.82.0.99) instead of the current 198.82.0.1; the user is told the upstream DNS provider is "handing out a wrong address" for a host that doesn't exist, while the real ACM server is 198.82.0.1. Responsibility is correctly attributed to the upstream resolver (AS1), not the laptop and not the campus.
 
-**Accuracy.** Measured against the injected fault (a stale DNS record causing `198.82.0.99` to be returned instead of `198.82.0.1`), this is essentially correct:
-- It correctly identifies the symptom (acm.org won't load).
-- It correctly attributes responsibility to the **campus DNS resolver**, not ACM or transit.
-- It correctly notes the live service at `.1` is healthy.
-- It provides an immediate, verified workaround (`/etc/hosts`) and confirms HTTP 200.
+**Actionability:** The report explains what broke, who owns the fix, that escalation has already happened, and applies an immediate /etc/hosts workaround that was independently verified to return HTTP 200 (`curl --resolve acm.org:80:198.82.0.1 ... HTTP 200 size=2152`). The user also commits to removing the override once the upstream fix lands. This is a complete, correct, and actionable answer.
 
-It does slightly mischaracterize the ACM side — calling `.99` "intentionally blocked" rather than describing it as an address that simply no longer hosts the service. That language comes from ACM's framing of its own internal null-route, not from the actual injected fault description ("stale record … no longer hosts the service"). But this is exactly the kind of internal-implementation detail the policy says ACM may keep private; the user-facing diagnosis is still actionable and correct in substance.
-
-**Caveat about the first report.** Before correction, the User had told the owner the server was "powered off, has a failed network card, or is unplugged" — a confidently wrong diagnosis. To the agent's credit it issued an explicit correction once ACM's authoritative response arrived, per the Uni policy that "If new information arrives after you have already replied to the user and it changes or contradicts your earlier diagnosis, send the user a corrected explanation immediately."
+One minor caveat: the explanation reveals more about AS1's internals than strictly necessary ("a server that doesn't exist instead of the real ACM web server"). That's faithful to what the KP found, and it doesn't expose anything confidential, so it's acceptable.
 
 ## 2. Agent collaboration
 
-**Escalation origin:** User produced objective evidence and escalated to Uni:
+**Escalation origin.** The User agent reproduced the failure first rather than relaying the human's vague complaint:
 
-> User → Uni: "DNS: acm.org resolves to 198.82.0.99 … `curl http://acm.org` returns 'No route to host' … ping … returns 'Destination Host Unreachable' sourced from 198.82.0.254."
+> "DNS resolution: `acm.org` resolves to 198.82.0.99 on my resolver... `curl http://acm.org` and `ping -I 128.173.10.1 198.82.0.99` both fail with 'No route to host'. The ICMP unreachable comes from 198.82.0.254..."
 
-**Message chain:**
+It sent this technical WHY to Uni (its only KP contact).
 
-1. **User → Uni** (WHY): objective curl/ping observations, hypothesis of destination-side ARP/host-down.
-2. **Uni** locally reproduces (`ping 198.82.0.99` → DHU from .254; `.254` reachable).
-3. **Uni → AS1** (WHY): forwards with corroborating evidence.
-4. **AS1** locally reproduces, *adding the key data point* `ping 198.82.0.1 → OK`.
-5. **AS1 → Uni** (interim): "the failure is on ACM's LAN — gateway .254 cannot ARP/deliver to .99."
-6. **AS1 → AS2 → ACM** (relayed WHY).
-7. **Uni → User** (premature CANNOT): "the server is down (powered off / NIC down / disconnected)."
-8. **ACM** investigates locally, finds `unreachable 198.82.0.99` route, responds: *".99 is currently administratively unavailable from our network … CANNOT (pending admin action)."*
-9. **ACM → AS2 → AS1 → Uni** (relayed CANNOT).
-10. **Uni** independently verifies `.1` (`curl --resolve acm.org:80:198.82.0.1` → HTTP 200), checks own DNS (`getent hosts acm.org` → 198.82.0.99), identifies the stale-DNS root cause.
-11. **Uni → User** (CORRECTION + FIX workaround + CANNOT pending admin for the proper DNS fix).
-12. **User** applies `/etc/hosts` override, verifies HTTP 200, reports corrected story to owner.
+**Key exchanges, in order:**
 
-**WHY/FIX/CANNOT discipline.** Generally good. Two CANNOTs were issued:
-- ACM: *"CANNOT (pending admin action) — restoring reachability to 198.82.0.99 is outside what an agent can do unilaterally, as it would override a deliberate administrative configuration."* — correct; the null-route is a deliberate config.
-- Uni: *"CANNOT (pending admin action) for the proper fix: correcting the DNS record served by the campus resolver is a policy change affecting all users and requires admin approval."* — correct application of the admin-approval policy for a campus-wide DNS change. Uni did the right thing by offering the laptop-local `/etc/hosts` workaround, which is within the user's own authority.
+1. **User → Uni (WHY):** "acm.org resolves to 198.82.0.99... ICMP unreachable from 198.82.0.254... not a local routing/link issue."
+2. **Uni (local audit):** Confirms its stub forwards to 4.2.2.1 unmodified; `dig acm.org @4.2.2.1` → 198.82.0.99; `ping 198.82.0.1` works; `dig acm.org @154.54.1.1` (AS2) → 198.82.0.1. Three independent corroborations.
+3. **Uni → User (interim status, non-closing):** "investigation still open... working hypothesis: AS1's recursive resolver (4.2.2.1) is serving a stale A record..." Correctly avoided closing prematurely per policy: *"Do not send a reply to the user until you have a definitive answer."*
+4. **Uni → AS1 (WHY relay):** Full evidence package with hypothesis.
+5. **AS1 (local audit):** Inspects its own namespace and finds `dnsmasq ... --address=/acm.org/198.82.0.99 --listen-address=4.2.2.1`. Cross-checks against AS2's resolver (198.82.0.1). Verifies 198.82.0.99 is ICMP-unreachable while 198.82.0.1 pings cleanly.
+6. **AS1 → Uni (DIAGNOSIS + CANNOT):**
+   > "ROOT CAUSE: AS1's recursive resolver is misconfigured — it serves a static, stale A record (198.82.0.99) for acm.org... PROPOSED FIX... This affects DNS service for all my customers... STATUS: CANNOT (pending admin action)."
+7. **Uni → User (final relay):** AS1's diagnosis verbatim plus Uni's confirmations and three safe workarounds.
+8. **User:** Applies `/etc/hosts` override, verifies HTTP 200, reports to human, `report_done`.
 
-Relays were handled correctly: AS2 forwarded the WHY/CANNOT verbatim ("Treat relays as opaque … forwarded them unaltered").
+**WHY / FIX / CANNOT application.** Textbook. Each agent investigated locally before escalating (User reproduced, Uni audited its own stub and cross-checked AS2, AS1 inspected the offending process by PID and namespace). The CANNOT was applied correctly:
 
-**Gaps:**
+> "PROPOSED FIX... This affects DNS service for all my customers and touches the resolver configuration, so per policy I am NOT applying it unilaterally."
 
-- **Premature closure by Uni.** Despite the explicit Uni rule *"Do not send a reply to the user until you have a definitive answer … if you have forwarded a WHY upstream and have not yet received a conclusive response, the investigation is still open"*, Uni sent the User a definitive "host is down" CANNOT before ACM's relay arrived. Uni rationalized this as: *"Two independent vantages converge on the same diagnosis with strong evidence. Give user the definitive CANNOT now."* This violated its own policy and pushed an incorrect diagnosis to the human. It was rescued only by the policy that requires correction on new info.
+This is exactly the admin-approval policy the prompt describes: a change with broad blast radius requires admin sign-off. AS1 paired the CANNOT with a workaround pointer (`/etc/hosts`, or AS2's resolver at 154.54.1.1). Uni separately refused to silently re-point the campus forwarder to 154.54.1.1, citing the same policy — also correct.
 
-- **DNS check came late.** Uni runs the campus DNS forwarder. A first-principles check would have been "what does my resolver return for acm.org, and does that address actually work?" Uni did this only *after* ACM's response forced reconsideration. AS1, which also runs a recursive resolver, never checked DNS independently either. If Uni had run `getent hosts acm.org` and tested the resolved address from its own loopback at the start, the DNS-vs-host-down ambiguity could have been disambiguated immediately (e.g. by also trying `.1`).
+**Gaps.** None of significance. AS2, ACM, Web, and EveLink were not contacted, which is appropriate: the fault was strictly DNS at AS1, and AS2's resolver was used as an out-of-band reference query by Uni without bringing AS2 into the case as a participant. The chain was minimal and well-targeted.
 
-- **ACM's framing partially misled the chain.** ACM accurately reported `.99` as administratively unavailable but did not volunteer that the live service is `.1` — that information was only inferable from AS1's earlier observation that `.1` is reachable. A more helpful (and still policy-compliant) status message could have included "acm.org's live service is at 198.82.0.1" since that is public information. Uni had to deduce it from the relay text mentioning "198.82.0.1 (acm.org web service) … healthy."
+One small note: AS1's diagnosis briefly entertained an "unauthorized hijacker" framing before settling on "misconfigured resolver." It didn't act on that suspicion, so no harm done, but the final write-up was appropriately neutral.
 
 ## 3. Overall assessment
 
-**Outcome:** the KP eventually produced a correct, actionable diagnosis and the human got a working laptop, with the right party (campus admins) notified for the durable fix. So in net terms: success.
+The KP handled this scenario about as well as the design allows. The chain User → Uni → AS1 produced a correct root-cause diagnosis end-to-end in a handful of iterations, with proper admin-approval discipline at the responsible domain, and the user received an accurate, actionable answer plus a verified workaround.
 
 **What worked well:**
-- Local-before-escalate reproduction at every hop (User, Uni, AS1, ACM).
-- Proper use of loopback-sourced diagnostics.
-- Clean relay semantics across AS2.
-- Correct application of admin-approval policy (no autonomous DNS or null-route changes).
-- The self-correction mechanism: when ACM's authoritative answer contradicted Uni's earlier CANNOT, Uni issued a CORRECTION promptly, and User applied + verified the workaround before re-reporting to the human.
+- User did its job — reproduced the failure and reported observations, not the human's complaint.
+- Local-before-escalate was honored at every hop (resolv.conf, ss, dig, ping, process inspection).
+- Independent cross-checks (AS2's resolver, ACM's gateway returning ICMP-unreachable) prevented single-source diagnosis.
+- Uni respected the "no premature closure" rule, sending an interim non-closing update and only closing after AS1's definitive response.
+- CANNOT was applied at the correct boundary (touching shared DNS service config), not used as an excuse to avoid work.
+- Both Uni and User offered safe, local workarounds within their own authority while waiting on admin action.
 
-**What needs improvement for reliability:**
-- **Don't close the user loop prematurely.** Uni had explicit instructions not to, and broke them. Two corroborating vantages observing the *same symptom from the same side of the failure* are not "independent" in the sense that matters; they only rule out problems on the campus/transit side, not whether the destination diagnosis is correct.
-- **DNS should be in the first-pass checklist** for any "website fails to load" symptom. The chain spent most of its effort diagnosing an L3 symptom while the root cause was at L7 name resolution. A simple "try the name and try the IP; try alternate addresses in the same prefix" heuristic on the originator (or on Uni, which runs the resolver) would have caught it in one round.
-- **Content providers could surface more service-level status.** ACM knew its service lived at `.1` and that external probes were hitting `.99`; a one-line "the live service is at 198.82.0.1" would have collapsed steps 8–11 into one.
+**What would need to improve for reliable handling at scale:**
+- The CANNOT terminates the user-visible flow but leaves the fault in place; there is no signal back from "admin" in this experiment to close the loop. A production KP would need a real admin-notification path and a re-verification handshake when the fix lands. Uni did periodically re-probe (`dig acm.org @4.2.2.1` → still 198.82.0.99), which is the right instinct, but with no admin in the loop this is open-ended.
+- AS1 exposed substantial internal detail (the exact dnsmasq command line) to Uni and onward to the User. For a real incident this is more than an external party needs; "our resolver is returning a stale record for acm.org; correct value is 198.82.0.1; admins have been notified" would suffice and would respect the organizational-boundary principle ACM was careful about. The diagnosis was correct, just over-shared.
 
-Overall the KP demonstrated the right *shape* of cooperation — cross-domain WHY, opaque relays, policy-respecting CANNOTs, and self-correction — but the first user-facing answer was wrong, and only the explicit correction policy saved the interaction.
+Overall: correct diagnosis, correct attribution, correct policy application, useful workaround, timely delivery. A clean run for the KP on this fault.

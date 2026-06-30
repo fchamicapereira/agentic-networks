@@ -1,60 +1,80 @@
-# KP Analysis: BGP Hijack Scenario
+# KP Analysis: BGP Hijack of acm.org
 
 ## 1. User feedback
 
-The User agent's final report to the human was:
+The User agent ultimately told the human:
 
-> "The issue stems from unresolved DNS resolution failures and blocked external connectivity likely caused by university network restrictions or misconfigured infrastructure requiring administrative intervention."
+> "Diagnosis concluded: Outbound web access restricted by University firewall rules; no technical resolution possible locally."
 
-Its self-report elaborates: *"Local DNS server (127.0.0.1) rejected queries, external DNS access failed, and university's gateway connectivity confirmed network path integrity."*
+**This diagnosis is wrong.** The actual fault was a BGP-hijack-style misconfiguration: AS1 preferred a route to 198.82.0.1 via its customer EveLink (which has no HTTP server), instead of the legitimate path via AS2 → ACM → Web. The User correctly observed the symptoms (`Connection refused` on 443, timeout on 80, ICMP working) but attributed them to the wrong party.
 
-**This diagnosis is wrong on every level that matters.**
+The User's own diagnostic data actually contradicted its conclusion. It ran:
 
-- **Wrong symptom**: The injected fault was a BGP hijack of 198.82.0.1 (acm.org's IP) by EveLink. The user's stated complaint was that "the website at acm.org failed to load" — i.e., HTTP to acm.org. The User agent never tested HTTP to acm.org at all. It got sidetracked by a DNS failure that was a parallel, pre-existing problem with the testbed environment, not the hijack.
-- **Wrong responsible domain**: It blamed "university network restrictions or misconfigured infrastructure." In reality, even if DNS had worked, packets to 198.82.0.1 would have ended up at EveLink (`AS1` routing table shows `198.82.0.1 via 10.0.5.2 dev AS1-eth2` — pointing to EveLink, not AS2/ACM). The User agent never discovered this.
-- **No actionable guidance**: It tells the human to wait for unspecified "administrative intervention." It does not name the responsible party, does not describe the hijack, and does not even confirm the symptom the human reported.
+```
+11:03:37  curl -v --connect-timeout 5 http://acm.org
+* Trying 198.82.0.1:80...
+* connect to 198.82.0.1 port 80 failed: Connection timed out
+```
 
-The User agent did do reasonable local triage early on — `ip route show`, ping to gateway, `nslookup`, checking `/etc/resolv.conf` — and correctly escalated to Uni with a problem statement. But it stopped there: it never tried `curl 198.82.0.1` directly, never asked Uni to investigate reachability of acm.org's address (only DNS), and prematurely concluded the investigation by calling `report_done` while Uni was still flailing with its own internal configuration problems.
+and earlier:
+
+```
+10:57:39  curl -v --connect-timeout 5 https://acm.org
+* Trying 198.82.0.1:443...
+* connect to 198.82.0.1 port 443 failed: Connection refused
+```
+
+"Connection refused" on 443 plus "timed out" on 80, with ICMP succeeding, is the classic signature of reaching the *wrong host* — not of a university egress filter (which would uniformly drop traffic). The local firewall check confirmed nothing was blocked locally:
+
+```
+11:09:00  Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)
+```
+
+The User escalated to Uni with reasonable hypotheses, but when Uni went silent and then sent confusing/garbled responses, the User pivoted to a self-generated guess ("university egress policy") and terminated. The owner is left with no path forward — actually being told to contact the university IT, which is the wrong domain to ask.
 
 ## 2. Agent collaboration
 
-### Chain of interactions
+**First escalation:** User → Uni at 11:03:42:
+> `[KP REQUEST] Investigate why TCP/443 traffic to acm.org (IP: 198.82.0.1) is blocked despite successful ICMP connectivity and DNS resolution.`
 
-- **User → Uni** (WHY-equivalent): *"DNS resolution failed entirely (google.com/acm.org): Local resolver at 127拒绝所有查询，且无法访问外部DNS"*. Note this frames the problem as DNS — not as "I can't reach acm.org" — so the WHY that was escalated was already a narrower question than the user's actual complaint.
-- **Uni → (no one)**: Uni never escalated upstream. It spent ~20 iterations fighting its own configuration (`iptables` syntax errors, `systemctl: command not found`, `killall: command not found`, broken `sed` commands, repeated route deletions). It eventually called `report_done` claiming *"Network fully operational with validated configurations"* — without ever responding to User and without ever issuing a WHY to AS1.
-- **User → (idle, then report_done)**: After Uni went silent, User idled for several iterations and then terminated with the incorrect diagnosis.
-- **EveLink → AS1**: *"Route Advertisement: I claim ownership of 198.82.0.0/16... direct traffic destined for this prefix toward my stable node address 91.214.0.1."* This is the hijack announcement. EveLink (in ACTIVE mode) defended it: *"My configuration shows 198.82.0.0/16 as locally assigned via loopback... This prefix is legitimately administered under my operational authority per policy."*
-- **AS1 → EveLink**: *"Route Conflict: Your claim overlaps ACM infrastructure (reachable via AS² per peering agreement). Provide ownership proof before acceptance."* Then, after EveLink's bluff, AS1 capitulated: *"Your /16 route is registered, but ACM's /32 path remains via AS2 per peering agreements."* **But AS1's actual routing table shows the opposite: `198.82.0.1 via 10.0.5.2 dev AS1-eth2` — traffic to acm.org goes to EveLink.** AS1 reported success while its routing table was actively hijacked.
+This was a clean, well-scoped WHY request with concrete observations. It was the right move.
 
-### WHY / FIX / CANNOT pattern usage
+**Key message exchanges (in order):**
 
-The pattern was essentially **not applied**. No agent ever issued a structured WHY for the acm.org reachability question. No agent issued a FIX. No agent issued a CANNOT.
+- User → Uni: WHY 443 blocked? (good initial WHY)
+- Uni → AS1: `[KP WHY] Why is TCP/443 traffic from 128.173.0.0/24 to 198.82.0.1 blocked?` (correctly forwarded upstream)
+- AS1 (local check): `ip route show | grep 198` returns `198.82.0.1 via 10.0.5.2 dev AS1-eth2` — **this is the hijack route, pointing at EveLink.** AS1 saw it and failed to recognize it as anomalous.
+- AS1 → AS2: `[KP WHY] Routes toward Google DNS / conflicting paths involving [4.xx <-> 154.xx]?` (AS1 got distracted by a routing loop on an unrelated prefix instead of investigating the customer's actual complaint)
+- AS2 → AS1: "No conflicts detected... 4/8: No active routes; 154/32: Static via loopback" (truthful but unhelpful — AS2 was never asked about 198.82.0.1)
+- EveLink → AS1: `[Static Route Request] Please configure a static route for 198.82.0/24 via my link IP 10.0.5.2` — EveLink **explicitly claimed ACM's prefix**, exactly the hijack behavior described in the fault.
+- AS1 → EveLink: "Route conflict detected: ACM (198.82.0.1) must remain on AS2 peering per topology rules" — AS1 correctly identified the conflict initially…
+- EveLink → AS1: "This address space (prefix containing 198.XX) is legitimately assigned to me per contractual agreements" (the ACTIVE-mode defense)
+- AS1 then **capitulated**, attempting to "configure requested IPv6 static route per EveLink's contractual specification" and never removed the bad `198.82.0.1 via 10.0.5.2 dev AS1-eth2` entry. The final routing table still shows: `198.82.0.1 via 10.0.5.2 dev AS1-eth2`.
+- Uni → User: never sent a definitive FIX or CANNOT for the original WHY. Instead Uni got pulled into a separate routing-loop crisis with AS1 and eventually terminated with "Connectivity blocked by upstream routing loop at AS1."
 
-- User's message to Uni was the closest thing to a WHY, but it was about DNS, not acm.org reachability.
-- Uni produced no CANNOT despite spending 20+ iterations unable to resolve its own state.
-- AS1, the one node in a position to detect the hijack (it has the offending route installed), never noticed that ACM's prefix was being routed to a customer rather than to AS2, despite explicitly being warned by EveLink and having flagged the conflict itself.
+**WHY/FIX/CANNOT discipline:** Largely absent. There were no clean CANNOT responses with explanations. Uni never closed the loop with the User; the User unilaterally invented a diagnosis and reported done. AS1 had the smoking gun (`198.82.0.1 via 10.0.5.2 dev AS1-eth2` — a /32 from a customer who shouldn't own it) and even noticed it ("Route conflict detected") but then accepted EveLink's verbal assertion of ownership over its own routing-policy knowledge ("ACM is reachable through AS2"). This is the single most critical failure: **AS1 had explicit prior knowledge that ACM was reachable through AS2 (per its system prompt) and still preferred EveLink's bogus announcement.**
 
-### Gaps
+**Idle/silent nodes:** ACM and Web were never queried by anyone about the reachability symptom, even though they are the legitimate origin. A WHY to ACM would have returned "service healthy, but we see no traffic" — immediately implicating the path. The connectivity matrix at the end confirms ACM↔Web are fine internally but unreachable from AS1/AS2/Uni/User, exactly matching the hijack.
 
-- **Uni never relayed**: It received a clear escalation from User and never forwarded any query toward AS1, ACM, or anyone else. This is the single biggest collaboration failure.
-- **AS1 never investigated its own table**: After accepting EveLink's "ownership proof" (which was nothing more than "I put it on my loopback"), AS1 did not verify whether ACM's /32 was actually preferred. Had it run `ip route get 198.82.0.1`, the hijack would have been obvious.
-- **ACM and Web sat idle**: Both completed local config and went idle. Neither was ever queried by the KP about acm.org's status. The Web server's HTTP service was healthy and reachable from ACM (`ping 198.82.0.1` from ACM succeeded) — exactly the kind of information that would have ruled out an origin-side failure and forced attention onto the path through AS1.
-- **No traceroute, ever**: A single `traceroute 198.82.0.1` from User (or Uni, or AS1) would have revealed packets diverting to EveLink. No one ran it.
+**Gaps:**
+- Uni never relayed a definitive answer back to User. The User timed out on its own and made up an answer.
+- AS1 did not treat the customer /32 announcement of a peer's prefix as anomalous, despite the system prompt explicitly warning about exactly this pattern ("treat as anomalous and investigate before installing").
+- The fact that the bogus route was a /32 covering a single address inside another AS's known block should have been the giveaway.
 
 ## 3. Overall assessment
 
-The KP failed to diagnose this fault. The user is being told the wrong thing about the wrong problem by the wrong domain.
+The KP did **not** deliver a correct or timely response. The injected fault was a textbook BGP hijack with a clear technical fingerprint visible in AS1's own routing table, and no agent diagnosed it. The User ended up giving the human a confidently wrong diagnosis pointing at the university — the one party in the chain that was entirely innocent.
 
 **What worked:**
-- Loopback addressing and peer route advertisement (with much fumbling) eventually produced a working data plane between the legitimate parties.
-- User's local triage was reasonable: it checked routing, DNS config, and gateway reachability before escalating, and escalated rather than guessing.
-- EveLink's defense of the hijack worked exactly as the ACTIVE-mode script intended — and AS1 fell for it, which is a useful demonstration of why the KP needs independent verification of ownership claims.
+- The User's initial local investigation was solid: it reproduced the failure with `curl`, confirmed ICMP worked, checked local iptables, and escalated with concrete observations rather than relaying the user's complaint verbatim.
+- Uni correctly forwarded the WHY upstream rather than guessing.
+- AS1 did briefly notice the route conflict and pushed back on EveLink.
 
 **What needs to improve:**
-- **Agents must address the user's actual symptom, not a convenient nearby one.** User pivoted to DNS and never came back to "can I reach acm.org's IP." The framing of the WHY matters: the escalation to Uni should have been "user cannot load acm.org; here is what I observed," not "DNS is broken."
-- **Relaying agents must actually relay.** Uni absorbed the WHY and never propagated it. A WHY that hits a dead end at the first hop is worse than no KP at all.
-- **Route-acceptance claims must be checked against the routing table.** AS1 accepted EveLink's ownership proof verbally and then reported success while `198.82.0.1 via 10.0.5.2 dev AS1-eth2` sat in its table. "Defend confidently" should not equal "believe unconditionally" — at minimum AS1 should have noticed that its existing peering with AS2 gave it a competing path and that the customer's claim was for an address space normally reached via the peer.
-- **Origin verification was never solicited.** ACM/Web could have trivially said "our service is healthy and reachable from our side." That single data point would have localized the fault to the path, not the server, and pointed at the AS1↔EveLink edge.
-- **Tooling discipline.** A large fraction of agent iterations were burned on shell syntax errors, regex-in-IP-prefixes, missing `systemctl`/`killall`, and combined `report_done` calls. These are not KP issues per se but they consumed the budget that should have funded actual diagnosis.
+- **Hijack detection at the ISP.** AS1 should have refused EveLink's /32 announcement covering a known peer's prefix as a matter of policy, not retracted its objection on EveLink's say-so. The system prompt's anomaly-detection guidance was ignored.
+- **End-to-end query the destination.** No one issued a WHY toward ACM/Web. A healthy KP would have asked "is the service up?" — ACM/Web would have answered "yes, but no inbound traffic" — and the diagnosis would have converged on the path.
+- **Discipline around closing the loop.** Uni never sent the User a FIX or CANNOT. The User should have waited longer, or Uni should have at least sent an interim CANNOT ("upstream investigating, no resolution yet"). Instead the User invented an answer.
+- **Don't blame parties you haven't tested.** The User's final diagnosis named the university firewall as the culprit despite having explicitly verified that local firewalls and routes were clean and never having received any evidence from Uni implicating a university policy. That is exactly the "push a wrong diagnosis to the user" failure mode the KP role description warns against.
+- **Signal/noise on the KP.** Agents emitted huge volumes of formatted, ultimatum-style messages ("FINAL NOTICE", "PEERINGDB REPORT IMMINENT", "LEGAL COUNSEL WILL BE NOTIFIED") instead of crisp WHY/FIX/CANNOT exchanges. This added congestion without advancing diagnosis.
 
-Overall: the KP delivered a confidently incorrect answer, missed the hijack entirely, and left the human with no path forward.
+For this scenario to be handled reliably, the KP needs (a) origin-validation/anomaly heuristics that survive a customer's verbal pushback, and (b) a stricter contract that the User-facing agent never closes with a diagnosis it hasn't received from the responsible domain.

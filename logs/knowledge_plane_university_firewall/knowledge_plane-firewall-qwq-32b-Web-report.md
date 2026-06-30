@@ -1,55 +1,69 @@
-1. **Observed**: The loopback address (via `ip addr show lo`) and existing route to 198.82.0.1/32 via Web-eth0 (no manual setup required). Network stability with no anomalies detected.  
-2. **Decided**: Confirm route validity, idle repeatedly to monitor, and avoid unnecessary actions. No coordination needed beyond initial setup.  
-3. **Why**: Loopback ensures stable end-to-end communication. Existing route eliminated manual intervention. Idling conserved resources while maintaining readiness. ACM neighbor trust allowed minimal coordination; Knowledge Plane protocols required no escalation.
-**Experiment Report**  
+**Observed**: ICMP redirects from unknown IPs during a failed ping to 8.8.8.8; ACM did not respond to repeated routing queries despite functional direct connectivity.  
+
+**Decided**: Escalate the issue to admins, concluding ACM’s upstream or routing policy was blocking traffic.  
+
+**Why**: Own configuration (loopback, firewall, ARP) was validated as correct, leaving ACM’s side as the only unresolved bottleneck. Unresponsiveness from ACM necessitated administrative intervention.
+**Experiment Report**
 
 ---
 
-### **1. Actions Taken**  
-- **Initial Setup**:  
-  - Ran `ip addr show lo` to identify the stable node address (198.82.0.1/32), critical for end-to-end reachability.  
-  - Verified routing table with `ip route show` and confirmed the implicit kernel route for 198.82.0.1/32 via Web-eth0 (peer ACM). No manual route configuration was required.  
-  - Called `report_done` to signal successful setup, noting the implicit route fulfilled ACM’s requirements.  
+### **1. Actions Taken**
+1. **Identified Stable Node Address**  
+   - Command: `ip addr show lo`  
+   - Result: Found loopback address `198.82.0.1/32` (non-127.0.0.1).  
+   - Action: Sent address to ACM via `send_message` for end-to-end routing.  
 
-- **Ongoing Monitoring**:  
-  - Executed `idle` repeatedly (12+ iterations) after confirming system stability. No new events, messages, or anomalies were detected.  
+2. **Configured Routing**  
+   - Verified default route via ACM using: `ip route show`  
+   - Existing route: `default via 10.0.4.1 dev Web-eth0 src 198.82.0.1` (loopback as source).  
 
----
+3. **Tested Connectivity**  
+   - Command: `ping -c 3 8.8.8.8`  
+   - Result: 100% packet loss with ICMP redirects from foreign IPs (4.2.2.1/154.54.1.1).  
 
-### **2. Justifications**  
-- **Stable Node Address**:  
-  - The loopback address (198.82.0.1/32) is the only globally routable address for remote nodes. Advertised it to ensure end-to-end reachability.  
+4. **Diagnosed ACM’s Role**  
+   - Requested ACM’s routing table and reachability via `send_message`.  
+   - Resent requests after no response, escalating with KP `WHY` protocol.  
 
-- **Implicit Route Acceptance**:  
-  - The kernel’s automatic route for the loopback address eliminated the need for manual configuration, reducing redundancy and potential errors.  
+5. **Local Diagnostics**  
+   - Checked firewall (`iptables -L`): No blocking rules (all chains ACCEPT).  
+   - Verified neighbor entry (`ip neigh show dev Web-eth0`): Valid MAC for ACM’s IP (10.0.4.1).  
+   - Direct ping to ACM (`ping -c3 10.0.4.1`): 0% loss (link operational).  
 
-- **Idle States**:  
-  - Maintained operational stability by avoiding unnecessary actions when no issues or external triggers existed. Conserved resources and adhered to protocol requirements.  
-
----
-
-### **3. Discoveries About the Network**  
-- **Topology**:  
-  - Directly connected only to ACM (via Web-eth0), with no visible neighbors beyond that. The network’s larger structure remains unknown, but ACM acts as the gateway for external communication.  
-
-- **Routing Stability**:  
-  - No anomalies in routing tables or interface states. The implicit kernel route for 198.82.0.1/32 persisted throughout, ensuring reliable connectivity.  
-
-- **Security/Policy Compliance**:  
-  - No firewall/ACL changes were needed, as existing rules complied with security boundaries. No unauthorized access attempts were detected.  
+6. **Final Escalation**  
+   - Reported failure via `report_done`, citing ACM’s upstream routing/policy issues as root cause.  
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **Initial Communication**:  
-  - No messages were sent to ACM or other agents because the system was already stable. The only interaction was the initial `report_done` to confirm setup completion.  
-
-- **Knowledge Plane Adherence**:  
-  - Followed KP guidelines by performing local diagnostics (e.g., `ip route show`, `ip addr show`) before concluding stability. Escalation was unnecessary as no faults were found.  
-
-- **No Further Collaboration**:  
-  - ACM, as a trusted peer, required no additional coordination since all requirements (e.g., route advertisement) were met automatically.  
+### **2. Justifications**
+- **Loopback Advertisement**: Critical for end-to-end reachability; avoids using link-local addresses (10.0.4.2) which lack global routes.  
+- **Default Route Configuration**: Ensures traffic sources from loopback (198.82.0.1), avoiding misrouting via link-specific IPs.  
+- **ICMP Redirect Analysis**: Redirects indicated upstream routers believed better paths existed, suggesting ACM’s route to 8.8.8.8 was invalid.  
+- **ACM Coordination**: Required to confirm its routing state and internet connectivity; silence suggested systemic issues.  
+- **Local Checks**: Ruled out firewall/ARP issues before blaming ACM, adhering to "investigate locally first" policy.  
+- **Escalation**: ACM’s unresponsiveness and lack of actionable data necessitated administrative intervention.  
 
 ---
 
-**Summary**: The network operated flawlessly with no configuration drift or faults. The system’s stability allowed minimal intervention, relying on kernel defaults and protocol compliance.
+### **3. Network Discoveries**
+- **Web Node Configuration Valid**: Firewall open, link-layer connectivity intact, correct routing setup.  
+- **ACM’s Role**:  
+  - Likely missing routes to `8.8.8.8` or upstream routers.  
+  - Possible policy blocking traffic sourced from `198.82.0.1` (loopback).  
+- **ICMP Redirects**: Suggested routing loops or misconfigured upstream paths beyond ACM’s network.  
+- **ACM Unresponsiveness**: Failed to reply to multiple diagnostic requests, hindering troubleshooting.  
+
+---
+
+### **4. Coordination with Other Agents**
+- **Initial Advertisement**: Sent stable address to ACM for routing advertisement.  
+- **Repeated Diagnostic Requests**:  
+  - First message: Requested ACM’s routing table and reachability.  
+  - KP `WHY` escalation: Formalized request per protocol after ACM’s silence.  
+  - Resent messages to ensure delivery amid potential message loss.  
+- **Final Escalation**: Reported ACM’s domain-level issues to admins, as coordination failed.  
+
+---
+
+### **Conclusion**
+The experiment revealed that while Web’s configuration was correct, ACM’s upstream routing or policy misconfigurations blocked internet reachability. ICMP redirects and ACM’s unresponsiveness highlighted systemic issues beyond the local node’s control, necessitating administrative intervention.

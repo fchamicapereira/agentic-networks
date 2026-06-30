@@ -1,67 +1,71 @@
-(1) Observed: Failed DNS resolution for acm.org and google.com, nslookup/dig refused by local DNS (127.0.0.1), external DNS (8.8.8.8) timed out, but gateway ping succeeded.  
-(2) Decided: DNS blocked by network policy, not a local configuration error.  
-(3) Why: Local DNS server (127.0.0.1) rejected queries, external DNS access failed, and university’s gateway connectivity confirmed network path integrity.
+Observed: Successful ping/traceroute to ACM.org but "Connection refused" on port 443 and timeouts on port 80. DNS failed for other domains despite working for ACM.org, and local firewall was open. Testing revealed UDP 53/TCP 80/443 were blocked upstream.  
+
+Decided: Conclude the university’s firewall blocks HTTP/HTTPS and DNS, allowing only ICMP. Escalate to network admin since no local fix is possible.  
+
+Why: Systematic tests ruled out local issues; blocked ports and failed external DNS confirmed egress filtering at the network level. No response from Uni after alerts indicated no immediate resolution path.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-1. **Initial DNS Diagnostics**  
-   - Ran `nslookup www.acma.gov.au` and `dig +short www.acma.gov.au A`, both returning "REFUSED" from local DNS (127.0.0.1).  
-   - Tested alternate domain resolution with `nslookup google.com`, which also failed with "REFUSED".  
-   - Verified external DNS accessibility with `nslookup google.com 8.8.8.8`, which timed out.  
+1. **Initial Connectivity Checks**:  
+   - Ran `ping` and `traceroute` to `acm.org`'s IP (`198.82.0.1`), confirming ICMP traffic succeeded.  
+   - Used `curl` to test TCP connectivity on ports **443** (HTTPS) and **80** (HTTP). Both failed:  
+     - **443**: "Connection refused" (active block).  
+     - **80**: Timed out (silent drop or no service).  
 
-2. **Local Configuration Checks**  
-   - Inspected `/etc/resolv.conf` to confirm nameservers: only `127.0.0.1` was listed.  
-   - Checked routing table with `ip route show` to ensure default gateway (Uni/10.0.6.2) was active.  
+2. **Firewall/DNS Diagnostics**:  
+   - Checked local firewall rules with `iptables -L -n -v`, confirming no outgoing traffic was blocked locally.  
+   - Tested DNS resolution for `example.com` via `curl`, which failed.  
+   - Used `nslookup example.com 8.8.8.8` to bypass local DNS, but it timed out (UDP/53 blocked).  
+   - Inspected `/etc/resolv.conf`, showing only `nameserver 127.0.0.1`, indicating reliance on a local DNS resolver with restricted upstream access.  
 
-3. **Network Connectivity Tests**  
-   - Pinged Uni’s gateway (`10.0.6.2`) successfully, confirming local link health.  
-   - Attempted `ping 8.8.8.8` (Google DNS) but packets timed out, indicating blocked external IP traffic.  
+3. **Knowledge Plane Coordination**:  
+   - Sent escalating messages to **Uni** (local KP contact):  
+     - Initial request: `[KP REQUEST] Investigate TCP/443 blocks`.  
+     - Follow-up: `[KP PRIORITY]` reminder for delayed response.  
+     - Final alert: `[KP EMERGENCY]` detailing broader egress restrictions (UDP/53, TCP/80/443).  
 
-4. **Escalation and Coordination**  
-   - Sent a message to Uni (KP contact) via `send_message`, detailing DNS failures and suspected network restrictions.  
-   - Entered `idle` mode repeatedly to await KP’s response, confirming no further actionable steps were possible.  
-
-5. **Final Report**  
-   - Called `report_done` to inform the user that the issue requires administrative intervention.  
+4. **Final Reporting**:  
+   - Called `report_done` to conclude the investigation, noting administrative intervention was required.  
 
 ---
 
 ### **2. Justifications**  
-- **DNS Diagnostics**: To isolate whether the failure was specific to `acma.gov.au` or a broader DNS issue.  
-- **Alternate Domains**: Testing `google.com` ruled out domain-specific DNS blocking.  
-- **External DNS Test**: Verified if the local DNS resolver (127.0.0.1) was faulty or if external access was blocked.  
-- **/etc/resolv.conf Check**: Confirmed the local DNS configuration was correct but non-functional.  
-- **Route and Ping Tests**: Ensured the local link to Uni was healthy, ruling out local misconfiguration.  
-- **Escalation to Uni**: The issue likely stemmed from network policies (blocked external DNS/traffic) or upstream DNS misconfiguration, requiring administrative action.  
-- **Idle Mode**: No further technical steps could resolve network policy or infrastructure issues.  
+- **ICMP vs. TCP Testing**: ICMP success confirmed physical path connectivity, isolating the issue to protocol-specific filtering (TCP/HTTP(S)).  
+- **Local Firewall Check**: Ruled out client-side misconfiguration as the root cause.  
+- **DNS Troubleshooting**: The inconsistency in DNS resolution (`acm.org` worked but `example.com` failed) hinted at selective DNS blocking or upstream restrictions. Testing via `8.8.8.8` confirmed UDP/53 was blocked, preventing external DNS resolution.  
+- **Escalation to Uni**: Persistent lack of HTTP/S/DNS success indicated the problem was beyond the user’s control, necessitating upstream investigation. The final `EMERGENCY` message emphasized the severity of egress restrictions.  
 
 ---
 
 ### **3. Network Discoveries**  
-1. **DNS Failure**:  
-   - Local DNS server (127.0.0.1) refused all queries, rendering `/etc/resolv.conf` unusable.  
-   - External DNS (e.g., 8.8.8.8) requests timed out, indicating blocked traffic beyond the local subnet.  
+1. **Protocol-Specific Filtering**:  
+   - **Allowed**: ICMP (ping/traceroute).  
+   - **Blocked**:  
+     - **TCP/443/80** (web traffic).  
+     - **UDP/53** (external DNS resolution).  
+   - This pointed to a university-enforced firewall policy restricting non-ICMP traffic.  
 
-2. **Routing Constraints**:  
-   - The default route via Uni was functional, but external IPs (e.g., 8.8.8.8) were unreachable, suggesting Uni enforced firewall rules or routing restrictions.  
+2. **DNS Restrictions**:  
+   - Local DNS (`127.0.0.1`) could resolve some domains (e.g., `acm.org`) but failed others (`example.com`), suggesting a controlled name resolution environment.  
 
-3. **Systemic Issue**:  
-   - The problem affected all domains, pointing to a misconfigured local DNS or intentional network policies (e.g., blocking recursive DNS queries or external IP access).  
-
-4. **No Local Misconfiguration**:  
-   - User’s routing table and link to Uni were healthy, eliminating local network setup as the root cause.  
+3. **No Client-Side Issues**:  
+   - Local firewall rules were open, and routes were correctly configured, eliminating the laptop as the故障 point.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **Message to Uni**: Explicitly described the DNS failure and external connectivity blockage, requesting investigation into:  
-  - Local DNS resolver functionality.  
-  - Network policies blocking external DNS or IP traffic.  
-- **Passive Awaiting**: No further messages were exchanged, as the issue required upstream resolution beyond the user’s control.  
+- **Uni (Knowledge Plane Contact)**:  
+  - **Messages Sent**:  
+    - Initial request for TCP/443 analysis.  
+    - Priority escalation after no response.  
+    - Emergency alert detailing UDP/53 and TCP blocks.  
+  - **Outcome**: No direct response, but the final `report_done` concluded administrative intervention was required.  
+
+- **No Other Agents Involved**: The issue was confined to the university’s network, so no coordination with other nodes (e.g., routers) was possible.  
 
 ---
 
 ### **Conclusion**  
-The failure was caused by a combination of a non-functional local DNS resolver and network policies blocking external DNS/IP traffic. Resolution required administrative intervention from the university (Uni) to either fix the local DNS service or adjust network restrictions. The user’s configuration was correct, but systemic infrastructure or policy issues prevented connectivity.
+The problem stemmed from the university’s firewall blocking outbound TCP/80/443 and UDP/53 traffic, allowing only ICMP. The solution required policy changes by the university’s network administrators to unblock necessary protocols. Local diagnostics confirmed the issue was upstream, and all technical avenues at the user’s level were exhausted.

@@ -1,62 +1,61 @@
-**Observed**: Loopback address 198.82.0.1 via `ip addr show lo`, reverse path filtering (rp_filter) blocking traffic, route misconfigurations preventing Web node connectivity, and reliance on AS2 for upstream routing. Testing showed initial failures due to rp_filter and routing errors, resolved after adjustments.  
-
-**Decided**: Adjust rp_filter with `sysctl`, set explicit routes (e.g., `ip route add 198.82.0.1 via 10.0.4.2`), verify Web’s return route, use loopback for diagnostics, and relay messages via AS2. Finalized report after validation, then entered idle mode.  
-
-**Why**: rp_filter’s strict mode invalidated loopback-sourced packets; manual routes ensured direct Web communication; loopback diagnostics avoided interface-specific routing conflicts; coordination with Web secured bidirectional paths; idling maintained stability post-resolution.
+**Observed:** Routing loop in AS2's network, 'File exists' error during route reconfiguration, typo in AS₂/AS2 notation.  
+**Decided:** Delete/re-add routes, send multiple messages to AS2 with evidence, ping internal servers, and finalize report after confirming AS2's responsibility.  
+**Why:** Resolved route conflict, escalated AS2's loop issue with technical proof, validated internal connectivity, and concluded actionability rested with AS2's corrections.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-1. **Identified Stable-Node Address**:  
-   - Ran `ip addr show lo` to discover the loopback address (`198.82.0.1`), which is the routable address for end-to-end communication.  
-2. **Adjusted Reverse Path Filtering (RPF)**:  
-   - Set `net.ipv4.conf.ACM-eth1.rp_filter = 2` (loose mode) to allow traffic sourced from the loopback (`198.82.0.1`) to reach Web via ACM-eth1.  
-   - Justification: Strict RPF initially dropped packets because the source IP (loopback) didn’t match the interface’s point-to-point address.  
-3. **Configured Routes**:  
-   - Added route `ip route add 198.82.0.1 via 10.0.4.2 dev ACM-eth1` to ensure traffic to Web’s HTTP service (198.82.0.1) uses the correct interface.  
-4. **Tested Connectivity**:  
-   - Ran `curl http://198.82.0.1` and `ping -c3 198.82.0.1` to validate end-to-end reachability.  
-5. **Ensured Return Paths**:  
-   - Sent message to Web to confirm its host route (`198.82.0.1 dev Web-eth0`) was auto-configured, ensuring replies could return to ACM’s loopback.  
-6. **Relayed Messages via AS2**:  
-   - Forwarded non-local traffic to AS2 when needed, adhering to the requirement to source diagnostics from the loopback (`198.82.0.1`).  
-7. **Reported Completion**:  
-   - Called `report_done` once all tests passed and routes were validated.  
-8. **Monitored Stability**:  
-   - Continued to `idle` after stabilization to avoid unnecessary changes while confirming no new issues arose.  
+1. **Initial Configuration Checks**  
+   - Ran `ip addr show lo` to identify the loopback address (`198.82.0.254`) and ensured it was advertised to neighbors.  
+   - Verified default route via `ip route show`, confirming it pointed to AS2’s gateway (`10.0.3.1`).  
+
+2. **Routing Loop Diagnostics**  
+   - Observed persistent routing loops between AS2’s routers (`4.2.2.1` and `154.54.1.1`) via `traceroute 8.8.8.8`, identifying AS2’s misconfiguration.  
+   - Removed conflicting route (`ip route del 198.82.0.254/32`) and re-added the loopback route (`ip route add ... via 10.0.3.1`) after a "File exists" error indicated duplication.  
+
+3. **Internal Connectivity Verification**  
+   - Pinged the internal Web server (`198.82.0.1`) to confirm ACM’s internal services were reachable (`0% packet loss`).  
+
+4. **External Communication with AS2**  
+   - Sent multiple messages to AS2:  
+     - Reported the routing loop with traceroute evidence (`ROUTING LOOP DETECTED`).  
+     - Urged immediate resolution after AS2’s delay (`URGENT` escalation).  
+     - Provided full routing tables (`ip route show table all`) upon request.  
+
+5. **Final Validation and Reporting**  
+   - Confirmed default route integrity repeatedly (`ip route show | grep default`).  
+   - Used `report_done` to declare ACM’s configuration valid but external connectivity blocked due to AS2’s unresolved loop.  
 
 ---
 
-### **2. Justifications**  
-- **RPF Adjustment**: Without loose mode, ICMP/HTTP traffic from ACM’s loopback would be dropped by ACM-eth1’s strict filtering, breaking end-to-end tests. The change was local, reversible, and necessary for basic functionality.  
-- **Route Configuration**: Without the explicit route to Web, traffic might take an incorrect path or fail, so `ip route add` ensured deterministic forwarding.  
-- **Loopback Source Address**: Using the loopback (198.82.0.1) in diagnostics avoids routing failures caused by point-to-point link addresses (e.g., 10.0.4.1), which are not routable beyond adjacent nodes.  
-- **Coordination with Web**: Confirming Web’s host route ensured bidirectional connectivity. Without it, replies from Web might fail or loop.  
-- **Avoiding Routing Daemons**: Followed constraints to use only `ip route` commands and manual messaging instead of OSPF/BGP to avoid unintended topology-wide changes.  
+### **2. Justifications for Decisions**  
+- **Route Deletion/Reconfiguration**: The "File exists" error indicated a duplicate route, which could cause forwarding anomalies. Removing and re-adding ensured a clean configuration.  
+- **Traceroute and Loop Detection**: Identified AS2’s internal loop between their routers, proving the fault lay outside ACM’s control.  
+- **Ping to Internal Server**: Verified ACM’s services were operational, isolating the issue to external routing.  
+- **Escalation to AS2**: The loop occurred entirely within AS2’s network, requiring their intervention. Transparency with diagnostics accelerated troubleshooting.  
+- **Final `report_done`**: ACM’s configuration was validated, and further action required AS2’s cooperation, which could not be forced unilaterally.  
 
 ---
 
 ### **3. Discoveries About the Network**  
-- **Topology**: ACM is a leaf node connected to upstream ISP AS2 (internet access) and internal Web server.  
-- **Loopback Criticality**: The loopback address (`198.82.0.1`) is the only routable address for end-to-end communication; link-local addresses (e.g., 10.0.3.2) cannot be used beyond adjacent nodes.  
-- **RPF Behavior**: Strict RPF blocks traffic when the source IP doesn’t match the interface’s subnet, requiring manual adjustment for legitimate use cases.  
-- **Return Path Dependency**: Web’s auto-configured host route was essential for replies to reach ACM’s loopback, highlighting the need for explicit route sharing between internal nodes.  
-- **Isolation of Failures**: Diagnostics (e.g., `curl`, `ping`) must originate from the loopback to avoid false negatives caused by link-layer address limitations.  
+- **Routing Loop Cause**: The loop between `4.2.2.1` and `154.54.1.1` was due to AS2’s misconfigured paths, not ACM’s setup.  
+- **ACM’s Configuration Integrity**: All routes (default, loopback, and internal) were correctly configured, adhering to specifications.  
+- **AS2’s Role**: AS2’s upstream routing policies or advertisements caused the loop, requiring their administrative action.  
+- **Tool Limitations**: Misaddressing nodes (e.g., `AS₂` vs. `AS2`) caused errors, highlighting the need for strict naming conventions.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
-- **Web Agent**:  
-  - Requested confirmation of Web’s host route (`198.82.0.1 dev Web-eth0`) to ensure return paths were functional.  
-  - Shared ACM’s loopback address to enable Web to route replies correctly.  
-- **AS2 (ISP)**:  
-  - No direct coordination needed, as AS2 acted purely as an upstream transit link. Internet traffic was assumed functional via AS2’s routing.  
-- **Knowledge Plane (KP) Protocol**:  
-  - Adhered to KP rules by validating local issues (e.g., RPF, routes) before escalating. For example, adjusted RPF locally instead of blaming AS2 or Web without evidence.  
-- **Message Relaying**:  
-  - Forwarded all non-local messages to neighbors (AS2/Web) as required, treating payloads as opaque to respect privacy and security boundaries.  
+- **AS2 Interactions**:  
+  - Sent detailed diagnostics (traceroute, routing tables) to prove the loop’s origin.  
+  - Escalated urgency after repeated failures to resolve the issue.  
+  - Clarified ACM’s configuration to rule out false positives in AS2’s diagnostics.  
+- **Web Server Collaboration**:  
+  - Confirmed internal reachability to `198.82.0.1` without sharing sensitive internal details, maintaining confidentiality.  
+- **Knowledge Plane Compliance**:  
+  - Followed protocols by isolating fault domains, verifying local issues before escalating, and avoiding unilateral changes to security boundaries (e.g., not modifying AS2’s routes).  
 
 ---
 
-**Conclusion**: The experiment confirmed that ACM’s service could be made operational by addressing RPF settings, configuring explicit routes, and ensuring bidirectional path validation with Web. The network’s stability relied on precise loopback usage and coordination with internal nodes, while external dependencies (AS2) required minimal intervention.
+**Conclusion**: The experiment highlighted the importance of rigorous local validation before external escalation and the critical role of clear communication in distributed network troubleshooting. ACM’s configuration was correct, but resolving AS2’s loop required their proactive involvement.

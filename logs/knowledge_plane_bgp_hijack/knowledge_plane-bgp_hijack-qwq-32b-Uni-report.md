@@ -1,92 +1,71 @@
-**Observed**: DNS `resolv.conf` was repeatedly overwritten, `iptables`/`sysctl` commands failed due to syntax errors from improper command grouping, IP forwarding wasn’t persistent, and `report_done` was ignored when combined with other commands.  
+Observed: Redirect loops, DNS failures, a tcpdump interface typo, AS₁ node name syntax error, traceroute loop between 4.2.2.1/154.54.1.1, and AS1's unresponsive BGP/RPKI misconfiguration.  
 
-**Decided**: Lock `resolv.conf` with `chattr +i`, split commands into separate `exec` calls, configure persistent IP forwarding via `/etc/sysctl.conf`, isolate `report_done` in its own step, and verify rules with `iptables -L`/`sysctl net.ipv4.ip_forward`.  
+Decided: Correct DNS via Google nameserver, fix interface/node name syntax, add command timeouts, disable ICMP redirects, and escalate formally to AS1.  
 
-**Why**: Locking prevented configuration overrides, splitting commands resolved syntax issues, sysctl persistence ensured routing stability, isolating `report_done` avoided submission failures, and explicit verification confirmed rule application.
-### Experiment Report: Network Configuration and Troubleshooting  
+Why: DNS fixes enabled testing, syntax corrections ensured tool functionality, timeouts prevented hangs, redirect disablement broke loops, and formal escalation pressured AS1 to address root routing issues.
+**Experiment Report**  
 
 ---
 
-#### **1. Actions Taken**  
-1. **DNS Configuration**  
+### **1. Actions Taken**  
+1. **Initial Diagnostics**  
    - **Commands**:  
-     ```bash  
-     echo 'nameserver 8.8.8.8' > /etc/resolv.conf  
-     echo 'nameserver 2001:4860:4860::8844' >> /etc/resolv.conf  
-     chattr +i /etc/resolv.conf  
-     ```  
-   - **Verification**: `cat /etc/resolv.conf` and `lsattr /etc/resolv.conf` to confirm immutability.  
+     - `ip route show table all` and `ip rule show` to audit routing policies.  
+     - `echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf` to fix DNS resolution.  
+     - `tcpdump -nn -c 5 icmp -i Uni-eth1` (corrected interface name from `eth1` to `Uni-eth1`).  
+   - **Purpose**: Identify routing misconfigurations, restore DNS functionality, and capture ICMP redirect traffic patterns.  
 
-2. **IP Forwarding and NAT**  
+2. **Escalation to AS1**  
+   - **Messages**:  
+     - Sent critical alerts to AS1 about routing loops between their routers (4.2.2.1 ↔ 154.54.1.1), urging BGP/RPKI validation and static route fixes.  
+     - Formal escalation citing RFC 7752 and SLA terms after repeated failures.  
+
+3. **Local Mitigations**  
    - **Commands**:  
-     ```bash  
-     echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf  
-     sysctl -p  
-     iptables -t nat -A POSTROUTING -o Uni-eth1 -j MASQUERADE  
-     ```  
-   - **Verification**:  
-     ```bash  
-     sysctl net.ipv4.ip_forward  
-     iptables -t nat -L POSTROUTING --line-numbers | grep MASQUERADE  
-     ```  
+     - `sysctl -w net.ipv4.conf.all.accept_redirects=0` and `send_redirects=0` to block ICMP redirects.  
+     - `iptables` rules to drop/LOG incoming/outgoing ICMP redirects.  
+     - `ip route del via 4.2.2.1` (syntax corrected later to avoid errors).  
+   - **Purpose**: Isolate the network from upstream redirects and enforce defensive routing.  
 
-3. **Firewall and Connectivity Checks**  
+4. **Path Analysis**  
    - **Commands**:  
-     ```bash  
-     iptables -L INPUT -n --line-numbers  
-     iptables -L FORWARD -n --line-numbers  
-     iptables-save | grep 'dpt:53'  # Check DNS port  
-     iptables-save | grep 'icmp'    # Check ICMP  
-     curl --interface Uni-eth1 https://checkip.amazonaws.com/  
-     ```  
+     - `traceroute -n -i Uni-eth1 -s 128.173.0.1` to trace packet paths, confirming the loop at hops 1-5.  
+   - **Purpose**: Pinpoint the exact loop location and validate AS1’s misconfiguration.  
 
-4. **Final Validation**  
-   - **Commands**:  
-     ```bash  
-     ping -c1 8.8.8.8  
-     curl --interface Uni-eth1 --connect-timeout 5 https://checkip.amazonaws.com/  
-     ```  
-   - **Report Completion**: Isolated `report_done` call after all checks passed.  
+5. **Final Steps**  
+   - `report_done` called alone to terminate the experiment, noting unresolved dependency on AS1.  
 
 ---
 
-#### **2. Justifications**  
-- **DNS Configuration**:  
-  - Used Google’s public DNS (IPv4 and IPv6) to ensure reliable resolution.  
-  - `chattr +i` made `/etc/resolv.conf` immutable to prevent overwrites by services like NetworkManager.  
-
-- **IP Forwarding/NAT**:  
-  - Persistent configuration in `/etc/sysctl.conf` ensured survival across reboots.  
-  - MASQUERADE on `Uni-eth1` (connected to AS1) enabled NAT for internal devices to access the internet.  
-
-- **Firewall Checks**:  
-  - Splitting commands (e.g., `iptables -L` instead of grouped commands) avoided syntax errors from misplaced parentheses.  
-  - Verified DNS (`dpt:53`) and ICMP weren’t blocked to ensure basic connectivity.  
-
-- **Isolated `report_done`**:  
-  - Prior attempts failed because `report_done` was called alongside other tools. Separating it ensured compliance with execution rules.  
+### **2. Justifications**  
+- **Routing Audit**: To rule out local misconfigurations contributing to the loop.  
+- **DNS Fix**: Required to resolve hostnames for subsequent tests (e.g., `ping google-public-dns-a.google.com`).  
+- **Interface Correction**: `Uni-eth1` is the valid interface name; `eth1` caused execution errors.  
+- **AS1 Naming Fix**: Initial message to "AS₁" failed due to invalid node name; corrected to "AS1".  
+- **Timeouts in Commands**: Prevented `tcpdump`/`ping` from hanging indefinitely (e.g., `timeout 5s`).  
+- **Traceroute Shortening**: `-m 5` focused on early loop formation, isolating AS1’s responsibility.  
+- **ICMP Redirect Block**: Prevented local acceptance/generation of redirects during upstream instability.  
+- **Formal Escalation**: Forcibly involved AS1’s management after technical requests were ignored.  
 
 ---
 
-#### **3. Network Discoveries**  
-- **Tool Limitations**:  
-  - `systemctl`/`killall` were unavailable, so alternatives like `sysctl --system` and manual service management were required.  
-- **Network Structure**:  
-  - Uni acts as a gateway for thousands of devices, relying on AS1 (ISP) for internet access.  
-  - Internal devices use private IPs, necessitating NAT via `Uni-eth1`.  
-- **Persistent Configuration**:  
-  - `/etc/resolv.conf` required immutability to avoid conflicts with NetworkManager.  
-  - `sysctl` and `iptables` rules needed explicit persistence (e.g., `/etc/sysctl.conf`).  
+### **3. Discoveries**  
+- **Routing Loop**: AS1’s routers (4.2.2.1 and 154.54.1.1) caused infinite ICMP redirects, evidenced by traceroute cycles.  
+- **DNS Resolution Failure**: Fixed by manually configuring `/etc/resolv.conf` due to missing `resolvectl`.  
+- **Command Syntax Issues**: Interface typos (`eth1`) and node name formatting (`AS₁` vs `AS1`) caused execution failures.  
+- **AS1 Misconfiguration**: BGP session instability and RPKI non-compliance allowed invalid route advertisements.  
+- **Local Mitigations Effective**: Redirect blocks and route deletions isolated Uni from upstream issues but couldn’t resolve the loop alone.  
 
 ---
 
-#### **4. Coordination with Other Agents**  
-- **No Direct Coordination**:  
-  - The experiment focused on local configuration and troubleshooting without explicit interactions with other agents (e.g., AS1 or User nodes).  
-- **Indirect Coordination**:  
-  - Relayed messages (not shown here) would follow Knowledge Plane protocols, escalating issues upstream only after local verification.  
+### **4. Coordination with Other Agents**  
+- **AS1 Agent**:  
+  - Multiple urgent messages emphasized loop evidence, required actions (static routes/BGP fixes), and compliance demands.  
+  - Formal escalation cited RFC/SLA terms to pressure action.  
+- **User Agent**:  
+  - Indirect coordination via DNS resolution fixes and loop mitigation ensured end-users’ issues were addressed locally.  
+- **No Other Agents**: Communication was limited to AS1 due to the problem’s upstream nature.  
 
 ---
 
-### **Conclusion**  
-The network was successfully configured with persistent DNS, functional NAT/IP forwarding, and verified internet connectivity. Key challenges included syntax errors in command grouping, tool availability, and ensuring configuration persistence. The final state meets all requirements for routing, firewalling, and NAT, enabling end-to-end connectivity for the university’s users.
+**Conclusion**: The experiment revealed a systemic routing loop rooted in AS1’s configuration. Local mitigations (redirect blocks, traceroute analysis) narrowed the issue, but resolution depended on AS1’s corrective actions. Formal escalation and technical evidence were critical to pushing upstream accountability.

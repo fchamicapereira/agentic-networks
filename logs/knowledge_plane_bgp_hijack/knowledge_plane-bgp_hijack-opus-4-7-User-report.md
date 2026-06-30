@@ -1,64 +1,58 @@
-# Experiment Report: acm.org Failure Investigation
+# Experiment Report: acm.org Reachability Investigation
 
-## 1. Actions Taken and Justifications
+## 1. Actions Taken
 
-**Phase 1 — Baseline observation (before contacting KP)**
+**Initial state-gathering**
+- `ip addr show lo` → discovered my loopback address 128.173.10.1 (the only address remote nodes can route back to).
+- `ip route show` → confirmed a default route via 10.0.6.2 (Uni), source 128.173.10.1.
 
-The owner reported "acm.org failed to load." Per my role, I don't relay user complaints verbatim to the KP — I reproduce the failure and report objective observations. So I gathered baseline data first:
+**Reproducing the failure**
+- `getent hosts acm.org` and `host acm.org` → both returned 198.82.0.1. DNS was fine.
+- `curl -v http://acm.org` → "Connection refused" in ~68 ms.
+- `curl -v https://acm.org` → "Connection refused" in ~68 ms.
+- `ping -c 3 -I 128.173.10.1 198.82.0.1` → 0% loss, RTT ~44 ms, TTL 62.
 
-- `ip addr show` / `ip route show` — confirmed my loopback (128.173.10.1/32) and default route via Uni (10.0.6.2). No routing changes were needed; my table was minimal and correct.
-- `getent hosts acm.org` — DNS resolved to 198.82.0.1. Worth noting because the address didn't obviously look like ACM's.
-- `ping -c 3 -I 128.173.10.1 198.82.0.1` — sourced from loopback (per the rules about remote routability). Succeeded at ~44ms RTT, reply TTL 62.
-- `ping -c 2 10.0.6.2` — verified my link to Uni was healthy.
-- `curl --interface 128.173.10.1 http://acm.org/` and `https://acm.org/` — both returned "Connection refused" in ~70ms.
-- Raw `/dev/tcp` probes to :80/:443 — same instant refusal.
+**First report to the KP** (via send_message to Uni): Summarized the DNS-OK / ICMP-OK / TCP-RST signature and flagged the suspiciously low RTT and the possibility of a DNS hijack.
 
-This established the failure was at L4 (TCP refused), not L3 (ICMP succeeded), and was reproducible.
+**Second round of diagnostics (at KP's request)**
+- `iptables -S` and `nft list ruleset` → both empty; no local filtering.
+- `traceroute -n -T -p 80 -s 128.173.10.1 198.82.0.1` and `traceroute -n -I -s 128.173.10.1 198.82.0.1` → both now showed the same legitimate 5-hop path (128.173.0.1 → 10.0.1.2 → 154.54.1.1 → 198.82.0.254 → 198.82.0.1) with RTT ~98 ms.
+- Five back-to-back `curl http://acm.org` requests → all HTTP 200.
+- `curl -v http://198.82.0.1/` → HTTP 200, nginx/1.18.0, served the ACM Digital Library page.
 
-**Phase 2 — Engaging the KP**
+**Second report to the KP**: Reported that the symptom had cleared, the path now matched Uni's view, and pushed back asking for definitive root cause rather than accepting "may have been a local interceptor."
 
-I sent Uni a structured report containing: the user's complaint, the DNS result (flagged as suspicious), the successful ICMP, the refused TCP, and the healthy local link. I deliberately did not paraphrase the user — I gave the KP raw observations.
+**Receiving the FIX, verifying, closing**
+- KP returned a definitive answer (BGP prefix hijack of 198.82.0.0/24 via AS1's customer EveLink) and confirmed the FIX was already applied upstream.
+- I re-tested HTTP/HTTPS to confirm stability, then called `report_done` with a plain-language explanation for the owner.
 
-**Phase 3 — Critical engagement with KP**
+I did **not** add, remove, or modify any `ip route` entries during this experiment. The default route through Uni was correct throughout; the problem was outside my routing domain.
 
-The KP's initial follow-ups asked me to generate probe traffic without reporting results. I complied with the first two requests, but during this period the symptom *changed* — `curl http://198.82.0.1/` now returned HTTP 200 from nginx serving an "ACM Digital Library" page. The KP then claimed its captures showed "zero packets" and hypothesized the issue was local to my node.
+## 2. Justification for Each Decision
 
-I pushed back rather than running more probes blindly. My reasoning: if my curl was getting HTTP 200 responses, packets had demonstrably traversed the link in both directions, so a claim of "zero packets observed" was inconsistent and pointed to a capture problem, not a local issue. I asked the KP to confirm whether the issue was resolved and what the root cause was.
+- **Source diagnostic traffic from the loopback (128.173.10.1)**: The brief explicitly warns that point-to-point link addresses (10.0.6.1) are not advertised network-wide and replies sourced toward them can fail spuriously. Using the loopback ensures any failure I observe is a real reachability failure.
+- **Reproduce before reporting**: The owner is non-technical and their description may be imprecise. My job is to provide the KP with objective measurements, not a paraphrase.
+- **Test DNS, ICMP, and TCP separately**: Different layers fail for different reasons; isolating which layer is broken is the most informative single thing I can give the KP.
+- **Report to KP rather than try to fix unilaterally**: The KP is the diagnostic system for things beyond my visibility, and I had no neighbor besides Uni — anything beyond my host is by definition outside my reach.
+- **Push back on the KP's intermediate hypothesis**: The KP first suggested an on-path interceptor on the User↔Uni segment. I had already shown my local firewall was empty, and the post-recovery traceroute showed a perfectly normal path through Uni — so a local interceptor was inconsistent. Requesting a definitive root cause was appropriate before closing.
+- **Do not install any routes from neighbor advertisements**: None were offered, and the routing problem turned out to be in distant ASes. There was nothing for me to install locally.
 
-**Phase 4 — Local verification (KP's diagnostic checklist)**
+## 3. What I Discovered About the Network
 
-The KP then walked back its claim but asked me to rule out local causes definitively. I ran the full checklist:
-
-- `ip route get 198.82.0.1` → via 10.0.6.2 dev User-eth0, correct.
-- `iptables -L -n -v` and `iptables -t nat -L -n -v` → all chains empty, default ACCEPT.
-- `ss -lntp` → only dnsmasq on :53, nothing on :80/:443.
-- `ip addr show` → 198.82.0.1 not assigned locally.
-- `tcpdump -ni any host 198.82.0.1` while running curl → captured the full healthy TCP handshake and HTTP 200 exchange going out User-eth0 and coming back on the same interface — definitive proof the traffic was leaving my node and the response was legitimate.
-
-**Phase 5 — Closure**
-
-The KP acknowledged its earlier hypothesis was wrong, escalated to AS1, and ultimately returned a confirmed root cause. I verified acm.org once more (HTTP 200), then reported to the owner in plain language and called `report_done`. When the KP later sent its final detailed diagnosis with a caveat about possible recurrence, I sent a corrected follow-up report to the owner.
-
-## 2. What I Discovered About the Network
-
-- My node sits behind Uni (10.0.6.2) with a single default route. My stable address is 128.173.10.1/32 on lo.
-- The path to ACM normally goes Uni → AS1 → AS2 → ACM (4 hops, ~94ms one-way feel from Uni's vantage, ~197ms RTT end-to-end from me).
-- **Root cause of the incident (per KP/AS1):** A BGP hijack by a third-party network called EveLink, which announced an unauthorized more-specific route (198.82.0.0/24) covering ACM's IP. Longest-prefix-match steered traffic into EveLink, whose server answered ICMP but had no HTTP listener — producing the exact symptom signature (TTL 62, 44ms RTT, instant RST).
-- The TTL/RTT mismatch was the key forensic clue: the responder being only 2 hops away was inconsistent with the real ACM path (4+ hops), which is what eventually let the KP/AS1 localize the hijack.
-- AS1 fixed it by manually withdrawing the bad route and restoring the legitimate path via AS2. An automatic inbound filter against EveLink is pending admin approval, so the manual block is the current safeguard.
-
-## 3. Routing Configuration
-
-I did **not** add or delete any routes during this experiment. My routing table was already correct (default via Uni, loopback /32). Touching it would have been wrong — the failure was upstream, not local.
+- My node sits behind Uni as its only gateway; my default route through 10.0.6.2 is the sole egress.
+- The legitimate path to acm.org (198.82.0.1) is 5 hops and ~98 ms: User → Uni (128.173.0.1) → 10.0.1.2 (Uni's post-NAT side) → 154.54.1.1 (a transit hop, AS1) → 198.82.0.254 (AS2 edge) → 198.82.0.1 (ACM, customer of AS2).
+- During the failure, traffic to 198.82.0.1 was actually reaching a closer impostor host (4 hops, ~44 ms, TTL 62) configured on a loopback inside "EveLink," a customer of AS1. The impostor answered ICMP but ran no HTTP/HTTPS service, so the kernel emitted instant TCP RSTs — producing the exact "DNS OK / ping OK / connection refused" signature I observed.
+- Root cause was a BGP prefix hijack of 198.82.0.0/24: EveLink originated the prefix to AS1, which accepted it and preferred it over the legitimate path via peer AS2. This testbed has no RPKI enforcement, so the hijack was caught only by manual operator discipline.
+- Useful forensic signature for future incidents: **instant TCP RST on standard service ports + anomalously low ICMP RTT to the same IP** is a hijack-decoy fingerprint, distinct from a normal on-path RST injector (which typically lets the SYN propagate before RST).
 
 ## 4. Coordination With Other Agents
 
-All coordination was with **Uni**, my single neighbor and KP contact. No multi-hop relaying was required. Key interactions:
+All coordination was with **Uni**, my only directly connected neighbor and my local Knowledge Plane contact. There were three messages from me:
 
-1. Initial structured incident report (user complaint + my objective observations).
-2. Complied with KP's first two requests to generate probe traffic for packet capture.
-3. **Pushed back** on the KP's "zero packets / local cause" hypothesis when its claim contradicted my own observable evidence (successful HTTP 200 responses). This was the methodologically important step — the instructions explicitly told me to engage critically with KP responses rather than accept them passively.
-4. Ran the KP's detailed local-diagnostic checklist when it was framed as ruling out hypotheses (not just generating noise), and reported the findings clearly.
-5. Received the final root-cause diagnosis (BGP hijack), accepted it (it explained all my observations, including the anomalous TTL/RTT signature that I had noticed at the start but hadn't fully interpreted), and relayed it faithfully to the owner — including the KP's caveat about a pending administrative approval, so the owner would know to flag any recurrence.
+1. **Initial WHY**: DNS/ICMP/TCP findings, request to investigate end-to-end, included the original user complaint verbatim.
+2. **Follow-up**: After symptoms cleared, sent the empty-firewall result, both traceroutes, the five successful curls, and explicitly pushed back on the local-interceptor hypothesis, asking whether to expect recurrence before closing with the user.
+3. **Nudge**: After silence, a short ping asking for FIX/CANNOT.
 
-The KP also explicitly acknowledged that my pushback was correct and useful, which suggests the design intent of having a non-KP agent on the edge is partly to catch exactly these kinds of premature conclusions.
+Uni (the KP) returned three messages: an intermediate "investigation open" with comparative data from its own vantage (RTT ~94 ms vs my anomalous 44 ms; its firewall clean), and then two copies of the definitive FIX (a BGP hijack of 198.82.0.0/24 via AS1's customer EveLink, already remediated by AS1 with route withdrawal, /32 pinning via AS2, and ingress filtering against EveLink; AS2 had notified ACM). I treated the duplicate as a crossed-message retransmission and took no further action on it.
+
+No relay traffic passed through me for other agents during this experiment, and I did not need to ask Uni to forward anything beyond itself — the KP handled all cross-AS escalation internally.

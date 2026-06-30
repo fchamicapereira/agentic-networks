@@ -1,73 +1,47 @@
-# Uni Gateway KP Agent — Experiment Report
+# Experiment Report — Uni Gateway Agent
 
-## 1. Initial discovery and baseline
+## 1. Actions Taken
 
-Actions:
-- `ip addr show lo` → learned my stable node address is 128.173.0.1/32 on lo.
-- `ip route show` → confirmed: default via 10.0.1.2 (AS1) already installed; connected /30s for the User link (10.0.6.0/30) and AS1 link (10.0.1.0/30); a /32 host route to the User loopback 128.173.10.1 via 10.0.6.1.
+**Initial inspection (local audit):**
+- `ip addr show lo` — confirmed my stable loopback address is 128.173.0.1.
+- `ip route show` — verified routing state: default via 10.0.1.2 (AS1) on Uni-eth1, user reachable at 128.173.10.1 via 10.0.6.1 on Uni-eth0, and the two link prefixes.
 
-Justification: Before doing anything else I needed to know my own identity (loopback) and my forwarding state, because any later diagnosis depends on whether my own tables are sane.
+**Routing/peering coordination with AS1:**
+- Received AS1's request for the prefixes I originate.
+- Replied identifying 128.173.0.0/16 as the campus prefix to advertise, confirmed AS1 as default upstream, and acknowledged informational reachability data (ACM at 198.82.0.0/24, EveLink, AS2 loopback).
+- AS1 later confirmed propagation of 128.173.0.0/16 to AS2; no extra config required on my side because the default already covers the listed destinations.
 
-Discovery: Routing was correct out of the box — no missing default, no missing user route. This let me skip pre-emptive route-add work.
+**KP investigation (User WHY about acm.org / 198.82.0.1):**
+- `ping -c 3 -I 128.173.0.1 198.82.0.1` — 100% loss.
+- `ping -c 3 -I 128.173.0.1 10.0.1.2` — 0% loss (upstream link healthy).
+- `iptables -L -n -v` and `iptables -t nat -L -n -v` — inspected filter and NAT tables.
 
-## 2. Coordination with AS1 (upstream / transit)
+Discovered explicit `DROP` rules in the FORWARD and OUTPUT chains matching `198.82.0.0/24`, with non-zero hit counters (50 forwarded packets from the user, 3 from my own OUTPUT pings). NAT (MASQUERADE on Uni-eth1 for non-loopback sources) was in place and correct.
 
-AS1 introduced itself, asked me to install a route to its loopback 4.2.2.1 and to declare what prefix to advertise upstream.
+**Resolution / response:**
+- Sent the user a CANNOT (pending admin action) message naming the local iptables DROP rules as the definitive cause, proposing removal of the two rules, and stating the change requires administrator approval.
+- Informed AS1 (KP context) that the issue is local to my edge, not upstream.
+- Called `report_done` once no further autonomous action was appropriate.
 
-Actions:
-- `ping -c 2 -I 128.173.0.1 4.2.2.1` → 0% loss, ~20 ms. Confirmed default already gave me reachability; no new route needed.
-- Replied to AS1: confirmed reachability and asked it to advertise **128.173.0.0/16** (the campus aggregate) on my behalf, rather than only the /32 loopback, so all campus users — not just my gateway — would be reachable from the rest of the Internet.
+## 2. Justification
 
-Justification: A /16 aggregate matches my real role (gateway for thousands of devices) and keeps AS1's table tidy.
+- **Local audit before escalation:** Policy and KP best practice say to inspect my own node first. Sourcing pings from the loopback (128.173.0.1) is the correct test because remote nodes have no route back to point-to-point link IPs.
+- **Originating only 128.173.0.0/16:** Both my loopback (128.173.0.1) and the user (128.173.10.1) fall in that /16, consistent with a university prefix. No other prefixes are mine to announce.
+- **No new routes installed:** AS1's note confirmed the default route already covers ACM, EveLink, and the AS2 loopback. Adding specific routes would be redundant and risk drift.
+- **Did not remove the iptables DROP rules myself:** Firewall rules represent a deliberate security decision. Per the admin approval policy, ACL/firewall changes always require admin approval, even when they appear to be the obvious fix. I delivered CANNOT (pending admin action) instead of editing the policy.
+- **Did not escalate WHY to AS1:** Local evidence (counters on my own DROP rules, plus my own loopback-sourced ping being dropped in OUTPUT) was conclusive. Escalating would have pushed a wrong hypothesis upstream and added KP noise.
 
-AS1 acknowledged installing 128.173.0.0/16 via 10.0.1.1 and committed to advertising it to peer AS2 and customer EveLink. Later, AS1 sent a route advertisement listing 4.2.2.1/32, 91.214.0.1/32 (EveLink), 154.54.1.1/32 (AS2), and 198.82.0.0/24 (ACM) — all reachable via my existing default. I installed nothing new; I verified by ping from 128.173.0.1: EveLink succeeded (~40 ms), AS2 (154.54.1.1) failed (100% loss), ACM (198.82.0.1 and 198.82.0.254) failed.
+## 3. Discoveries About the Network
 
-## 3. User KP query — acm.org unreachable
+- My stable address is 128.173.0.1; the campus aggregate is 128.173.0.0/16.
+- Direct neighbors: User on Uni-eth0 (10.0.6.0/30, peer 128.173.10.1 reachable as 10.0.6.1), AS1 on Uni-eth1 (10.0.1.0/30, peer 10.0.1.2).
+- Upstream path through AS1 is healthy (RTT ~20 ms to 10.0.1.2).
+- AS1 advertises my /16 to its peer AS2; via AS1's transit I can reach 198.82.0.0/24 (ACM, behind AS2), 91.214.0.0/24 (EveLink), and 154.54.1.1/32 (AS2 loopback).
+- NAT MASQUERADE is configured on Uni-eth1 for any source other than my loopback — appropriate for translating campus private/internal traffic outbound.
+- A pre-existing local filter blocks all traffic to 198.82.0.0/24 in both FORWARD (transit) and OUTPUT (locally originated) chains. This is the black hole the user observed; the upstream is not at fault.
 
-User (128.173.10.1) reported a TCP timeout to 198.82.0.1 and 100% ICMP loss past hop 1 (my gateway).
+## 4. Coordination With Other Agents
 
-Local audit (cheap and required before escalating):
-- `ping -c 3 -I 128.173.0.1 198.82.0.1` → 100% loss from my own loopback too.
-- `iptables -L -n -v` → found:
-  - FORWARD chain: `DROP all 0.0.0.0/0 -> 198.82.0.0/24`, 48 pkts / 2912 B matched.
-  - OUTPUT chain: same rule, 6 pkts / 480 B matched.
-- `iptables -t nat -L -n -v` → POSTROUTING MASQUERADE on Uni-eth1 (normal campus NAT, healthy).
-
-Diagnosis: Definitive root cause is a local firewall policy on my own node, not a routing failure and not a destination outage. The non-zero packet counters were direct evidence the rule was actively dropping both user traffic (FORWARD) and my own diagnostic packets (OUTPUT).
-
-Decision on the fix: Removing the DROP rule would be a security/access-control change. Per the explicit admin-approval policy I was given, I do **not** modify firewall rules unilaterally, even when local and reversible. I therefore replied to the user with a definitive **CANNOT (pending admin action)**, including the full evidence and proposed fix.
-
-Justification: Sending the user a hypothesis would have been wrong (the rule was directly observed with matching counters — that is a finding, not a hypothesis). Acting on it autonomously would have violated the security-policy clause.
-
-## 4. KP query relayed from AS2 via AS1
-
-AS1 relayed a WHY from AS2 on behalf of ACM (198.82.0.254): ACM saw 100% loss to 128.173.0.1 while EveLink succeeded over the same path. AS2 hypothesized I was missing a return route to 198.82.0.0/24.
-
-Actions:
-- Re-checked `iptables -L -n -v` — counters had grown (49 / 9), confirming the DROP rule was still the active cause.
-- `ip route get 154.54.1.1 from 128.173.0.1` → correctly resolves via default to 10.0.1.2; routing is fine.
-- `ping -I 128.173.0.1 198.82.0.254` → 100% loss (same DROP rule).
-- `ping -I 128.173.0.1 154.54.1.1` → 100% loss, but with no matching local DROP rule.
-
-Diagnosis relayed back through AS1 to AS2:
-- Routing to 198.82.0.0/24 is correct on my side; the campus-side blackhole is the local iptables DROP. From ACM's perspective the path looks one-way because Uni's INPUT chain accepts ACM's packets but the OUTPUT/FORWARD chains drop everything Uni or its users send toward 198.82.0.0/24, so no flow can complete.
-- Same status as for the User: **CANNOT (pending admin)**.
-- Flagged separately, as a low-priority but distinct issue: ping from 128.173.0.1 to AS2's loopback 154.54.1.1 shows 100% loss while AS1's loopback and EveLink are fine and AS2 says the forward path AS2→AS1→Uni is healthy — suggesting an asymmetric reachability problem (likely missing return route for 128.173.0.0/16 at AS2, or a filter), worth their investigation.
-
-Justification: I never read the encrypted relay payloads when they were transiting through me, but when I was the named destination I investigated and replied. I distinguished the firmly-evidenced root cause (DROP rule with counters) from the additional anomaly (154.54.1.1 unreachable) so AS2 wouldn't conflate them.
-
-## 5. What I discovered about the network
-
-- Topology I can see directly: User on Uni-eth0 (10.0.6.0/30, peer 128.173.10.1) and upstream transit AS1 on Uni-eth1 (10.0.1.0/30, AS1 loopback 4.2.2.1).
-- Beyond AS1: peer AS2 (154.54.1.1) and a second customer of AS1 called EveLink (91.214.0.1). AS2 in turn fronts ACM's prefix 198.82.0.0/24 (web server 198.82.0.1, loopback 198.82.0.254).
-- My gateway has working NAT (MASQUERADE on Uni-eth1) and an otherwise empty firewall **except** a deliberate DROP of all traffic to 198.82.0.0/24 in both FORWARD and OUTPUT. This is the sole cause of the user-visible and ACM-visible outage.
-- Asymmetric reachability anomaly toward AS2's loopback 154.54.1.1 — direction Uni→AS2 fails while AS2→Uni and Uni→{AS1, EveLink} succeed. Not blocking the user complaint, but reported upstream.
-
-## 6. Coordination summary
-
-- **AS1**: confirmed default route; requested and got 128.173.0.0/16 advertised upstream; received AS1's reachability advertisement and verified each destination from my loopback.
-- **User (128.173.10.1)**: delivered a definitive CANNOT with full evidence (DROP rule, counters) and proposed fix (remove/narrow the rule), pending admin approval.
-- **AS2 (via AS1 relay)**: delivered the same definitive diagnosis, explained why the symptom looked like a missing return route but was actually an egress DROP, and flagged the separate 154.54.1.1 asymmetry.
-- **Admins**: notified (per policy) that the firewall change requires their approval; no autonomous modification performed.
-
-No routing daemons were used; the only routes touched were AS1's installation of the campus aggregate on its side. On my side I added no routes — the kernel table was already correct — and I added/removed no firewall rules, in accordance with the security-policy admin-approval rule.
+- **AS1 (upstream ISP):** Two-way exchange. AS1 requested my originated prefixes; I replied with 128.173.0.0/16. AS1 confirmed it had installed the route and re-advertised it to AS2, and listed reachable prefixes through it. I later sent AS1 a KP-context note explaining that the user's acm.org issue was a local filter, not an upstream problem — so no action was needed from them.
+- **User (laptop 128.173.10.1):** Received a KP WHY about acm.org. After local investigation I sent a single definitive CANNOT (pending admin action) reply containing the root cause (iptables DROP rules for 198.82.0.0/24 on this gateway), the supporting evidence (counters and my own loopback-sourced ping being dropped in OUTPUT), the proposed fix (remove the two DROP rules), and a clear statement that administrator approval is required before the rules can be removed.
+- No relay traffic for other agents passed through me during the experiment.

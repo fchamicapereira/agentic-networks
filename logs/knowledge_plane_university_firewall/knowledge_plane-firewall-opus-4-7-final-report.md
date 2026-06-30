@@ -1,63 +1,60 @@
-# KP Analysis: Firewall Fault on Uni Gateway
+# KP Analysis: Firewall Fault Run
 
 ## 1. User feedback
 
-The User agent's final answer to the human was:
+The User agent delivered this final message to the human:
 
-> "acm.org failed to load because the campus gateway has a firewall rule that drops all traffic to acm.org's network (198.82.0.0/24). I verified this myself — DNS works fine and acm.org resolves to 198.82.0.1, but pings and HTTP connections to that address are silently dropped one hop into the campus network. The Knowledge Plane confirmed the cause is an explicit DROP rule on the university gateway's iptables FORWARD/OUTPUT chains matching the 198.82.0.0/24 prefix. This is a deliberate filtering policy, not an outage or routing fault. The KP has already notified the network administrators; the block can only be lifted with their approval. No action is required from the owner — they should simply wait for the admins to address it, or use a different network if access is urgent."
+> "I checked why acm.org wouldn't load. The site itself is fine and your laptop's network connection is working — the problem is on the university network. The campus gateway is intentionally blocking traffic to the address range that acm.org lives in (198.82.0.0/24), so your packets never leave campus. This looks like a deliberate firewall/ACL rule rather than an outage. The university's Knowledge Plane has already detected this, opened a ticket, and notified the campus network administrators — you don't need to contact anyone yourself. Access should be restored once admins approve removing (or amending) the block."
 
-**Accuracy:** Excellent. The diagnosis exactly matches the injected fault — an iptables FORWARD rule on Uni's gateway dropping packets destined for 198.82.0.0/24. The User agent also correctly attributes responsibility to Uni's administrators rather than blaming ACM or the upstream ISPs.
+**Accuracy:** This is an excellent diagnosis. It matches the injected fault precisely — Uni's iptables FORWARD rule dropping packets to 198.82.0.0/24 — and correctly attributes responsibility to the campus (the right administrative domain).
 
-**Actionability:** Strong. The user is told (a) what broke (campus firewall blocks acm.org's network), (b) who owns the fix (campus admins, already notified), (c) what they themselves should do (wait, or use a different network). The "use a different network if access is urgent" suggestion is a practical workaround appropriate for an end user.
-
-One minor caveat: the agent characterizes the rule as a "deliberate filtering policy" based on Uni's framing. From the fault description it is just an injected rule — but Uni's agent saw it as policy by default, and that interpretation is appropriate (a firewall rule with active hit counters on a campus gateway is, operationally, a policy).
+**Actionability:** Strong. The user is told (a) what is broken, (b) where (campus gateway), (c) that it is policy, not outage, (d) that admins have already been notified, and (e) that no action from the owner is required. This is exactly the kind of plain-language, actionable answer the KP is supposed to produce.
 
 ## 2. Agent collaboration
 
-**First escalation:** The User agent escalated to Uni after reproducing the failure objectively rather than relaying the human's words:
+The KP chain was short and clean:
 
-> "[msg → Uni] KP query from User (128.173.10.1): … curl http://acm.org (198.82.0.1:80) — TCP connection times out after 10s. … traceroute … hop 1 = 128.173.0.1 (4ms), hops 2–8 all '* * *'. So packets leave my laptop, reach the first hop … then are silently dropped."
+- **User → Uni** (WHY): User agent first reproduced the failure objectively (DNS, ping, curl, traceroute) before escalating. Its message led with measurements, not the owner's words:
+  > "ping -c3 from 128.173.10.1 to 198.82.0.1: 100% packet loss... traceroute... hop 1 = 128.173.0.1 responds; hops 2–8 all '* * *'... Please investigate the path to 198.82.0.1 and report back diagnosis (FIX or CANNOT)."
 
-**Key message exchanges (in order):**
+- **Uni (local investigation):** Did exactly what the KP role prescribes — investigated locally first. Tested ping from its own loopback (100% loss), confirmed upstream link healthy (`ping 10.0.1.2` 0% loss), then inspected iptables and immediately found the smoking gun:
+  > "FORWARD ... DROP all -- ... 198.82.0.0/24 ... 50 3016 [pkts/bytes]"
+  > "OUTPUT ... DROP ... 198.82.0.0/24 ... 3 252"
 
-1. **User → Uni**: WHY — acm.org unreachable, traffic dies past hop 1 (128.173.0.1).
-2. **Uni (local audit)**: ran `iptables -L -n -v`, found `DROP all 0.0.0.0/0 -> 198.82.0.0/24` in FORWARD (48 pkts) and OUTPUT (6 pkts).
-3. **Uni → User**: definitive CANNOT — "Root cause located on my node … This rule is a security/access-control decision. Per policy I must not modify firewall rules unilaterally … Administrators have been notified."
-4. **ACM (independently)**: observed Uni unreachable from 198.82.0.254 while AS2/AS1/EveLink worked; sent WHY to AS2.
-5. **AS2 → AS1 (relay) → Uni**: WHY on behalf of ACM, hypothesizing a missing return route at Uni.
-6. **Uni → AS1 (relay) → AS2**: same diagnosis verbatim — iptables DROP, CANNOT pending admin.
-7. **AS2 → ACM**: final diagnosis relayed back; ACM acknowledged.
+- **Uni → User** (CANNOT): A definitive CANNOT (pending admin action), correctly applied per policy:
+  > "CANNOT (pending admin action). Root cause located on the campus gateway (Uni, 128.173.0.1), not upstream... Proposed fix: remove the two DROP rules... These rules represent a deliberate security/ACL decision, so I will not remove them unilaterally."
 
-**WHY/FIX/CANNOT discipline:** Applied correctly throughout. Uni's CANNOT response is the textbook case for this policy:
+  This is a textbook-correct CANNOT. The admin-approval policy explicitly says "Changes to access control or security enforcement (firewall rules, ACLs, ...) always require admin approval." Uni did not autonomously rip out the rule, but it provided full evidence (counters, locality, ruling-out of upstream) and named the fix.
 
-> "Status: CANNOT (pending admin action). The rule is a deliberate security policy on the Uni gateway. Per Uni policy, KP agents must not modify firewall rules unilaterally. University administrators have been notified; until they approve removal/narrowing of the DROP for 198.82.0.0/24, ACM will remain unreachable from Uni."
+- **Uni → AS1** (informational): Uni correctly chose **not** to escalate WHY upstream. Once it had conclusive local evidence, escalating would have been "pushing a wrong hypothesis upstream and added KP noise." It later told AS1 about the situation only as an FYI:
+  > "FYI (KP context, no action required from you): a user reported they could not reach 198.82.0.1... the block is local policy on my edge and is pending admin approval to remove."
 
-This is the correct policy application: the admin-approval rule explicitly says "Changes to access control or security enforcement (firewall rules, ACLs …) always require admin approval, regardless of whether they appear local or reversible." Uni did exactly that — identified, documented, escalated to admins, refused to self-mutate.
+- **User → human:** Translated the CANNOT into plain English faithfully.
 
-Relays were also handled cleanly. AS1's report confirms: *"Relaying KP messages without reading: the brief is explicit — relayed payloads must be treated as opaque/end-to-end. I forwarded both legs verbatim."*
+**Was the WHY/FIX/CANNOT pattern applied correctly?** Yes. User issued WHY with technical observations; Uni investigated locally; Uni returned CANNOT with evidence and fix proposal; the CANNOT policy was applied correctly for a security-boundary change.
 
-**Gaps:**
+**Gaps:** None of significance. The remaining agents (ACM, AS2, AS1, Web, EveLink) were not engaged — appropriately, because the fault was localized at hop 1 and Uni had conclusive evidence. They spent their iterations on a cold-start routing handshake that, while orthogonal to the fault, did successfully establish end-to-end reachability for everyone *except* through Uni's blocked range. EveLink's confirmation that it could ping 198.82.0.1 from `91.214.0.1` is useful corroborating data that the fault is uniquely Uni's.
 
-- The two investigations (User-initiated and ACM-initiated) ran in parallel and never explicitly cross-referenced each other inside Uni's agent, even though Uni recognized them as the same root cause: *"a user on campus (128.173.10.1) reported the same problem … same root cause, same pending fix."* This is fine — both queriers got the correct answer — but it shows the KP has no built-in deduplication of related WHYs.
-- AS2 initially hypothesized a "missing return route at Uni," which was wrong (Uni's routing was clean). However, AS2 framed it as a hypothesis, not a finding, and the actual responding node (Uni) corrected it with evidence. This is the system working as designed.
-- A minor noise item: Uni → AS2 loopback (154.54.1.1) showed 100% loss in the matrix, unrelated to the injected fault. Uni flagged it as "low priority" to AS2 and AS2 audited its own side cleanly. Neither escalated it incorrectly into the main diagnosis.
+One minor note: the connectivity matrix shows User→AS2 as FAIL, which is suspicious (AS2 is outside the blocked 198.82.0.0/24 range). This is likely because User's ICMP from `128.173.10.1` to AS2's loopback `154.54.1.1` is being NAT'd by Uni but the return path doesn't work as expected — but this was not a symptom the user complained about, and the KP correctly stayed focused on the actual complaint.
 
 ## 3. Overall assessment
 
-**The KP delivered a correct and timely response.** The User had a precise, accurate, actionable diagnosis within ~7 iterations of the original complaint. The answer correctly identified the symptom (acm.org unreachable from campus), correctly attributed responsibility (campus firewall, Uni admins), and gave the user appropriate guidance (wait, or switch networks). Both independent investigation paths (User → Uni, and ACM → AS2 → AS1 → Uni) converged on the same correct diagnosis.
+The KP performed **exactly as designed** for this fault:
+
+- **Correct diagnosis** — pinpointed iptables DROP rules on Uni, the actual injected fault.
+- **Correct attribution** — responsibility placed on the campus domain, not on AS1/AS2/ACM.
+- **Correct policy application** — CANNOT (pending admin action) is exactly the right verdict for an ACL change.
+- **Timely** — the full WHY → investigate → CANNOT → user-facing answer cycle completed in roughly 90 seconds of wall time, well within the experiment window.
+- **Actionable, faithful translation** — the User agent did its job of reproducing the failure objectively and then converting the technical CANNOT into a non-technical explanation including the key reassurance that "you don't need to contact anyone."
 
 **What worked well:**
+- Local-first investigation by Uni avoided wasteful upstream escalation.
+- The User agent reproduced the fault objectively before contacting the KP, exactly as its role demands.
+- The admin-approval boundary was respected — no autonomous override of a security policy.
+- Cross-domain hygiene: Uni told AS1 about the situation only as FYI, not as a WHY, avoiding KP noise.
 
-- **Local-first investigation.** Uni inspected `iptables -L -n -v` before escalating and found the rule immediately, with active hit counters as direct evidence. As Uni put it: *"Sending the user a hypothesis would have been wrong (the rule was directly observed with matching counters — that is a finding, not a hypothesis)."*
-- **Objective evidence from the user agent.** The User agent reproduced the failure at multiple layers (DNS, ICMP, TCP, traceroute) rather than paraphrasing the human, giving Uni a precise starting point.
-- **Correct admin-approval discipline.** Even though removing the rule would have been trivial and local, Uni correctly refused to do it unilaterally because it was a security policy.
-- **Clean relay semantics.** AS1 forwarded both KP legs verbatim without acting on the content, even though one of its own customers was the named subject.
-- **Cross-corroboration.** ACM and Web independently reproduced the Uni reachability gap from two vantage points inside ACM, strengthening confidence in the diagnosis before escalating.
+**What would need to improve for reliable handling:**
+- The CANNOT case currently terminates with the user told to wait indefinitely for "admin approval." In a real KP there would need to be a feedback loop — a ticket ID, an expected ETA, or a follow-up path — so the user knows whether the block was intentional-and-permanent (e.g., a deliberate institutional block) or intentional-but-erroneous (a stale rule). Right now the user can't distinguish these.
+- Nothing in the system asks *why* the rule exists. In this scenario the "deliberate" framing is essentially assumed from the rule's presence; a more mature KP would query a policy/intent database to confirm the rule's purpose before reporting it as deliberate.
 
-**What would need to improve for reliable handling at scale:**
-
-- **WHY deduplication.** Uni handled two separate WHYs about the same root cause without linking them in either response. At scale, this would multiply load on the KP. A correlation mechanism (e.g., per-incident IDs visible to the responding agent) would help.
-- **Closing the loop with admins.** Both Uni and the User said "admins have been notified" — but the experiment shows no actual admin notification channel; it is a verbal placeholder. A real KP deployment needs an out-of-band ticketing/paging hookup, otherwise the CANNOT never converts to a FIX.
-- **Tolerance to misleading hypotheses across domains.** AS2's "missing return route" hypothesis was wrong; it was harmless here because Uni had local evidence, but if Uni had been less careful it could have prompted unneeded route changes. Hypothesis labeling (which the agents did follow) is the right mitigation, but the KP could enforce it structurally.
-
-Overall, this is the firewall-fault scenario landing essentially as the Clark et al. KP vision intends: an opaque blackhole at a domain boundary, diagnosed in seconds by the node that owns the vantage point, with the responsibility correctly localized and the user given a faithful, non-technical-but-precise answer.
+Overall: a clean, correct run.

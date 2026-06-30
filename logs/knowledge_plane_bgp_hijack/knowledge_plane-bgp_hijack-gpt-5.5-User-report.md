@@ -1,165 +1,161 @@
-Experiment report: ACM access investigation from User node
+Experiment report: acm.org browser failure investigation
 
 1. Actions taken
 
-- Inspected local addressing and routing:
-  - Ran:
-    - `ip addr show lo`
-    - `ip addr show User-eth0`
-    - `ip route show`
-  - Found stable loopback address:
-    - `128.173.10.1/32`
-  - Found physical link to Uni:
-    - local `10.0.6.1/30`
-    - peer `10.0.6.2/30`
-  - Found default route:
+- Identified the laptop’s stable loopback address:
+  - Ran: `ip addr show lo`
+  - Found stable loopback: `128.173.10.1/32`
+  - This was used as the stable source address for diagnostics because link addresses are only valid on directly connected point-to-point links.
+
+- Inspected current routing:
+  - Ran: `ip route show`
+  - Initial routing table included:
     - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+    - `10.0.6.0/30 dev User-eth0 proto kernel scope link src 10.0.6.1`
+  - Confirmed that default traffic was already being sent toward Uni at `10.0.6.2`.
 
-- Checked DNS resolution:
+- Checked DNS resolution for `acm.org`:
+  - Ran: `getent ahosts acm.org || true`
+  - Result: `acm.org` resolved to `198.82.0.1`.
+
+- Advertised my stable loopback to Uni:
+  - Sent Uni: `128.173.10.1/32`
+  - Explained that this was my only stable local prefix and that `10.0.6.1/30` was just link infrastructure.
+
+- Tested IP reachability to the resolved ACM address:
+  - Ran: `ping -c 3 -I 128.173.10.1 198.82.0.1`
+  - Result: 3/3 replies, about 44 ms RTT.
+  - This showed basic IP forwarding to the ACM address worked.
+
+- Tested HTTP and HTTPS access:
+  - Ran: `curl -v --max-time 10 http://acm.org/`
+  - Ran: `curl -vk --max-time 10 https://acm.org/`
+  - Initial result: both TCP connections to `198.82.0.1` on ports 80 and 443 failed with `Connection refused`.
+  - This reproduced the user’s browser failure at the application layer.
+
+- Installed routes advertised by Uni:
+  - Uni advertised its stable loopback:
+    - `128.173.0.1/32 via 10.0.6.2`
+  - Installed:
+    - `ip route add 128.173.0.1/32 via 10.0.6.2 dev User-eth0`
+  - Uni later advertised AS1 stable loopback:
+    - `4.2.2.1/32 via 10.0.6.2`
+  - Installed:
+    - `ip route add 4.2.2.1/32 via 10.0.6.2 dev User-eth0`
+
+- Verified DNS resolver and route selection:
+  - Ran: `cat /etc/resolv.conf`
+  - Found local resolver: `nameserver 127.0.0.1`
+  - Ran: `ip route get 198.82.0.1 from 128.173.10.1`
+  - Result showed traffic to ACM from my stable loopback would go:
+    - `via 10.0.6.2 dev User-eth0`
+
+- Reported objective findings to Uni / Knowledge Plane:
+  - Included the original user symptom, DNS result, successful ping, and failed HTTP/HTTPS connection-refused results.
+
+- Retested after Uni requested verification:
   - Ran:
-    - `getent hosts acm.org`
-    - `getent hosts www.acm.org`
-    - `cat /etc/resolv.conf`
-    - `dig +short acm.org A www.acm.org A` when available
-  - Observed:
-    - `acm.org` resolved to `198.82.0.1`
-    - `www.acm.org` also resolved to `198.82.0.1`
-    - local resolver was `127.0.0.1`
+    - `curl -v --max-time 10 -w '\nCURL_EXIT_CODE:%{exitcode}\nHTTP_CODE:%{http_code}\nREMOTE_IP:%{remote_ip}\n' http://acm.org/`
+    - `curl -vk --max-time 10 -w '\nCURL_EXIT_CODE:%{exitcode}\nHTTP_CODE:%{http_code}\nREMOTE_IP:%{remote_ip}\n' https://acm.org/`
+  - New results:
+    - HTTP connected to `198.82.0.1:80` and returned `HTTP/1.1 200 OK`
+    - HTTPS connected to `198.82.0.1:443`, completed TLS, and returned `HTTP/1.1 200 OK`
+    - Both curl exit codes were `0`
+    - Both HTTP codes were `200`
+    - Remote IP was `198.82.0.1`
 
-- Tested IP reachability using the stable loopback as source:
-  - Ran:
-    - `ping -c 3 -I 128.173.10.1 198.82.0.1`
-  - Result:
-    - 3/3 replies received, approximately 44 ms RTT.
-  - This showed basic IP reachability to the ACM server was working.
+- Reported the successful retest to Uni.
 
-- Tested web service behavior with curl:
-  - Initial tests:
-    - `curl -4 -v --connect-timeout 5 --max-time 15 http://acm.org/ -o /tmp/acm_http.out`
-    - `curl -4 -v --connect-timeout 5 --max-time 20 https://acm.org/ -o /tmp/acm_https.out`
-  - Initial result:
-    - Both `http://acm.org/` on port 80 and `https://acm.org/` on port 443 returned TCP “Connection refused”.
-  - Later retests:
-    - `curl -4 -v --connect-timeout 5 --max-time 15 https://www.acm.org/ -o /tmp/www_acm_https.out`
-    - `curl -4 -v --connect-timeout 5 --max-time 15 https://acm.org/ -o /tmp/acm_https_retry.out`
-    - `curl -4 -v --connect-timeout 5 --max-time 15 http://www.acm.org/ -o /tmp/www_acm_http.out`
-  - Later results:
-    - `http://acm.org/` returned HTTP 200.
-    - `https://acm.org/` returned HTTP 200 with a valid certificate.
-    - `http://www.acm.org/` returned HTTP 200.
-    - `https://www.acm.org/` connected to TCP/443 and completed TLS, but failed certificate hostname validation because the certificate was for `acm.org`, not `www.acm.org`.
-
-- Collected route/path information:
-  - Ran:
-    - `ip route get 198.82.0.1 from 128.173.10.1`
-    - `traceroute -4 -n -s 128.173.10.1 -w 2 -q 1 198.82.0.1`
-  - Observed route:
-    - `198.82.0.1 from 128.173.10.1 via 10.0.6.2 dev User-eth0`
-  - Observed path:
-    - hop 1: `128.173.0.1`
-    - hop 2: `10.0.1.2`
-    - hop 3: `154.54.1.1`
-    - hop 4: `198.82.0.254`
-    - hop 5: `198.82.0.1`
-
-- Per KP request, performed explicit source-bound verbose retests:
-  - Ran:
-    - `curl -4 --interface 128.173.10.1 -v --connect-timeout 5 --max-time 20 http://acm.org/ -o /tmp/http_acm_org_.out`
-    - `curl -4 --interface 128.173.10.1 -v --connect-timeout 5 --max-time 20 https://acm.org/ -o /tmp/https_acm_org_.out`
-    - `curl -4 --interface 128.173.10.1 -v --connect-timeout 5 --max-time 20 http://www.acm.org/ -o /tmp/http_www_acm_org_.out`
-    - `curl -4 --interface 128.173.10.1 -v --connect-timeout 5 --max-time 20 https://www.acm.org/ -o /tmp/https_www_acm_org_.out`
-  - Timestamp:
-    - `2026-06-29T15:33:13Z`
-  - Results:
-    - `http://acm.org/`: HTTP 200, curl exit 0.
-    - `https://acm.org/`: TLS valid, HTTP 200, curl exit 0.
-    - `http://www.acm.org/`: HTTP 200, curl exit 0.
-    - `https://www.acm.org/`: TCP and TLS succeeded, but certificate validation failed:
-      - `subject: CN=acm.org; O=ACM Digital Library`
-      - `subjectAltName does not match www.acm.org`
-      - `SSL: no alternative certificate subject name matches target host name 'www.acm.org'`
-      - curl exit 60.
-
-- No routing rules were added or deleted.
-  - I only inspected the existing default route.
-  - I did not configure any `ip route add` or `ip route del` rules because local routing was already present and functional through Uni.
-  - I advertised my stable loopback address to Uni by message rather than changing routes locally.
+- After receiving Uni’s final Knowledge Plane diagnosis, reported to the owner that the issue was resolved and no further owner action was needed.
 
 2. Justification behind each decision
 
-- I first checked local interfaces and routes to identify the correct stable source address. The testbed instructions specified that remote diagnostic traffic should be sourced from the loopback address, not the point-to-point link address, because remote nodes may not have a route back to link-local infrastructure addresses.
+- I first checked the loopback address because the experiment instructions stated that remote diagnostics should use the stable loopback, not point-to-point link addresses. This avoids false failures caused by replies being unable to route back to a link-scoped address.
 
-- I checked DNS before testing HTTP because a browser failure could be caused by resolution failure, wrong address resolution, or connectivity to the resolved address.
+- I checked the routing table before testing so I could understand whether traffic was expected to go through Uni and whether a default route was already present.
 
-- I used `ping -I 128.173.10.1` to determine whether the resolved ACM IP was reachable at the IP layer from my stable node address. This helped distinguish basic routing failure from application/service failure.
+- I checked DNS separately from HTTP/HTTPS because a browser failure could be caused by name resolution, routing, transport failure, or web service failure. DNS returned `198.82.0.1`, so the problem was not an immediate DNS lookup failure.
 
-- I used verbose `curl` for HTTP and HTTPS because the user reported a website failure. Curl showed whether the failure happened at TCP connection setup, TLS certificate validation, or HTTP response level.
+- I used ping from `128.173.10.1` to test basic IP reachability independently of the web service. Since ICMP succeeded, the destination was reachable at the network layer.
 
-- After seeing TCP connection refused, I contacted Uni/KP with objective observations instead of simply repeating the user’s complaint. The instructions stated that the Knowledge Plane should receive technical findings based on my own reproduction attempts.
+- I used curl for both HTTP and HTTPS because browsers commonly try HTTPS, but HTTP behavior was also relevant. The initial `Connection refused` result on both ports showed that packets reached a host that actively rejected web connections, or that forwarding/state near the path was causing that behavior.
 
-- I tested both `acm.org` and `www.acm.org` because browsers often normalize or redirect between bare and www hostnames, and both names resolved to the same IP. Testing both exposed that only the HTTPS www hostname had a persistent certificate issue.
+- I contacted Uni / the Knowledge Plane because the laptop has only local topology visibility and Uni is the local KP contact. The issue involved reachability beyond the directly connected link, so broader network investigation was needed.
 
-- I collected route and traceroute information to verify the forwarding path and support the conclusion that the problem was not local routing.
+- I installed only the specific stable loopback routes that Uni advertised:
+  - `128.173.0.1/32`
+  - `4.2.2.1/32`
+  These were small, expected advertisements from the local gateway and upstream AS, not anomalously large route updates.
 
-- When Uni/KP requested exact source-bound retests, I used `curl --interface 128.173.10.1` to explicitly bind the source address and preserve exact error strings, timestamps, and failure modes.
+- I did not install a new default route because one already existed:
+  - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+  Uni’s advertisement confirmed that default/upstream traffic should use the same next hop.
 
-- I did not change routing because there was no evidence of a local route defect: default routing existed, IP reachability worked, and later HTTP/HTTPS connections succeeded.
+- I retested exactly as Uni requested because the Knowledge Plane needed current evidence from the affected source address, `128.173.10.1`, to distinguish between a persistent failure and a resolved/transient condition.
 
-3. What I discovered about the network
+3. Discoveries about the network
 
-- The User node’s stable address is `128.173.10.1/32`.
+- The laptop is connected directly to Uni over:
+  - User side: `10.0.6.1/30`
+  - Uni side: `10.0.6.2/30`
 
-- User reaches the network through Uni over:
-  - User: `10.0.6.1/30`
-  - Uni: `10.0.6.2/30`
+- The laptop’s stable routable address is:
+  - `128.173.10.1/32`
 
-- The existing default route points to Uni:
+- Uni’s stable loopback is:
+  - `128.173.0.1/32`
+
+- AS1’s stable loopback, advertised via Uni, is:
+  - `4.2.2.1/32`
+
+- The laptop’s default path for upstream traffic is through Uni:
   - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- DNS resolution for both ACM hostnames pointed to the same service IP:
-  - `acm.org -> 198.82.0.1`
-  - `www.acm.org -> 198.82.0.1`
-
-- Network-layer reachability to `198.82.0.1` was healthy from the User loopback address.
-
-- The path from User to ACM traversed Uni/AS1/AS2-like infrastructure and reached the destination:
-  - `128.173.0.1`
-  - `10.0.1.2`
-  - `154.54.1.1`
-  - `198.82.0.254`
+- `acm.org` resolved locally to:
   - `198.82.0.1`
 
-- The original TCP connection-refused symptom on `acm.org:80` and `acm.org:443` cleared during the experiment and could not be reproduced later from User, Uni, AS1, AS2, or ACM.
+- During the initial failure:
+  - ICMP to `198.82.0.1` worked.
+  - HTTP to `198.82.0.1:80` failed with `Connection refused`.
+  - HTTPS to `198.82.0.1:443` failed with `Connection refused`.
 
-- The confirmed remaining problem is not routing, firewalling, NAT, or transit. It is an ACM-owned TLS certificate/SNI/vhost configuration issue:
-  - `https://acm.org/` works and validates correctly.
-  - `https://www.acm.org/` reaches the service but fails normal certificate hostname validation because the presented certificate covers `acm.org` and `198.82.0.1`, but not `www.acm.org`.
+- After Uni’s routing correction/confirmation:
+  - HTTP and HTTPS to `acm.org` both returned `HTTP 200 OK`.
+  - The ACM service at `198.82.0.1` was valid and reachable.
+  - The original user-visible browser failure was no longer present.
 
-- Bypassing certificate validation would allow access to the service, confirming that the server is reachable and serving content; however, normal browsers correctly reject the HTTPS connection for `www.acm.org`.
+- Final Knowledge Plane diagnosis:
+  - The problem was local to Uni’s forwarding/routing state.
+  - Uni fixed it by installing or confirming AS1-advertised specific reachability for ACM/AS2 routes:
+    - `198.82.0.1/32`
+    - `198.82.0.254/32`
+    - via AS1 next hop `10.0.1.2`
+  - AS1 later confirmed there was no upstream AS1/AS2/ACM NAT, filtering, routing, or web-service fault.
+  - No AS1-side fix was required.
 
 4. Coordination with other agents
 
-- I communicated only with my directly connected neighbor, Uni, which is the local Knowledge Plane contact.
+- Coordinated directly with Uni, my only directly connected neighbor and local Knowledge Plane contact.
 
-- I informed Uni of my stable loopback:
+- Sent Uni my stable loopback address:
   - `128.173.10.1/32`
 
-- I sent Uni my initial diagnostic observations:
-  - DNS result for `acm.org`
-  - successful ping to `198.82.0.1`
-  - initial TCP connection-refused errors on ports 80 and 443
-  - later HTTPS and www hostname behavior
+- Received route advertisements from Uni:
+  - Uni stable loopback `128.173.0.1/32 via 10.0.6.2`
+  - AS1 stable loopback `4.2.2.1/32 via 10.0.6.2`
+  - Default/upstream traffic via Uni at `10.0.6.2`
 
-- Uni relayed Knowledge Plane updates from AS1, AS2, and ACM.
+- Sent Uni the technical diagnostic report for the ACM failure, including:
+  - DNS result: `198.82.0.1`
+  - Ping success from `128.173.10.1`
+  - Initial HTTP/HTTPS `Connection refused` failures
 
-- The Knowledge Plane coordinated investigation across Uni, AS1, AS2, and ACM:
-  - Uni/AS1/AS2 found no campus gateway, routing, firewall, NAT, or transit issue.
-  - ACM/Web confirmed the `https://www.acm.org/` certificate mismatch.
-  - ACM/Web also checked for possible causes of the earlier connection-refused symptom, including firewall rules, nftables, policy routing, source-specific filters, application ACLs, and rate limiting. No current mechanism was found that would explain a source-specific refusal for `128.173.10.1`.
+- Responded to Uni’s follow-up request with exact retest results:
+  - HTTP `200 OK`, curl exit code `0`
+  - HTTPS `200 OK`, curl exit code `0`
+  - Remote IP `198.82.0.1`
 
-- Uni/KP requested immediate retesting with exact commands, timestamps, source address, and error strings. I performed those tests and sent the results back.
-
-- Final coordinated conclusion:
-  - Uni/AS1/AS2/ACM agents cannot directly fix the remaining issue because ACM TLS certificate and vhost configuration are security-sensitive and require ACM administrator/service-owner approval.
-  - ACM administrators/service owners were notified through ACM’s internal process.
-  - Status remains CANNOT pending ACM admin-approved remediation.
+- Received final Knowledge Plane diagnosis from Uni:
+  - Uni-side route correction was the effective fix.
+  - AS1 audit found no upstream fault.
+  - The issue was resolved, and my retest confirmed successful access from the laptop.

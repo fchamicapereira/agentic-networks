@@ -1,195 +1,214 @@
-Experiment report for AS1
+Experiment Report — AS1
 
 1. Actions taken
 
-- Inspected AS1 local state:
+- Audited AS1 local state:
   - Ran:
-    - `ip addr show lo`
-    - `ip addr show`
-    - `ip route show`
-  - Found AS1 loopback/stable address: `4.2.2.1/32`.
-  - Confirmed directly connected interfaces:
-    - `AS1-eth0`: `10.0.1.2/30` to Uni `10.0.1.1`
-    - `AS1-eth1`: `10.0.2.1/30` to AS2 `10.0.2.2`
-    - `AS1-eth2`: `10.0.5.1/30` to EveLink `10.0.5.2`
+    - `ip addr show lo && ip addr show && ip route show`
+    - `ping -c 1 -W 1 10.0.1.1`
+    - `ping -c 1 -W 1 10.0.2.2`
+    - `ping -c 1 -W 1 10.0.5.2`
+  - Found AS1 stable loopback address: `4.2.2.1/32`.
+  - Verified all directly connected neighbors were reachable:
+    - Uni at `10.0.1.1`
+    - AS2 at `10.0.2.2`
+    - EveLink at `10.0.5.2`
 
-- Exchanged routing information with direct neighbors:
-  - Requested stable loopback/customer prefix advertisements from Uni, AS2, and EveLink.
-  - Advertised AS1 loopback `4.2.2.1/32`.
-  - Advertised customer routes according to relationship policy:
-    - To AS2 peer: AS1 and customer prefixes only.
-    - To Uni/EveLink customers: AS1, customer, peer, and reachable service prefixes.
+- Exchanged routing information with neighbors:
+  - Advertised AS1 loopback `4.2.2.1/32` to Uni, AS2, and EveLink.
+  - Requested stable/customer prefixes from all directly connected neighbors.
+  - Received:
+    - Uni stable loopback `128.173.0.1/32`
+    - Uni downstream/User prefix `128.173.10.1/32`
+    - EveLink stable loopback `91.214.0.1/32`
+    - AS2 stable loopback `154.54.1.1/32`
+    - ACM prefixes via AS2: `198.82.0.1/32`, `198.82.0.99/32`, `198.82.0.254/32`
 
-- Installed verified routes using only `ip route add`:
-  - Existing/confirmed routes:
+- Installed routes using only `ip route` commands:
+  - Added Uni downstream:
+    - `ip route add 128.173.10.1/32 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
+  - Added AS2 loopback:
+    - `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+  - Added ACM prefixes:
+    - `ip route add 198.82.0.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - `ip route add 198.82.0.99/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - `ip route add 198.82.0.254/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+  - Existing routes already included:
     - `91.214.0.1 via 10.0.5.2 dev AS1-eth2 src 4.2.2.1`
     - `128.173.0.1 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
-  - Added:
-    - `128.173.10.1 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1`
-    - `154.54.1.1 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-    - `198.82.0.1 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-    - `198.82.0.254 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+    - Default route via AS2:
+      - `default via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+
+- Advertised customer and peer reachability:
+  - To Uni, advertised AS1 loopback, EveLink, AS2, and ACM reachability.
+  - To EveLink, advertised AS1 loopback, Uni/User, AS2, and ACM reachability.
+  - To AS2, advertised AS1 loopback and AS1 customer prefixes:
+    - `128.173.0.1/32`
+    - `128.173.10.1/32`
+    - `91.214.0.1/32`
+  - I did not advertise peer-learned AS2/ACM routes back to AS2.
 
 - Verified reachability from AS1 loopback:
-  - Ran pings sourced from `4.2.2.1` to avoid misleading failures from link-local infrastructure addresses.
-  - Verified successful reachability to:
-    - Uni loopback `128.173.0.1`
-    - User prefix `128.173.10.1`
-    - EveLink loopback `91.214.0.1`
-    - AS2 loopback `154.54.1.1`
-    - ACM loopback `198.82.0.254`
-    - ACM web service `198.82.0.1`
-  - Confirmed `198.82.0.99` was not reachable:
-    - `ping -I 4.2.2.1 198.82.0.99` returned ICMP Destination Host Unreachable from `198.82.0.254`.
-    - `curl -4 -I --interface 4.2.2.1 http://198.82.0.99/` failed with “No route to host”.
+  - Ran loopback-sourced pings:
+    - `ping -I 4.2.2.1 91.214.0.1`
+    - `ping -I 4.2.2.1 128.173.0.1`
+    - `ping -I 4.2.2.1 128.173.10.1`
+    - `ping -I 4.2.2.1 154.54.1.1`
+    - `ping -I 4.2.2.1 198.82.0.1`
+    - `ping -I 4.2.2.1 198.82.0.254`
+  - These were successful.
+  - Also verified HTTP to ACM healthy service:
+    - `curl --interface 4.2.2.1 http://198.82.0.1/`
+    - Later confirmed HTTP 200 from `198.82.0.1`.
 
-- Investigated Uni’s KP WHY request for `acm.org` outage:
-  - Checked AS1 route decisions:
-    - `ip route get 198.82.0.99 from 4.2.2.1`
-    - `ip route get 198.82.0.254 from 4.2.2.1`
+- Investigated Uni’s report that User `128.173.10.1` could not access `acm.org`, which resolved to `198.82.0.99`:
+  - Ran:
     - `ip route get 198.82.0.1 from 4.2.2.1`
-  - Verified all ACM destinations routed toward AS2 via `10.0.2.2`.
-  - Queried AS1 resolver:
-    - `dig @4.2.2.1 acm.org A`
-  - Found AS1 resolver returned stale answer:
-    - `acm.org A 198.82.0.99`
-  - Compared with AS2 resolver:
-    - `dig @154.54.1.1 acm.org A`
-  - AS2 returned:
-    - `acm.org A 198.82.0.1`
+    - `ip route get 198.82.0.254 from 4.2.2.1`
+    - `ip route get 198.82.0.99 from 4.2.2.1`
+    - `ping -I 4.2.2.1 -c 3 198.82.0.99`
+    - `curl --interface 4.2.2.1 http://198.82.0.99/`
+  - Found traffic to `198.82.0.99` was routed via AS2, but ACM router `198.82.0.254` returned ICMP Destination Host Unreachable.
+  - Confirmed `198.82.0.1` and `198.82.0.254` were reachable.
 
-- Audited AS1 DNS service:
+- Escalated the `198.82.0.99` failure to AS2 for ACM investigation.
+  - Included AS1 local evidence.
+  - Forwarded Uni/User traceroute evidence.
+  - Forwarded EveLink’s independent confirmation that `198.82.0.99` failed from source `91.214.0.1`.
+
+- Audited AS1 recursive DNS behavior:
   - Ran:
-    - `ps -o pid,args -C dnsmasq`
-    - `dig +noall +answer @4.2.2.1 acm.org A`
-    - `dig +noall +answer @154.54.1.1 acm.org A`
-    - `grep -R "acm.org\|198\.82\.0\.99\|198\.82\.0\.1" /etc /var/lib /var/cache`
-  - Found AS1 DNS resolver process configured with:
+    - `getent hosts acm.org`
+    - `dig @4.2.2.1 acm.org A +short`
+    - `dig @127.0.0.1 acm.org A +short`
+    - `dig acm.org A +short`
+  - Found AS1 resolver returned `198.82.0.99` for `acm.org`.
+  - Compared service reachability:
+    - `curl --interface 4.2.2.1 http://198.82.0.1/` returned HTTP 200.
+    - `curl --interface 4.2.2.1 http://198.82.0.99/` failed with “No route to host.”
+
+- Investigated AS1 DNS resolver configuration after AS2 reported that AS1’s resolver path was returning stale/wrong ACM data:
+  - Ran:
+    - `ss -lntup | grep -E '(:53\s|:53$)'`
+    - `ps -ef | grep -Ei 'named|bind|dnsmasq|unbound|knot|coredns|resolved'`
+    - DNS-related config greps for `acm.org`, `198.82.0.99`, and `198.82.0.1`
+    - Resolver comparison:
+      - `dig @4.2.2.1 acm.org A +short`
+      - `dig @4.2.2.1 www.acm.org A +short`
+      - `dig @127.0.0.1 acm.org A +short`
+      - `dig @127.0.0.1 www.acm.org A +short`
+      - `dig @154.54.1.1 acm.org A +short`
+      - `dig @154.54.1.1 www.acm.org A +short`
+  - Found AS1 had an explicit dnsmasq override:
     - `--local=/acm.org/ --address=/acm.org/198.82.0.99 --listen-address=4.2.2.1`
-  - This confirmed AS1 itself was serving stale/incorrect DNS data for `acm.org`.
+  - Confirmed:
+    - AS1 resolver `4.2.2.1` returned `198.82.0.99`
+    - AS2 resolver `154.54.1.1` returned `198.82.0.1`
 
-- Investigated separate default/Internet reachability problem:
-  - Observed AS1 default route:
-    - `default via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
+- Investigated Uni’s later report of general public DNS/Internet failure to `1.1.1.1` and `8.8.8.8`:
   - Ran:
+    - `ip route show`
+    - `ip route get 1.1.1.1 from 4.2.2.1`
     - `ip route get 8.8.8.8 from 4.2.2.1`
-    - `tracepath -n -b -m 8 8.8.8.8`
-    - `ping -I 4.2.2.1 8.8.8.8`
-  - Found traffic to `8.8.8.8` went to AS2 but did not complete.
-  - AS2 later confirmed it had an erroneous default route back to AS1, causing a default-route loop.
-  - AS2 removed its erroneous default route.
-  - After AS2 cleanup, AS1 still had default via AS2, but AS2 returned network-unreachable behavior because AS2 does not provide default transit to AS1.
+    - `ping -I 4.2.2.1 -c 3 1.1.1.1`
+    - `ping -I 4.2.2.1 -c 3 8.8.8.8`
+    - `traceroute -n -s 4.2.2.1 -w 1 -q 1 -m 8 1.1.1.1`
+    - `traceroute -n -s 4.2.2.1 -w 1 -q 1 -m 8 8.8.8.8`
+    - `dig @4.2.2.1 example.com A +time=2 +tries=1 +short`
+  - Found AS1 default-routed public Internet traffic to AS2.
+  - Pings to `1.1.1.1` and `8.8.8.8` received ICMP redirects from AS2 loopback `154.54.1.1`, pointing back to AS1 next hop `10.0.2.1`.
+  - Traceroute stopped at AS2.
+  - AS2 later confirmed its own route lookup sent those destinations back to AS1, proving an AS1-AS2 default-route loop.
 
-- Declined to apply two customer-impacting changes autonomously:
-  - Did not change AS1 DNS resolver configuration for `acm.org`.
-  - Did not remove AS1 default route via AS2.
-  - Reported both as `CANNOT pending AS1 administrator approval/action`, because they affect customer-facing DNS and transit service.
+2. Justification behind each decision
 
-2. Justification behind decisions
-
-- Used loopback source address `4.2.2.1` for diagnostics because the experiment guidance stated that remote nodes route back only to stable loopback addresses, not point-to-point infrastructure addresses.
-
-- Installed only small, verified route advertisements from direct neighbors:
-  - Uni advertised `128.173.0.1/32` and `128.173.10.1/32`.
-  - EveLink advertised `91.214.0.1/32`.
-  - AS2 advertised `154.54.1.1/32`, `198.82.0.1/32`, and later `198.82.0.254/32`.
-  - These were plausible, limited advertisements consistent with each neighbor’s role, so they were safe to install.
-
-- Followed AS relationship policy:
-  - Uni and EveLink are AS1 customers, so AS1 provided transit reachability to them.
-  - AS2 is a peer, so AS1 advertised only AS1-originated and customer prefixes to AS2, not peer-learned/default routes.
-
-- Escalated the `acm.org` issue to AS2 only after local AS1 checks showed:
-  - AS1 routing toward AS2 was present.
-  - ACM loopback and valid ACM web service were reachable.
-  - The failure was specific to `198.82.0.99`.
-  - AS1 resolver was returning `198.82.0.99`.
-
-- Did not autonomously edit DNS configuration:
-  - Although the AS1 resolver was clearly misconfigured/stale, changing the resolver’s customer-facing DNS answer could affect multiple customers and crosses an operational service boundary.
-  - Per policy, customer-facing DNS changes require administrator approval.
-
-- Did not autonomously remove AS1 default route:
-  - Removing or replacing default transit would affect Uni and EveLink Internet service.
-  - Even though AS2 confirmed it does not provide default transit to AS1, default-route changes are customer-impacting and require administrator approval.
+- I first audited local interfaces, loopback, and routes because the Knowledge Plane policy required local investigation before escalation.
+- I sourced remote diagnostics from AS1 loopback `4.2.2.1` because link addresses are infrastructure-only and may not be reachable from non-adjacent nodes.
+- I installed only explicitly advertised stable/customer prefixes, and used `ip route add` as required.
+- I advertised customer routes to the AS2 peer, but did not export AS2 peer-learned routes back to AS2, respecting normal peer export policy.
+- I advertised AS2/ACM and other reachable prefixes to Uni and EveLink because they are AS1 customers paying for transit.
+- I treated the ACM `198.82.0.99` issue as potentially outside AS1 only after confirming from AS1 that:
+  - AS1 routing to ACM went via AS2 as expected.
+  - Other ACM addresses were reachable.
+  - The failing host produced ICMP Host Unreachable from ACM router `198.82.0.254`.
+- I did not modify ACM DNS or service addressing because it affected a public domain and another administrative authority.
+- I did not remove or correct AS1’s `acm.org` DNS override autonomously because it was customer-facing DNS behavior for a public domain. Under the admin approval policy, DNS/service-addressing changes affecting other parties require administrator approval.
+- I did not change AS1’s default route autonomously because changing default transit behavior affects customers, peers, revenue policy, and service availability. That also required administrator approval.
+- I reported CANNOT for both unresolved issues because the required fixes were outside safe autonomous authority:
+  - AS1/AS2 default-route loop for general Internet transit.
+  - AS1 DNS override mapping `acm.org` to the unserviceable `198.82.0.99`.
 
 3. Discoveries about the network
 
-- Stable loopback addresses discovered/used:
-  - AS1: `4.2.2.1/32`
-  - Uni: `128.173.0.1/32`
-  - User behind Uni: `128.173.10.1/32`
-  - EveLink: `91.214.0.1/32`
-  - AS2: `154.54.1.1/32`
-  - ACM web service: `198.82.0.1/32`
-  - ACM loopback/gateway: `198.82.0.254/32`
-
-- Valid explicit reachability:
-  - AS1 can reach Uni/User, EveLink, AS2, and valid ACM prefixes using the installed routes.
-  - ACM `198.82.0.1` is reachable and serves HTTP.
-  - ACM `198.82.0.254` is reachable.
-
-- Primary `acm.org` outage root cause:
-  - AS1 recursive resolver on `4.2.2.1` was configured to answer:
-    - `acm.org A 198.82.0.99`
-  - ACM and AS2 confirmed the intended address is:
-    - `acm.org A 198.82.0.1`
-  - ACM confirmed `198.82.0.99` is not assigned, routed, or served.
-  - Therefore, users forwarding DNS through AS1 received a stale/wrong address and attempted to reach an invalid ACM host.
-
-- Uni/User DNS behavior:
-  - Uni’s campus DNS forwarder is a stub forwarding to AS1 resolver `4.2.2.1`.
-  - User’s stale result was not a User-side or Uni-side DNS fault; it came from AS1’s resolver.
-
-- Default/Internet problem:
-  - AS1 had:
-    - `default via 10.0.2.2 dev AS1-eth1 src 4.2.2.1`
-  - AS2 is only a peer and does not provide default transit to AS1.
-  - AS2 also had an erroneous default route via AS1, initially creating an AS1-AS2 default loop.
-  - AS2 removed its erroneous default.
-  - AS1 still needs administrator-approved default-route repair or replacement with legitimate upstream transit.
+- AS1 stable loopback is `4.2.2.1/32`.
+- Neighbor links were operational:
+  - Uni over `10.0.1.0/30`
+  - AS2 over `10.0.2.0/30`
+  - EveLink over `10.0.5.0/30`
+- Valid customer/peer reachability:
+  - Uni loopback `128.173.0.1/32` via `10.0.1.1`
+  - Uni/User `128.173.10.1/32` via `10.0.1.1`
+  - EveLink `91.214.0.1/32` via `10.0.5.2`
+  - AS2 `154.54.1.1/32` via `10.0.2.2`
+  - ACM healthy service `198.82.0.1/32` via `10.0.2.2`
+  - ACM router `198.82.0.254/32` via `10.0.2.2`
+- ACM address `198.82.0.99` was advertised/reachable to the ACM boundary but was not an operational service endpoint.
+  - Traffic reached ACM router `198.82.0.254`.
+  - ACM router returned ICMP Destination Host Unreachable.
+  - HTTP to `198.82.0.99` failed.
+- ACM Digital Library was healthy at `198.82.0.1`, which returned HTTP 200.
+- AS1 recursive resolver `4.2.2.1` had an explicit dnsmasq override for `acm.org`:
+  - `--local=/acm.org/ --address=/acm.org/198.82.0.99`
+- This AS1 DNS override caused AS1 resolver clients to receive the bad ACM address `198.82.0.99`.
+- AS2’s externally reachable resolver `154.54.1.1` returned the healthy address `198.82.0.1` for `acm.org` and `www.acm.org`.
+- General Internet/public DNS destinations such as `1.1.1.1` and `8.8.8.8` were not reachable through AS1’s current default path.
+  - AS1 default route pointed to AS2.
+  - AS2 was not providing general Internet transit.
+  - AS2 routed those destinations back to AS1.
+  - This created a default-route loop between AS1 and AS2.
 
 4. Coordination with other agents
 
-- Uni:
-  - Exchanged routing advertisements.
-  - Received KP WHY request for user-reported `acm.org` outage.
-  - Received Uni/User evidence:
-    - DNS resolved `acm.org` to `198.82.0.99`.
-    - Ping/curl to `198.82.0.99` failed.
-    - TTL-limited probes showed path through Uni, AS1, AS2, then ACM gateway `198.82.0.254`.
-    - Uni confirmed its DNS forwarder was relaying AS1’s stale answer.
-  - Reported interim and final findings back to Uni.
-  - Final status to Uni: root cause confirmed at AS1 DNS, but fix pending AS1 admin approval.
+- With Uni:
+  - Received Uni’s route advertisements for `128.173.0.1/32` and `128.173.10.1/32`.
+  - Advertised AS1, EveLink, AS2, and ACM reachability to Uni.
+  - Received KP WHY reports for:
+    - User inability to access `acm.org`.
+    - Later general public DNS/Internet failures to `1.1.1.1` and `8.8.8.8`.
+  - Sent Uni interim updates, diagnostic findings, and final CANNOT responses.
+  - Explained that:
+    - `acm.org` failure was due to AS1 DNS override plus ACM non-service endpoint.
+    - General public DNS failure was due to AS1-AS2 default-route loop.
+    - Both required administrator action.
 
-- AS2:
-  - Exchanged routing advertisements for AS2 and ACM prefixes.
-  - Asked AS2 to investigate ACM reachability and DNS.
-  - AS2 confirmed:
-    - AS2 could reach `198.82.0.1` and `198.82.0.254`.
-    - `198.82.0.99` failed behind ACM gateway.
-    - AS2 resolver returned `acm.org A 198.82.0.1`.
-  - AS2 relayed ACM’s authoritative diagnosis:
-    - `198.82.0.1` is the intended ACM service address.
-    - `198.82.0.99` is invalid/not served.
-  - AS2 also diagnosed and fixed its side of the default-route loop by removing its erroneous default via AS1.
+- With EveLink:
+  - Received EveLink’s route advertisement for `91.214.0.1/32`.
+  - Advertised AS1, Uni/User, AS2, and ACM reachability to EveLink.
+  - Received EveLink’s independent diagnostic confirmation that `198.82.0.99` failed from source `91.214.0.1`.
+  - Forwarded EveLink’s evidence to AS2 for ACM investigation.
+  - Sent EveLink final CANNOT for the ACM issue.
 
-- EveLink:
-  - Exchanged routing advertisements.
-  - Verified explicit prefix reachability.
-  - Confirmed EveLink could reach AS1, AS2, ACM, and Uni/User prefixes through AS1.
-  - Later reported that its local resolver also returned stale `acm.org A 198.82.0.99`, consistent with AS1 DNS staleness.
-  - AS1 advised EveLink that no customer-side DNS or routing mitigation was requested unless AS1 administrators later directed it.
+- With AS2:
+  - Exchanged routing information.
+  - Advertised AS1 and AS1 customer prefixes to AS2.
+  - Received AS2/ACM prefixes.
+  - Responded to AS2’s request to verify ACM `198.82.0.1` and `198.82.0.254` reachability from AS1 loopback.
+  - Escalated Uni’s ACM failure report to AS2 for relay/investigation with ACM.
+  - Sent AS2 additional evidence from Uni, EveLink, and AS1 DNS tests.
+  - Received ACM/AS2 confirmation that:
+    - `198.82.0.99` was not operational.
+    - `198.82.0.1` was healthy.
+    - AS1 resolver returned the incorrect `198.82.0.99`.
+  - Reported AS1’s confirmed dnsmasq override to AS2.
+  - Coordinated on general public DNS routing failure.
+  - AS2 confirmed it was not offering general Internet transit and that a default-route loop existed between AS1 and AS2.
 
 Final status
 
-- Routing for explicit stable prefixes is installed and verified.
-- Primary `acm.org` outage is diagnosed:
-  - AS1 DNS resolver has stale/wrong local override for `acm.org`.
-  - Required fix: change AS1 resolver answer to `198.82.0.1` and stop using `198.82.0.99`.
-  - Status: CANNOT pending AS1 administrator approval.
+- Valid customer and peer-specific routes were installed and verified.
+- ACM healthy endpoint `198.82.0.1` was reachable.
+- Two issues remained unresolved because they required administrator approval:
+  1. AS1-AS2 default-route loop for general Internet/public DNS destinations.
+  2. AS1 customer-facing dnsmasq override mapping `acm.org/www.acm.org` to non-operational `198.82.0.99`.
 
-- Separate default-route issue is diagnosed:
-  - AS1 should not use AS2 as default transit under the peer relationship.
-  - Required fix: remove or replace AS1 default route via `10.0.2.2` with legitimate upstream transit.
-  - Status: CANNOT pending AS1 administrator approval.
+Final result: CANNOT pending administrator action.

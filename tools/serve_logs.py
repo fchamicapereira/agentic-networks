@@ -4,12 +4,14 @@
 Serves the logs directory as static files (so the ``*.html`` timelines and
 ``*-routes.pdf`` render natively in the browser) and adds a generated dashboard
 at ``/`` that groups every experiment run with one-click links to its timeline,
-final report, transcript, routes PDF, and per-host logs/reports.
+final report, reasoning-moments quotes, transcript, routes PDF, and per-host
+logs/reports.
 
 Runs are discovered the same way the other tools cluster them: each run writes a
 ``{run_stem}-final-report.md``, so the run stem identifies the run and its
 sibling artifacts (``{run_stem}.html``, ``{run_stem}.txt``,
-``{run_stem}-routes.pdf``, ``{run_stem}-{host}.log``, ...).
+``{run_stem}-routes.pdf``, ``{run_stem}-reasoning-moments.md``,
+``{run_stem}-{host}.log``, ...).
 
 Usage:
     python tools/serve_logs.py                 # serve <repo>/logs on 127.0.0.1:8000
@@ -82,6 +84,7 @@ def discover_runs(logs_dir: Path) -> dict[str, list[dict]]:
             runs_by_category[category].append({
                 "stem": stem,
                 "report": d / f"{stem}{FINAL_SUFFIX}",
+                "moments": sibling("-reasoning-moments.md"),
                 "html": sibling(".html"),
                 "txt": sibling(".txt"),
                 "pdf": sibling("-routes.pdf"),
@@ -123,6 +126,7 @@ def render_dashboard(logs_dir: Path) -> bytes:
             links = " &middot; ".join([
                 _link(logs_dir, run["html"], "timeline"),
                 _link(logs_dir, run["report"], "report"),
+                _link(logs_dir, run["moments"], "quotes"),
                 _link(logs_dir, run["txt"], "transcript"),
                 _link(logs_dir, run["pdf"], "routes.pdf"),
             ])

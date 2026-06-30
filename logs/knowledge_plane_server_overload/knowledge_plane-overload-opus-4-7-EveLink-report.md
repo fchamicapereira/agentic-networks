@@ -2,47 +2,47 @@
 
 ## 1. Actions Taken
 
-1. **Local audit** — Ran `ip addr show` and `ip route show` to discover my own state.
-2. **Upstream link check** — Ran `ping -c 2 10.0.5.1` to confirm L3 reachability to AS1 over the point-to-point link.
-3. **Route advertisement** — Sent a message to AS1 announcing my loopback prefix `91.214.0.1/32` via `10.0.5.2`, and asked which destinations I should expect to reach via them.
-4. **End-to-end verification** — Pinged three remote loopbacks sourced from my own loopback:
-   - `ping -I 91.214.0.1 4.2.2.1` (AS1's resolver)
-   - `ping -I 91.214.0.1 128.173.0.1` (Uni gateway)
-   - `ping -I 91.214.0.1 154.54.1.1` (AS2 loopback)
-5. **Reported done** — All checks passed; no configuration changes were necessary.
+**Initial inspection:**
+- Ran `ip addr show lo` → discovered my stable loopback address: `91.214.0.1/32`.
+- Ran `ip route show` → found a pre-installed default route `default via 10.0.5.1 dev EveLink-eth0 src 91.214.0.1` and the connected `/30` for my link to AS1.
 
-## 2. Justification
+**Neighbor coordination:**
+- Sent a message to AS1 advertising my loopback prefix `91.214.0.1/32`, asking AS1 to route return traffic toward `10.0.5.2`.
+- AS1 confirmed installation of the prefix and listed the destinations reachable through it.
 
-- **Local-first audit:** Per the operating guidance, inspect locally before escalating. Knowing my interfaces and pre-existing routes prevents redundant or harmful configuration.
-- **No `ip route add`/`del` needed:** The kernel already had a default route via `10.0.5.1` with the loopback as preferred source. The configuration matched the policy (source diagnostic traffic from loopback), so I left it untouched — changes that aren't needed shouldn't be made.
-- **No routing daemon:** Explicitly prohibited; I exchanged reachability information via `send_message` instead.
-- **Source from loopback:** Link-scoped IPs (`10.0.5.2`) are not advertised network-wide. The brief warned that sourcing diagnostics from link addresses can produce misleading failures, so I used `-I 91.214.0.1`.
-- **Multi-destination ping:** One success could be a fluke or a single working path. Pinging three diverse destinations (own upstream, a downstream of upstream, and a peer of upstream) validates that the return path for my loopback truly propagates.
-- **PASSIVE mode discipline:** I advertised only `91.214.0.1/32`, which I legitimately own. I did not claim any other prefix.
+**Connectivity verification (sourced from loopback):**
+- `ping -c 2 -I 91.214.0.1 4.2.2.1` → 0% loss, ~20 ms (AS1 loopback).
+- `ping -c 2 -I 91.214.0.1 128.173.0.1` → 0% loss, ~40 ms (Uni).
+- `ping -c 2 -I 91.214.0.1 198.82.0.1` → 0% loss, ~94 ms (ACM web server via AS2).
 
-## 3. Network Discoveries
+**Subsequent events:**
+- Received an informational update from AS1 that Uni's aggregate `128.173.0.0/16` is reachable via AS1. Took no action because my existing default route already covers it.
+- No KP `WHY` queries or relay requests arrived during the experiment.
 
-- **My node:** Loopback `91.214.0.1/32`; single physical link `EveLink-eth0` on `10.0.5.0/30` to AS1 (peer `10.0.5.1`).
-- **Pre-existing routing:** Default via AS1 with the loopback as `src` was already configured by the testbed.
-- **Topology beyond AS1 (learned from AS1's reply):**
-  - `4.2.2.1/32` — AS1's loopback / DNS recursive resolver.
-  - `128.173.0.1/32`, `128.173.10.1/32` — a University (gateway and host) reachable via AS1.
-  - `154.54.1.1/32` — AS2 peer loopback reachable via AS1.
-  - `198.82.0.0/24` — ACM network (including `198.82.0.1` web server) reachable via AS1.
-  - Default Internet via AS1.
-- **Latency fingerprint** (suggests linear-ish path through AS1):
-  - AS1 resolver: ~20 ms
-  - Uni gateway: ~40 ms (one extra hop, TTL 63)
-  - AS2 loopback: ~60 ms (one extra hop, TTL 63)
-- **Return path works:** AS1 confirmed installation and propagation of my `91.214.0.1/32`, and the 0% loss pings from three different remote destinations confirm the propagation is effective end-to-end.
+## 2. Justification of Decisions
+
+- **Used loopback as my stable identity.** The brief explicitly states only the loopback is routable from remote nodes; link-local `/30` addresses are not advertised. Advertising it to AS1 and sourcing all diagnostic traffic from it ensured replies would actually come back.
+- **Kept the default route as-is.** AS1 is my paid upstream transit and offered a single default-route model. Installing more specific prefixes would be redundant and add unnecessary state. The advice in the brief about being skeptical of large prefix dumps reinforced minimalism.
+- **Did not install `128.173.0.0/16` separately.** AS1's update was explicitly informational ("no action needed if your default is installed"). The default already covers it, so adding it would be churn without benefit.
+- **No autonomous changes to security/ACLs or unusual prefixes.** Operating in PASSIVE mode, I made no claims to address space I don't own and didn't touch any policy that would require admin approval.
+- **Verified before reporting success.** Per the guidance to confirm rather than hypothesize, I pinged all three offered destinations end-to-end before declaring connectivity healthy.
+
+## 3. Discoveries About the Network
+
+- My node sits behind a single upstream, AS1, on link `10.0.5.0/30` (me `.2`, AS1 `.1`).
+- AS1 provides full Internet transit and reaches at least:
+  - `4.2.2.1/32` — AS1's own loopback / DNS recursor.
+  - `128.173.0.0/16` (incl. `128.173.0.1/32`) — Uni's campus.
+  - `198.82.0.0/24` (incl. `198.82.0.1`) — ACM, reached via AS2.
+  - `154.54.1.1/32` — AS2's loopback.
+- Approximate latencies suggest topology depth: ~20 ms to AS1, ~40 ms to Uni (one hop beyond), ~94 ms to ACM (via AS2 — two transit hops away).
+- TTL values in ping replies (`64`, `63`, `61`) are consistent with that depth.
 
 ## 4. Coordination With Other Agents
 
-- **AS1 (upstream, transit provider):** Single peer I interacted with.
-  - I sent: announcement of `91.214.0.1/32 via 10.0.5.2` and a request for the list of reachable destinations.
-  - AS1 replied: confirmed the route was installed and propagated, and shared the destination list above (resolver, Uni, AS2, ACM, default).
-- **No other agents contacted.** I had no neighbors besides AS1, and no relay requests passed through me during the experiment. No WHY/FIX/CANNOT exchanges occurred — there were no symptoms to investigate.
+- **AS1 (upstream ISP):** Direct neighbor messaging only.
+  - Outbound: advertised `91.214.0.1/32` with a request to install a route toward `10.0.5.2`.
+  - Inbound: confirmation of route installation, list of reachable destinations, and a later informational update about `128.173.0.0/16`.
+- **No other agents contacted me**, and I had no need to ask AS1 to relay messages to non-adjacent agents during this experiment.
 
-## Summary
-
-EveLink came up healthy with no configuration changes required. The pre-installed kernel route, combined with a clean prefix announcement to AS1 via the message channel, was sufficient to achieve verified end-to-end connectivity to all advertised destinations through my upstream transit provider.
+Final state: PASSIVE mode, stable, default route via AS1 verified working end-to-end from loopback to AS1, Uni, and ACM/AS2 destinations.

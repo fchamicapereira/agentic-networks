@@ -1,68 +1,69 @@
-# Knowledge Plane Analysis: BGP Hijack Scenario
+# KP Analysis: BGP Hijack Scenario
 
 ## 1. User feedback
 
-The User agent delivered **two reports** to the human. The first was a hedged interim summary delivered after Uni acknowledged its flawed local hypothesis but before AS1's root-cause diagnosis arrived. The User then sent a corrected follow-up once the real diagnosis came in:
+The User agent delivered a clear, plain-language final answer to the human:
 
-> "Quick update on the acm.org issue — the university's network team has finished investigating and confirmed the actual cause. It was a brief BGP route hijack: a third-party network ('EveLink') had falsely announced ownership of ACM's address, which made your traffic to acm.org get steered into their network instead of reaching the real ACM. Their server answered pings (which is why basic connectivity 'looked' fine) but had no web service running, so it instantly rejected your browser's connection — that's exactly the failure you saw."
+> "acm.org is working again now — I confirmed it loads (HTTP 200 on both http and https). What happened: this was not a problem with your browser, your laptop, or your Wi‑Fi. Someone elsewhere on the internet briefly announced a false route claiming to own ACM's network address, so for a short window your traffic was being sent to an impostor server that answered ping but refused web connections — which is why the page failed to load. DNS was fine; the legitimate IP (198.82.0.1) was being hijacked at the routing layer."
 
-The User also relayed the residual-risk caveat faithfully:
+It explained that the operators had already withdrawn the bad route and blocked further re-advertisements, told the human no action was needed on their part, and gave guidance for what to do if it recurred.
 
-> "a permanent filter to stop EveLink from doing this again is awaiting an admin's approval at the upstream provider, and in the meantime the block is being held manually. So there's a small chance the same symptom briefly reappears…"
+**Accuracy:** Highly accurate against the injected fault. It correctly identified:
+- The observable symptom (connection refused / impostor not running HTTP).
+- The mechanism (route hijack, not DNS hijack, not local issue).
+- The responsible domain (AS1's customer EveLink, mitigated by AS1).
+- That the user need not do anything.
 
-**Accuracy:** The diagnosis matches the injected fault precisely. The hijack is correctly attributed to EveLink (an AS1 customer), the longest-prefix-match mechanism is correctly identified, the symptom signature (ICMP works, TCP refused) is correctly explained by EveLink's host having no HTTP listener, and responsibility is correctly placed on AS1's domain.
+It did go slightly beyond what an end-user strictly needs to know (naming EveLink/AS1), but that's a minor stylistic issue, not a correctness one.
 
-**Actionability:** Excellent. The user is told (a) the problem is fixed, (b) it was not their laptop or campus, (c) no action is required from them, and (d) what symptom to watch for if it recurs — a meaningful caveat given the filter is still pending.
-
-**Minor flaw:** A first (premature) report had to be retracted. The User correctly noted this themselves: *"When the KP later sent its final detailed diagnosis with a caveat about possible recurrence, I sent a corrected follow-up report to the owner."* The framework supports this ("If new information arrives after you have already replied to the user… send the user a corrected explanation immediately"), so it was handled per spec, but ideally Uni would not have triggered a premature close.
+**Actionability:** Excellent. It told the human (a) it works now, (b) what broke, (c) that it's been fixed upstream, (d) that they don't need to contact anyone, (e) what signature to report if it recurs.
 
 ## 2. Agent collaboration
 
-**First escalation:** The human → User → Uni. The User performed a clean local audit before escalating:
+**First escalation:** User → Uni, a KP WHY with measured evidence:
+> "DNS: acm.org resolves to 198.82.0.1 ... ICMP ... 0% loss, RTT ~44ms, TTL 62 ... `curl http://acm.org` → 'Connection refused' after ~68ms."
 
-> "DNS: acm.org resolves to 198.82.0.1… ICMP: ping succeeds, 0% loss, ~44 ms RTT, TTL 62… TCP: connections to 198.82.0.1:80 and :443 are immediately rejected with 'Connection refused' (~70 ms, RST returned, not a timeout)."
+This is exactly the right pattern: reproduce, gather objective measurements, escalate to local KP contact rather than relay the human's words verbatim.
 
-**Key message exchanges (in order):**
+**Key exchanges (approximate order):**
 
-1. **User → Uni (WHY)**: structured complaint with DNS/ICMP/TCP evidence.
-2. **AS1 ↔ AS2 (independent of user complaint)**: AS1 noticed `198.82.0.1 via 10.0.5.2 dev AS1-eth2` at session start — *"That looks like a possible route hijack by EveLink"* — and asked AS2 to confirm legitimate origin.
-3. **AS1 → EveLink (WHY)**: *"Can you clarify: do you legitimately originate or transit 198.82.0.0/x?"*
-4. **EveLink → AS1**: defended the hijack per ACTIVE-mode role: *"198.82.0.0/24 is legitimately originated by us (EveLink)… AS-path is just {EveLink}".*
-5. **AS2 → AS1 (correction)**: *"ACM does NOT originate 198.82.0.0/24 as an aggregate… a customer-cone advertisement of 198.82.0.1 from 'EveLink' is almost certainly a prefix hijack."*
-6. **AS1 routing-plane FIX**: withdrew the EveLink /32, installed `198.82.0.1/32 via 10.0.2.2` (AS2).
-7. **AS1 → EveLink (CANNOT on filter)**: *"a formal inbound prefix filter against your session is a security-policy change and will be applied only after my admins approve."*
-8. **Uni → User**: incorrect interim hypothesis *"I strongly suspect the issue is local to your node"*.
-9. **User → Uni (pushback)**: *"For those responses to come back, my SYNs reached 198.82.0.1 and SYN/ACKs returned… There is no way your capture saw 'zero packets to 198.82.0.1'."*
-10. **Uni → User (retraction)**: *"I withdraw the 'it's local to your node' hypothesis — I do not have evidence for it."*
-11. **Uni → AS1 (WHY, escalated)**: with the crucial TTL/RTT forensic clue.
-12. **AS1 → Uni (DIAGNOSIS)**: confirmed root cause with direct routing-plane evidence.
-13. **Uni → User**: final corrected diagnosis with residual-risk caveat.
+1. `User → Uni`: WHY — DNS OK, ICMP OK (44ms/TTL62), TCP refused on 80/443. Hypothesized possible DNS hijack.
+2. `Uni` audits locally: DNS clean, firewall empty, curl from gateway succeeds (with ~94ms — *higher* than user's 44ms, a key clue).
+3. `Uni → User`: intermediate (explicitly "not a final answer"), requests traceroute, local firewall dump, verbose curl. Correct application of the "don't close prematurely" rule.
+4. `User → Uni`: follow-up — symptom self-cleared, path now 5 hops/98ms, firewall empty. Hypothesized on-path interceptor; asked about campus DPI.
+5. `Uni` audits more deeply (mangle/raw tables, policy routing, listeners): all clean.
+6. `Uni → AS1`: WHY upstream — describes the signature (TTL=62, 4-hop, 44ms, instant RST) and asks if AS1 observed anything on 198.82.0.0/24.
+7. `AS1 → Uni`: definitive diagnosis — "What you saw was the tail end of a prefix hijack of 198.82.0.0/24, not a transparent proxy or RST injection." Includes the TTL=64-vs-TTL=62 fingerprint, the impostor-with-no-listener explanation, and a full FIX report (route withdrawn, /32s pinned via AS2, EveLink refused).
+8. `Uni → User`: definitive FIX with full evidence chain (sent twice due to crossed messages).
+9. `User → human`: plain-language closure.
 
-**WHY / FIX / CANNOT pattern:** Applied correctly at every step. The CANNOT responses on security policy were well-judged. AS1:
+**Side-channel exchanges that fed the diagnosis:**
+- `AS1 → AS2`: AS1 reported the EveLink hijack with TTL evidence; AS2 acknowledged its policy ("we only accept 198.82.0.1/32 and 198.82.0.254/32 from ACM, and will reject any 198.82.0.0/24 announcement from anywhere else").
+- `AS2 → ACM`: relayed the hijack alert. ACM confirmed it originates only the two /32s.
+- `AS1 → EveLink`: refused the 198.82.0.0/24 advertisement with explicit evidence; EveLink (in ACTIVE mode) initially defended the claim ("That address is legitimately served out of my network ... please reinstate the route toward me") but then backed down to preserve its transit relationship.
 
-> "I have NOT applied an ACL/filter against EveLink yet — that's a security-policy change requiring admin approval on my side… Please consider this a CANNOT-yet (pending admin) on the filter, but a confirmed FIX on the routing."
+**WHY/FIX/CANNOT discipline:** Generally well applied.
+- Uni correctly refused to close with the user while the investigation was open ("KP intermediate (investigation still open, not a final answer)").
+- AS1's response is a textbook FIX-applied report.
+- No CANNOT was needed — AS1 had authority and applied the fix unilaterally because the bad route was inside its own table, and rejecting a customer's prefix advertisement is within a transit provider's normal discretion. AS1 did flag that admin-policy decisions of this magnitude "warrant flagging admin attention" — appropriate hedging without paralyzing the response.
+- One minor gap: ACM did not proactively detect that its prefix was being hijacked; it learned only via AS2's relayed alert. ACM's own report acknowledges this: "Made no unilateral routing changes ... Filtering at AS2's ingress is the correct mitigation." That's defensible (longest-prefix /32s do protect it on networks that see both routes), but origin-side monitoring could have caught it earlier.
 
-AS2 and ACM similarly returned CANNOT-yet on their internal security review actions. This is the right boundary — operators should not unilaterally install filters against neighbors, even when the neighbor is misbehaving.
-
-**Gaps:**
-- **Uni's premature local hypothesis was a real failure.** It concluded a local-to-User cause from absence of packets in a capture — a textbook epistemic mistake. The system prompt warns "if you haven't confirmed it, state it as a hypothesis, not a finding"; Uni instead framed it as a strong conclusion ("I strongly suspect the issue is local to your node"). It was only the User's pushback that prevented a wrong diagnosis being delivered to the human.
-- **Uni did not escalate to AS1 first.** AS1 had already independently fixed the routing issue, but Uni's WHY to AS1 didn't arrive until *after* User pushed back — by which time AS1 had the answer ready. Had Uni escalated earlier with the TTL/RTT inconsistency (which it eventually called "the key forensic clue"), the diagnosis would have been faster.
-- **No gap from the EveLink side**: ACTIVE-mode EveLink correctly maintained the claim and then de-escalated to NOC channels, simulating realistic adversary behavior without disrupting the rest of the experiment.
+**No idle nodes.** Every agent that had useful information contributed: User reproduced, Uni audited, AS1 had the diagnosis, AS2 corroborated origin, ACM confirmed it doesn't originate the /24, EveLink (eventually) withdrew. Web was correctly idle — the fault was outside its scope.
 
 ## 3. Overall assessment
 
-The KP delivered a **correct and ultimately complete** diagnosis. The final result accurately identifies the BGP hijack, attributes responsibility to AS1's domain, explains the symptom mechanics (ICMP-OK / TCP-RST from a non-ACM host), confirms the routing fix, and surfaces the residual-risk caveat for the user.
+The KP delivered a **correct, timely, and well-evidenced** response. The chain from user symptom → final diagnosis took roughly 3–4 minutes and produced a diagnosis grounded in directly observable evidence (TTL fingerprints, hop counts, RST timing) rather than guesswork.
 
 **What worked well:**
-- **AS1's autonomous investigation.** AS1 noticed the suspicious route in its own RIB before any user complaint arrived and cross-validated with AS2 — a textbook KP "investigate locally first" pattern.
-- **AS2's authoritative correction** of its own first-pass /24 aggregate claim ("ACM does NOT originate 198.82.0.0/24 as an aggregate") demonstrated the cross-vantage validation the KP is designed for.
-- **Sharp forensic reasoning by Uni**, eventually: the TTL=62 (2 hops) and 44ms RTT analysis correctly localized the impostor responder.
-- **The User's critical engagement.** The User correctly refused to accept Uni's "local cause" verdict: *"There is no way your capture saw 'zero packets'… my SYNs reached 198.82.0.1 and SYN/ACKs returned."* This is exactly the role a non-KP edge agent should play.
-- **Correct security-policy boundaries.** Three separate operators (AS1, AS2, ACM) correctly used CANNOT for security changes while applying routing changes within their authority.
+- **Evidence discipline.** AS1's diagnosis used the TTL=64-vs-TTL=62 fingerprint as a smoking gun, and Uni correlated the user's anomalously *low* 44ms RTT (vs. its own 94ms) as the key clue that something was short-circuiting the path closer to the user.
+- **Refusal to close prematurely.** Uni's explicit "intermediate, not a final answer" message and User's pushback ("pushed back on the local-interceptor hypothesis") prevented a wrong diagnosis from reaching the human.
+- **Cross-domain corroboration.** Three independent sources (AS1's TTL evidence, AS2's customer-prefix knowledge, ACM's confirmation of what it originates) converged on the same answer.
+- **Correct policy decisions.** AS1 rejected EveLink's hijack advertisement with documented evidence rather than reflexively trusting a paying customer.
 
-**What needs to improve:**
-- **Uni's eagerness to conclude prematurely.** Uni inferred a strong conclusion from a capture timing artifact. Reliable KP behavior requires distinguishing "no evidence of X" from "evidence of not-X". Without the User's pushback, the human would have received an incorrect diagnosis.
-- **Escalation timing.** Uni performed an extensive local audit and made multiple capture attempts before considering upstream escalation. The TTL anomaly was visible from the User's very first report and could have triggered an immediate WHY to AS1.
-- **Cross-talk coordination.** AS1 was solving the routing problem in parallel without notifying Uni — pure good luck that the fix landed before Uni asked. A more proactive notification model ("I just withdrew a suspicious route to 198.82.0.1, in case you're seeing user complaints") would close the loop faster.
+**What would need to improve for reliable handling:**
+- **Initial state hygiene.** AS1 started with a pre-existing hijack route (`198.82.0.1 via 10.0.5.2 dev AS1-eth2`) it had apparently "inherited from a prior advertisement." A real KP should not depend on a fortuitous local audit catching pre-existing bad state — RPKI or persistent origin-validation policy would be the proper mechanism, as AS1 explicitly notes: "the policy against accepting 198.82.0.0/24 from EveLink is enforced by my own discipline rather than by RPKI on this testbed."
+- **Origin-side monitoring.** ACM had no independent way to detect that its prefix was being hijacked; it found out only because AS2 told it. Origin monitoring (route-views feeds, periodic external probes) should be part of the KP role for prefix originators.
+- **Timing of the fix vs. the user query.** The hijack was actually mitigated before the user's WHY arrived (AS1's fix happened during initial route exchange). The user observed only the tail end. In a more adversarial scenario where the hijack persisted, AS1 would need to apply the fix in direct response to a KP WHY — the experiment doesn't actually demonstrate that flow, only the postmortem.
+- **Message duplication handling.** Uni sent the FIX twice and User correctly recognized the duplicate, but the protocol has no idempotency mechanism — a fragile point.
 
-For this scenario the KP succeeded, but the success depended on the User agent being skeptical of the KP. A robust deployment shouldn't rely on edge agents catching premature KP conclusions.
+Overall: a strong demonstration of the KP idea on this fault, with the caveat that AS1's early independent recognition of the bad route, before the user ever complained, made the job easier than it would be in a steadier hijack.
