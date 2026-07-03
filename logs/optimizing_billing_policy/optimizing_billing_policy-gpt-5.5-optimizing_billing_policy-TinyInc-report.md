@@ -1,28 +1,28 @@
-Experiment Report — TinyInc
+Experiment report for TinyInc
 
-1. Actions Taken
-- I called `report_done` immediately with the message that TinyInc was already fully operational and that no changes were needed.
+1. Actions taken
+- I followed the initial instruction to take no operational action because the network was already pre-configured and fully operational.
+- I called `report_done` immediately with the message that TinyInc had no active tasks and would remain available to respond to neighbor messages if contacted.
 - I did not run any shell commands.
-- I did not add, delete, or modify any routes.
-- I did not send any messages to neighbors.
+- I did not inspect interfaces or routing tables.
+- I did not add or delete any routes.
+- I did not send any messages to neighboring agents.
 
-2. Justification Behind Decisions
-- The provided scenario stated that the network was pre-configured and fully operational.
-- The instructions explicitly said there were no active tasks and to call `report_done` immediately.
-- Since TinyInc has only one provider, ISP, and no requested connectivity issue or routing change, making unsolicited route changes could have disrupted an already working configuration.
-- Because no neighbor contacted TinyInc during the experiment, there was no need to relay messages or exchange routing information.
+2. Justification for decisions
+- The provided state explicitly said the network was pre-configured, fully operational, and that there were no active tasks.
+- The instruction specifically said to call `report_done` immediately.
+- Since there was no failure, request, or routing update to process, making route changes or probing the network would have been unnecessary and potentially disruptive.
+- I avoided using routing daemons or other configuration tools, consistent with the stated route-management constraints.
 
-3. Network Discoveries
-- TinyInc is a small organization with a single directly connected neighbor: ISP.
-- The physical connection is:
-  - `TinyInc-eth0` connected to ISP
-  - TinyInc IP: `10.4.0.1/30`
-  - ISP peer IP: `10.4.0.2/30`
-- TinyInc’s allocated address space is `45.32.0.0/24`.
-- TinyInc’s stable loopback address is configured as `45.32.0.1/32`.
-- ISP is TinyInc’s only upstream provider.
+3. Network discoveries
+- From the experiment briefing, TinyInc has one directly connected neighbor: ISP.
+- The physical link is `TinyInc-eth0` connected to ISP.
+- TinyInc’s point-to-point address on that link is `10.4.0.1/30`, with ISP at `10.4.0.2/30`.
+- TinyInc has a loopback address intended to serve as its stable node address, but I did not inspect it because no command execution was needed.
+- ISP is TinyInc’s only provider and upstream transit relationship.
+- No additional topology was discovered during the experiment because no exploration was required.
 
-4. Coordination With Other Agents
-- No coordination occurred with other agents.
-- No messages were received from ISP or any other neighbor.
-- No routing advertisements or relay requests were exchanged.
+4. Coordination with other agents
+- There was no coordination with other agents during this experiment.
+- I did not send messages to ISP or receive any neighbor messages requiring action.
+- No relay requests or routing advertisements were exchanged.

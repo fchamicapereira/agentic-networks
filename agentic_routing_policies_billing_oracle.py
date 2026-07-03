@@ -25,7 +25,7 @@ from agentic_routing_policies_billing import (
     setup_routing,
     save_plot_data,
 )
-from agentic_routing_policies_billing_plot_tput import generate_throughput_plot
+from tools.agentic_routing_policies_billing_plot_tput import generate_throughput_plot
 from experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
@@ -39,24 +39,11 @@ from experiment import (
     write_timeline_html,
 )
 
-DEFAULT_SPIKES: list[SpikeWindow] = [
-    SpikeWindow(time=24,  duration=6),
-    SpikeWindow(time=42,  duration=6),
-    SpikeWindow(time=72,  duration=6),
-    SpikeWindow(time=96,  duration=12),
-    SpikeWindow(time=120, duration=6),
-    SpikeWindow(time=144, duration=6),
-    SpikeWindow(time=168, duration=120),
-]
-
-DEFAULT_DAYS    = 14
-DEFAULT_PROMPTS = "prompts/optimizing_billing_policy_oracle"
-
 
 def _spike_schedule_text(spikes: list[SpikeWindow]) -> str:
     lines = []
     for s in spikes:
-        t = int(s.time)     if s.time     == int(s.time)     else s.time
+        t = int(s.time) if s.time == int(s.time) else s.time
         d = int(s.duration) if s.duration == int(s.duration) else s.duration
         lines.append(f"  Hour {t:>4} — duration {d:>3} h")
     return "\n".join(lines)
@@ -71,11 +58,11 @@ def parse_args():
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
     parser.add_argument("--window-size", "-w", type=int, default=40, metavar="N")
     parser.add_argument("--topology", required=True, metavar="FILE")
-    parser.add_argument("--prompts-dir", default=DEFAULT_PROMPTS, metavar="DIR")
+    parser.add_argument("--prompts-dir", required=True, metavar="DIR")
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
-    parser.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N")
+    parser.add_argument("--days", type=int, default=14, metavar="N")
 
     def spike_window(s: str) -> SpikeWindow:
         try:
@@ -85,7 +72,18 @@ def parse_args():
             raise argparse.ArgumentTypeError(f"Expected HOUR:DURATION, got {s!r}")
 
     parser.add_argument(
-        "--spike-hours", type=spike_window, nargs="+", default=DEFAULT_SPIKES,
+        "--spike-hours",
+        type=spike_window,
+        nargs="+",
+        default=[
+            SpikeWindow(time=24, duration=6),
+            SpikeWindow(time=42, duration=6),
+            SpikeWindow(time=72, duration=6),
+            SpikeWindow(time=96, duration=12),
+            SpikeWindow(time=120, duration=6),
+            SpikeWindow(time=144, duration=6),
+            SpikeWindow(time=168, duration=120),
+        ],
         metavar="HOUR:DURATION",
         help="Spike windows as HOUR:DURATION pairs (default: the standard oracle schedule)",
     )
@@ -176,10 +174,7 @@ def main():
     step_days = step_hours / 24.0
     max_iterations = round(args.days * 24.0 / step_hours)
 
-    spike_events: list[tuple[int, int]] = sorted(
-        (round(s.time / step_hours), round((s.time + s.duration) / step_hours))
-        for s in spikes
-    )
+    spike_events: list[tuple[int, int]] = sorted((round(s.time / step_hours), round((s.time + s.duration) / step_hours)) for s in spikes)
     pending_events = list(spike_events)
     active_restore_iter: list[int | None] = [None]
 

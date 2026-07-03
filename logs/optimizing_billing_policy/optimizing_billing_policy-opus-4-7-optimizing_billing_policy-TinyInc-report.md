@@ -3,32 +3,27 @@ TinyInc Experiment Report
 
 1. Actions Taken
 ----------------
-During this experiment I took exactly one action: I called `report_done` with a success status and a message stating that the network was pre-configured and operational with no pending tasks.
-
-No shell commands were executed, no `ip route add/del` commands were issued, and no messages were sent to neighbors.
+During this experiment I took no configuration or diagnostic actions. My only action was calling `report_done` immediately after being prompted, indicating the node was operational and idle.
 
 2. Justification
 ----------------
-The initial state description explicitly said:
-- "The network is pre-configured and fully operational."
-- "You have no active tasks."
-- "Call report_done immediately."
+The initial state message explicitly stated: "The network is pre-configured and fully operational. You have no active tasks." My operating instructions directed me to call `report_done` immediately in that condition and remain available for neighbor messages. Since there was no fault to diagnose, no route to install, and no peer request to service, taking any action (e.g., poking at `ip route`, pinging ISP, sending unsolicited messages) would have been unnecessary churn and could have generated misleading traffic or advertisements. The correct behavior for a small stub AS with a single upstream and a healthy default configuration is to do nothing until stimulated.
 
-Given those instructions, the correct behavior was to immediately signal completion rather than probe interfaces, advertise prefixes, or solicit routes from the ISP. Taking unsolicited actions (e.g., sending route advertisements to ISP or modifying the routing table) could have destabilized a working configuration without justification. As a small stub AS with a single provider, there was also no routing decision to make — any non-local traffic would naturally default toward the ISP.
+3. Network Discoveries
+----------------------
+I did not perform active discovery, so my knowledge is limited to what was given in the briefing:
+- I am AS TinyInc, a small stub organization.
+- I have a single physical interface, `TinyInc-eth0`, on the point-to-point link 10.4.0.0/30, with my address 10.4.0.1/30 and peer 10.4.0.2/30 belonging to ISP.
+- ISP is my sole upstream provider (transit relationship — I pay them).
+- I have a loopback address (pre-assigned) that serves as my stable, network-routable identity; link addresses on eth0 are not globally reachable.
+- No neighbors other than ISP are directly connected, so any communication with remote agents would have to be relayed through ISP.
 
-3. Network Observations
------------------------
-From the static configuration provided, I know the following about TinyInc's local view:
-- TinyInc has one physical link: `TinyInc-eth0`.
-- That link connects to ISP, with TinyInc's address `10.4.0.1/30` and the peer (ISP) at `10.4.0.2/30`.
-- TinyInc has a loopback address (not inspected, since no commands were run) that serves as its stable node identifier.
-- ISP is TinyInc's sole upstream provider (paid transit). There are no peers or customers.
-- The broader topology is unknown to me; discovery would require explicit exploration, which was not warranted here.
+I did not run `ip addr`, `ip route`, or any ping/traceroute, so I cannot report the specific loopback value or installed routes from direct observation.
 
 4. Coordination With Other Agents
 ---------------------------------
-None. I did not send any messages to ISP or any other agent, and I did not receive any messages or relay requests during the experiment. No routing information was exchanged.
+None. No messages were received from ISP or any relayed peer during the experiment, and I initiated no messages. As a stub customer with a healthy default route (implied by "fully operational"), there was no routing information for me to exchange. Had ISP sent an advertisement — particularly a large bulk update — I would have applied the briefing's guidance: scrutinize volume and AS-path plausibility before installing, since a small customer receiving a huge table from its provider is expected (default/customer routes), but a customer receiving advertisements it shouldn't own would be anomalous. That scenario did not arise.
 
 Summary
 -------
-The experiment placed TinyInc in a steady, pre-configured state with explicit instructions to report completion. I complied immediately and remained idle, ready to respond to any inbound neighbor messages, none of which arrived before the experiment concluded.
+A quiet, correct run for a stub AS: acknowledged healthy state, remained available, and avoided unnecessary changes to a working configuration.

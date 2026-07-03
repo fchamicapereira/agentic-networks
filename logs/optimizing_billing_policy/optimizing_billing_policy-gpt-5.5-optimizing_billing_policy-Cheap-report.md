@@ -1,29 +1,28 @@
-Experiment report — Cheap
+Experiment report for node Cheap
 
 1. Actions taken
-- I called `report_done` immediately with the message that no action was required and that Cheap would remain available to respond to neighbor messages.
+- I followed the initial instruction to take no configuration action because the network was stated to be pre-configured and fully operational.
+- I called `report_done` immediately with the message that Cheap was operational and would remain available for neighbor messages.
 - I did not run any shell commands.
-- I did not add, delete, or modify any routes with `ip route`.
-- I did not send any messages to neighbors.
+- I did not add or delete any routes with `ip route`.
+- I did not use any routing daemons or inspect daemon state.
+- I did not send messages to neighbors.
 
 2. Justification for decisions
-- The provided state said the network was already pre-configured and fully operational.
-- The instructions explicitly directed Cheap to “Call report_done immediately.”
-- Because there were no active tasks, no reported connectivity failures, and no routing updates requiring action, I avoided making unnecessary configuration changes.
-- I also avoided using any routing daemons, consistent with the instruction to manage routes only with `ip route add / del` if route changes became necessary.
+- The task explicitly stated that Cheap had no active tasks and that the network was already fully operational.
+- The instruction specifically required calling `report_done` immediately.
+- Since there was no routing issue, no request from neighbors, and no need to discover topology, making route changes or sending updates would have risked disrupting a working configuration.
+- I avoided unnecessary diagnostics because no fault or verification task was assigned.
 
-3. Network information discovered
-- Cheap is directly connected to:
-  - ISP on `Cheap-eth0`, with Cheap at `10.4.2.2/30` and ISP at `10.4.2.1/30`.
-  - Remote on `Cheap-eth1`, with Cheap at `10.4.4.1/30` and Remote at `10.4.4.2/30`.
-- Cheap’s allocated prefix is `198.18.0.0/24`.
-- Cheap’s loopback/stable node address is configured as `198.18.0.1/32`.
-- Cheap’s business relationships are:
-  - ISP is a customer of Cheap.
-  - Remote is a peer of Cheap.
-- Cheap operates as an economy transit provider prioritizing capacity and coverage over latency optimization.
+3. Network discoveries
+- From the provided configuration, Cheap has two directly connected neighbors:
+  - ISP on `Cheap-eth0`, with Cheap using `10.4.2.2/30` and ISP using `10.4.2.1/30`.
+  - Remote on `Cheap-eth1`, with Cheap using `10.4.4.1/30` and Remote using `10.4.4.2/30`.
+- Cheap’s role is an economy transit provider.
+- ISP is Cheap’s customer.
+- Remote is Cheap’s peer.
+- No additional topology or route information was discovered during the experiment because no exploration or diagnostic commands were run.
 
 4. Coordination with other agents
-- No coordination occurred during the experiment.
-- No messages were received from or sent to ISP or Remote.
-- No relay requests were handled.
+- No coordination messages were exchanged.
+- No neighbor sent any request requiring relay, route installation, or troubleshooting during my active participation.

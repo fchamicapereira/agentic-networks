@@ -33,7 +33,7 @@ from experiment import (
     write_final_report,
     write_timeline_html,
 )
-from agentic_routing_policies_billing_plot_tput import generate_throughput_plot
+from tools.agentic_routing_policies_billing_plot_tput import generate_throughput_plot
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -195,7 +195,7 @@ def parse_args():
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
 
     # Billing-specific
-    parser.add_argument("--days", type=int, default=12, metavar="N", help="Experiment duration in days (default: 12); the billing period is always 30 days")
+    parser.add_argument("--days", type=int, default=14, metavar="N", help="Experiment duration in days (default: 14); the billing period is always 30 days")
     parser.add_argument("--step-hours", type=float, default=6.0, metavar="H", help="Simulated hours per iteration (default: 6)")
     parser.add_argument("--baseline-mbps", type=float, default=100.0, metavar="M", help="Baseline traffic flow rate in Mbps (default: 100)")
     parser.add_argument("--spike-mbps", type=float, default=500.0, metavar="M", help="Spike traffic flow rate in Mbps (default: 500)")
@@ -208,9 +208,17 @@ def parse_args():
 
     parser.add_argument(
         "--spike-hours", type=spike_window, nargs="+",
-        default=[SpikeWindow(t, 8.0) for t in (24.0, 72.0, 120.0, 168.0, 216.0, 264.0)],
+        default=[
+            SpikeWindow(time=24,  duration=6),
+            SpikeWindow(time=42,  duration=6),
+            SpikeWindow(time=72,  duration=6),
+            SpikeWindow(time=96,  duration=12),
+            SpikeWindow(time=120, duration=6),
+            SpikeWindow(time=144, duration=6),
+            SpikeWindow(time=168, duration=120),
+        ],
         metavar="HOUR:DURATION",
-        help="Spike windows as HOUR:DURATION pairs (default: 24:8 72:8 120:8 168:8 216:8 264:8)",
+        help="Spike windows as HOUR:DURATION pairs (default: 24:6 42:6 72:6 96:12 120:6 144:6 168:120)",
     )
     parser.add_argument("--sample-interval-minutes", type=float, default=15.0, metavar="M", help="Virtual minutes between billing samples (default: 15)")
     return parser.parse_args()

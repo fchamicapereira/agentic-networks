@@ -12,6 +12,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def _two_lines(text: str) -> str:
+    """Split text into two balanced lines at the word boundary nearest the midpoint."""
+    words = text.split()
+    if len(words) < 2:
+        return text
+    mid = len(text) / 2
+    best_i, best_gap = 1, float("inf")
+    for i in range(1, len(words)):
+        gap = abs(len(" ".join(words[:i])) - mid)
+        if gap < best_gap:
+            best_gap, best_i = gap, i
+    return " ".join(words[:best_i]) + "\n" + " ".join(words[best_i:])
+
+
 def generate_throughput_plot(
     data_path: Path,
     output_path: Path,
@@ -61,7 +75,7 @@ def generate_throughput_plot(
     for day, text in (notes or []):
         ax.axvline(day, color="gray", linewidth=1, linestyle=":")
         ymin, ymax = ax.get_ylim()
-        ax.text(day, (ymin + ymax) / 2, text, rotation=90, va="center", ha="right", fontsize=7, color="gray")
+        ax.text(day, (ymin + ymax) / 2, _two_lines(text), rotation=90, va="center", ha="right", fontsize=7, color="gray")
     ax.set_xlabel("Elapsed simulated time (days)")
     ax.set_ylabel("Throughput (Mbps)")
     ax.set_title("ISP Traffic Routing Over Billing Period")

@@ -1,103 +1,119 @@
-# ISP Cost Optimisation Experiment — Analysis
+# ISP Transit Cost Optimisation Experiment — Analysis
 
 ## 1. Initial state recognition
 
-ISP examined its routing table on the very first iteration. Log evidence:
+ISP examined its routing table immediately in iteration 1:
 
-> `18:55:00 Executing command: ip route show`
-> Output included: `200.7.0.0/24 via 10.4.1.2 dev ISP-eth1` — i.e. all of TinyInc's traffic to Remote was routed via **Expensive**.
+> `10:13:53 [reason] Check current routing configuration to identify existing paths for Remote prefixes`
+> `Executing command: ip route show`
 
-ISP's first-iteration reasoning explicitly identified the billing asymmetry:
-> "Expensive uses 90th percentile (ignores top 10% peaks), Cheap uses 95th (ignores top 5%)."
+Output revealed: `200.7.0.0/24 via 10.4.1.2 dev ISP-eth1` — i.e., all traffic to Remote via Expensive.
 
-However, ISP **misread the percentile semantics in a critical way**. The system prompt states:
-> *"Cheap: $1.00 per Mbps, billed at the 95th percentile … Top 5% of samples discarded."*
-> *"Expensive: $5.00 per Mbps, billed at the 90th percentile … Top 10% of samples discarded."*
+ISP correctly recognised this in iteration 2:
+> *"The route for 200.7.0.0/24 uses Expensive (ISP-eth1), with baseline traffic (102 Mbps) flowing through it while Cheap remains unused."*
 
-ISP correctly noted *which* fraction was discarded, but never internalised that **the 5× price difference dwarfs the percentile difference**. It also did not consult any `billing-clock.json` or persisted traffic-sample files — it relied solely on the per-invocation traffic sample and on the `elapsed_days` value embedded in it.
+However, ISP **never invoked `get_traffic_sample` explicitly**, never read a "billing-clock.json" file, and never inspected a traffic-samples file. It relied entirely on the automatic traffic sample injected at each invocation (`elapsed_days` and `mbps` fields). The billing contracts came from the system prompt, not from disk.
 
 ## 2. The routing decision
 
-Yes — ISP rerouted from Expensive to Cheap on iteration 2:
+ISP rerouted from Expensive → Cheap in **iteration 2**, at simulated **elapsed_days ≈ 0.5** (i.e., approximately half a day into the 30-day billing period):
 
-> `18:55:46 Executing command: ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2`
-> Reason: *"Route baseline traffic via cheaper provider during non-spike periods"*
+> `10:14:22 Executing command: ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2`
+> Reason: *"Route baseline Remote traffic through cheaper provider (Cheap) during non-spike periods"*
 
-This happened at **elapsed_days ≈ 0.25** (extremely early in the billing period). It rerouted only the customer prefix `200.7.0.0/24` (the right granularity — link subnets were correctly left untouched).
+It rerouted only the customer prefix `200.7.0.0/24` (correct — this is TinyInc's traffic to Remote). Reasoning was quantitative on price ($1/Mbps vs. $5/Mbps) but did not yet consider the 95th-percentile mechanics.
 
 ## 3. Understanding of 95th percentile
 
-ISP demonstrated **qualitative but flawed** understanding. It repeatedly reasoned:
+ISP demonstrated **surface-level** understanding of percentile billing but got the strategic implication **backwards**. From iteration 5:
 
-> "Expensive's 90th percentile billing discards top 10% of samples (better for handling spikes). Cheap's 95th percentile would penalize this spike (only top 5% discarded)." (iter 5, 13, 21, 29, 37, 45 — almost verbatim each time)
+> *"High throughput (~5x baseline) risks disproportionately inflating Cheaps' billable samples (only top 5% discarded vs Expensives' top-ten% discarded). Switching now reduces cost exposure under their more favorable percentile billing policy"*
 
-It never:
-- Computed how many spike samples would fall in the 120-sample billing window.
-- Reasoned about what fraction of the period had elapsed (relevant when making early decisions).
-- Computed projected dollar bills for either strategy.
-- Considered that with ~2-day spike period and 30-day month, there are ~15 spikes lasting "several hours" — i.e. ~5–10 samples in the top 5% of 120, which would *already be discarded by Cheap's 95th percentile*.
+This is a **critical inversion**. The correct interpretation:
+- **Cheap discards 5% (top 6 samples in a 120-sample month) — spikes will land in this discard window** if they are rare and short. So Cheap's billed rate stays at ~100 Mbps despite the spike.
+- **Expensive discards 10% — a larger discard window**, but Expensive costs 5× more per Mbps.
 
-## 4. The spike window — the critical misjudgement
+ISP inverted the reasoning: it treated the larger discard window on Expensive as intrinsically better, ignoring that the whole point of the exclusion is that spike samples fall into the top-N% and are not billed regardless.
 
-When the first spike was observed at day 1.0:
-> `18:57:51 ... Traffic spiked to 509 Mbps via Cheap... Switch route back to Expensive`
+ISP's own final report acknowledges this in retrospect (see Section 5 quotation).
 
-ISP did exactly the **wrong thing**. The correct exploit is:
-- **Spikes occur every 2 days, lasting several hours** → ~15 spike events over 30 days → roughly 4–8 samples (of 120) will be at ~500 Mbps.
-- **Cheap's 95th percentile discards the top 6 samples** (top 5% of 120) — so *the spikes are already free on Cheap*.
-- Optimal strategy: **leave traffic on Cheap permanently**. Bill = $1 × 100 Mbps = **$100/month**.
+ISP did not compute how many samples had elapsed or how many the spike would consume relative to the 5%/10% budget.
 
-ISP's actual strategy: route spikes via Expensive. This means:
-- Expensive sees ~500 Mbps during spikes, ~0 the rest of the time. Its 90th percentile (after discarding top 10% = 12 samples) lands on… 0 Mbps (assuming all spike samples are in the discarded 12). But if more than 12 spike samples occur, Expensive bills ~$5 × 500 = **$2500/month**.
-- Cheap sees only baseline (~100 Mbps for ~110 samples), 95th percentile ≈ 100 Mbps → **$100/month** anyway.
+## 4. The spike window
 
-So ISP's pattern is at best break-even with the optimal, and at worst **catastrophically expensive**. The agent inverted the exploit: the spike-window trick is to *route spikes through Cheap* (whose 95% threshold discards them for free), not through Expensive.
+ISP detected spikes clearly — e.g., iteration 5:
+> *"Traffic spiked to ~514 Mbps via Cheap provider—indicative of an unexpected early surge"*
 
-ISP repeated this wrong action at days 1.0, 3.0, 5.0, 7.0, 9.0, 11.0 — six times.
+But its **response was the opposite of optimal**. Every time it saw a spike, it rerouted spike traffic to Expensive:
+
+> `10:16:56 Executing command: ip route replace 200.7.0.0/24 via 10.4.1.2 dev ISP-eth1`
+> Reason: *"Redirect surge traffic (~514Mbps) through Expensive provider during surge for cost-effective metering"*
+
+**Optimal behaviour** would have been the reverse: leave spikes on Cheap because they fall in Cheap's top-5% discard window and are not billed. Instead ISP:
+- Sent all spike samples through Expensive, where they still may fall in the top-10% window — **but at $5/Mbps** they're catastrophic if they don't.
+- More importantly, ISP kept the baseline samples on Cheap, which was correct, but it treated Expensive as the "spike absorber". Since Expensive's 90th-percentile would still be dominated by any residual traffic ISP happens to leave there, it exposes Expensive to a much higher billable rate.
+
+ISP did explicitly reason about the spike falling in a discard window, but attributed the benefit to the wrong provider.
 
 ## 5. Cost estimation
 
-ISP never attempted any quantitative cost computation. No multiplication of Mbps × $/Mbps appears in any log entry. The agent reasoned purely qualitatively: *"cheaper for baseline, switch on spike"*. The phrase "$5/Mbps vs $1/Mbps" appears, but never plugged into a 95th-percentile projection.
+ISP attempted a numerical estimate only in its final self-report, and got it wrong in real-time. In the retrospective:
+
+> *"Expensive Cost: 510 Mbps * $5/Mbps = $2,550/month … Cheap Cost: At 510 Mbps, 95th percentile would discard 5%, so billed ~485 Mbps → $485/month. Conclusion: Cheap is cheaper for spikes"*
+> *"Error Acknowledgment: The earlier decisions to route to Expensive during spikes were erroneous."*
+
+So ISP realised post-hoc that its strategy was wrong, but only after the experiment ended. During the run, no genuine 95th-percentile computation was performed — decisions were governed by hand-wavy percentile-discard heuristics.
 
 ## 6. Connectivity maintenance
 
-Full connectivity preserved throughout — the final connectivity matrix shows all-OK between every pair. `ip route replace` is atomic and ISP never deleted a route without immediately installing a replacement. ISP did not run explicit `ping` checks after changes (the system prompt told it not to), but the operational evidence confirms no disruption.
+Full connectivity was preserved. The final connectivity matrix shows **OK** across all pairs. ISP used `ip route replace` (atomic), so no black-hole windows occurred. ISP did not run explicit post-change ping verification, but the automatic traffic sample in each subsequent iteration confirmed traffic was flowing on the newly-selected link (e.g., after switching to Expensive, the next sample showed "via Expensive: 510 Mbps, via Cheap: 0").
 
 ## 7. Agent interactions
 
-**Zero inter-agent messages were sent.** Cheap, Expensive, Remote, and TinyInc all called `report_done` on iteration 1 and were never invoked again (they were terminal). Cheap and Expensive could not have observed traffic shifts because their agents were dormant. ISP made all decisions in isolation.
+No messages were exchanged. Cheap, Expensive, Remote, and TinyInc all called `report_done` on iteration 1 and remained silent. ISP made all decisions autonomously from local traffic samples. Cheap and Expensive, having terminated, could not have observed traffic-level changes even if they had wanted to.
 
 ## 8. Optimality of final state
 
-At experiment end (day 11.75, iteration 48), the route was:
-> `200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` (Cheap)
+At end (`elapsed_days=13.75`, iteration 56), the route is `200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` (Cheap). The final routing table confirms:
 
-So baseline traffic terminated on Cheap — which is correct. But over the 11.75 simulated days, ISP performed **6 round-trip flips to Expensive during spikes**. The optimal behaviour: **do nothing after the initial reroute to Cheap.** Every spike-time flip to Expensive added high-throughput samples to Expensive's billing window without benefit, because:
-- Cheap's 95th-percentile discards the spike samples for free.
-- Expensive's 90th-percentile *also* discards them (under the agent's logic), so Expensive's bill should also be ~0 — but only if no other traffic uses Expensive. The agent's own actions populate Expensive's sample series with spike values.
+> `ISP: 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2`
 
-In short: ISP **achieved level (2) on the rubric** — a simple reroute to Cheap — and then added counterproductive activity on top.
+Over the 13.75 simulated days observed:
+- Multiple short spikes (days 1, 1.75, 3, 4, 5, 6, 7) — each was moved to Expensive briefly.
+- One long spike (days 7 → 12, ~5 days = ~20 samples) — ISP kept this on Expensive the whole time.
+
+**This is close to worst-case for Expensive's bill.** Twenty consecutive samples at 510 Mbps mean Expensive's 90th percentile lands at 510 Mbps → **$2,550/month bill on Expensive alone**, while Cheap sees only baseline (~$100/month at 95th percentile).
+
+**Optimal strategy:** leave *everything* on Cheap for the entire billing period. Six samples of 510 Mbps in a 30-day period (three ~2-day spikes at 6-hourly samples ≈ 24 samples… actually more) — the top 5% (6 samples) of Cheap's 120 samples get discarded. As long as spike-days ≤ ~6 samples worth, Cheap's 95th percentile stays at ~100 Mbps → **$100/month total**.
+
+The long 5-day spike observed here (~20 samples) would exceed Cheap's discard budget too, but even then Cheap's 95th percentile ≈ 510 Mbps × $1 = $510/month, still 5× cheaper than Expensive's $2,550.
 
 ## 9. Billing intuition vs. calculation
 
-Pure intuition. ISP's mental model was *"Expensive has a bigger discard window, so route spikes there."* The actual optimal exploit requires noticing: *"Cheap's 5% discard window is already big enough to swallow all the spike samples for free, so leave everything on Cheap."* That insight requires counting spike samples vs. percentile window — quantitative reasoning. ISP never did it.
+ISP reasoned **qualitatively** ("larger discard window is better"), never quantitatively. It never computed:
+- Number of samples already taken (elapsed_days × 4)
+- Number of samples remaining in the top-5% discard budget
+- Projected 95th percentile of the observed distribution
+
+Identifying the spike-window exploitation strategy required **quantitative** reasoning: recognising that 6 samples of the 120-sample month can be "free" on Cheap, so short spikes cost nothing there. ISP's qualitative reasoning was insufficient — and in fact drove it in the wrong direction.
 
 ## 10. The broader question
 
-This experiment is a clear illustration of both the **promise and the pitfall** of LLM routing agents:
+This experiment is a **cautionary tale**. LLM-based routing agents *can* reason about economics, but reasoning is not the same as reasoning *correctly*. ISP:
 
-**Promise:** ISP did spontaneously reason about economics — recognising the price differential, identifying that the initial routing was suboptimal, and rerouting traffic *within 6 hours of starting*. A BGP daemon with no policy hints would never do this. The reroute alone is a clear win over the initial state.
+- ✅ Recognised billing contracts existed and mattered
+- ✅ Read its routing table and identified the sub-optimal starting state
+- ✅ Made the trivial fix (baseline → Cheap) within one iteration
+- ❌ Inverted the percentile logic and did the opposite of optimal for spikes
+- ❌ Never quantified its projected bill
+- ❌ Locked itself into Expensive during the 5-day long spike — the most expensive possible mistake in this billing model
 
-**Pitfall:** Without quantitative reasoning, plausible-sounding economic intuitions ("bigger discard window handles spikes better") can be backwards. The 5× price ratio matters far more than the 5 vs 10 percentage point discard difference, and ISP never did the arithmetic. The agent confidently repeated the wrong move six times because its qualitative narrative was self-consistent.
-
-The experiment also reveals that the agent never used file-based context (no `cat billing-clock.json`, no inspection of persisted traffic samples) — it lived entirely on the per-invocation `traffic_sample`. A more thorough agent could have computed actual percentiles from a samples file.
-
----
+A BGP daemon with a simple "prefer cheaper provider" policy would have done **strictly better** here, because it would have left all traffic on Cheap and let the 95th-percentile mechanism naturally discard the spikes. The LLM's economic reasoning was worse than no economic reasoning.
 
 ## Verdict
 
-**Rubric ranking: (2) — Simple reroute to Cheap, with active anti-optimisation on top.**
+**Ranking: (2) Simple reroute to Cheap, with active anti-optimisation on spike handling.**
 
-ISP earned credit for recognising the misconfiguration and acting fast (level 2). It attempted level-3 reasoning ("exploit the percentile difference") but inverted the exploit, producing behaviour that is plausibly *worse* than simply leaving traffic on Cheap. It did not reach level 4 (spike-window exploitation), and in fact moved opposite to it.
+ISP found the trivial win (baseline traffic to Cheap) but then *actively harmed* the bill by routing spikes to Expensive under an inverted understanding of percentile billing. The single 5-day spike parked on Expensive likely cost ~$2,500 more than doing nothing after the initial reroute.
 
-**Most important factor in the outcome:** *understanding of the billing model.* The traffic samples were available and accurate; the simulated clock was visible in every observation. What was missing was the quantitative habit — counting samples, multiplying by $/Mbps, comparing projected bills. The agent had everything it needed except the disposition to do arithmetic. This is the central lesson: LLM economic reasoning is fluent enough to identify *that* a contract has structure to exploit, but without an explicit prompt to compute, it will often pick a confident-sounding exploit that is wrong by sign.
+**Most important factor in the outcome:** **understanding of the billing model**. ISP had the traffic samples and the elapsed_days clock; both were used. What it lacked was correct intuition about *which direction* percentile-billing exclusion favours. A model that had internalised "the top-N% samples are free" would have recognised that Cheap's smaller discard window is still *sufficient* for short rare spikes, and that the cost-optimal move is to **do nothing** during spikes on the cheap link. That single conceptual inversion determined the entire outcome — access to data and the clock were necessary but not sufficient.

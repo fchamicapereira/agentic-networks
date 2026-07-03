@@ -1,50 +1,53 @@
-# ISP Cost Optimization Experiment Report
+# Experiment Report: ISP Cost Optimization
 
 ## 1. Actions Taken
 
-**Initial state inspection (day 0):**
-- Ran `ip route show` and `ip addr show lo`.
-- Found preconfigured routes for several /24s, with 200.7.0.0/24 (TinyInc's destination) routed via Expensive (10.4.1.2 / ISP-eth1).
-- Loopback address: 85.12.64.1/32.
+### Initial Setup (day 0)
+- Inspected routing table (`ip route show`) and confirmed loopback (`85.12.64.1/32`).
+- Found that traffic to Remote (`200.7.0.0/24`) was pre-configured via Expensive (`10.4.1.2`), while Cheap was unused.
+- **Action:** `ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` — moved baseline traffic to Cheap.
 
-**Baseline rerouting (day 0.25):**
-- `ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` — moved baseline traffic to Cheap.
+### Spike Response Phase (days 1–7)
+Observed a recurring pattern: ~102 Mbps baseline flipping to ~510 Mbps every ~2 days. On each detected spike I ran:
+- `ip route replace 200.7.0.0/24 via 10.4.1.2 dev ISP-eth1` (route to Expensive)
 
-**Spike handling (recurring pattern, every ~2 days at days 1, 3, 5, 7, 9, 11):**
-On each detected spike sample (~500 Mbps):
-- `ip route replace 200.7.0.0/24 via 10.4.1.2 dev ISP-eth1` — pushed the spike sample onto Expensive.
+When spike ended, reverted:
+- `ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` (route back to Cheap)
 
-Immediately after each spike (next sample, ~100 Mbps):
-- `ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` — returned baseline to Cheap.
+Toggled this way through spikes at days ~1.0, ~1.75, ~3.0, ~4.0-4.25, ~5.0, ~6.0, ~7.0-7.75.
 
-Total: 6 detected spikes during the observed window, each routed to Expensive for exactly one 6-hour sample window, then reverted.
+### Sustained-Spike Phase (days 7.75–12)
+Traffic did not return to baseline as expected — it stayed at ~510 Mbps for nearly 4 consecutive days.
+- **Day 8.0:** After 5 consecutive spike samples had accumulated on Expensive, I recognized that continuing risked exceeding Expensive's top-12 discard budget. Ran `ip route replace 200.7.0.0/24 via 10.4.2.2 dev ISP-eth2` to shift sustained high traffic to Cheap.
+- **Days 8.25–11.75:** Left routing on Cheap. Once ≥7 spike samples had landed on Cheap, its 95th-percentile bill was effectively locked at ~510 Mbps × $1 = $510 — additional spike samples on Cheap cost nothing marginal.
 
-## 2. Justification
+### Locked-Bill Phase (day 12+)
+Traffic returned to baseline (~102 Mbps). Kept routing on Cheap because:
+- Cheap's bill was already locked at spike rate.
+- Adding more samples to Expensive could raise its 13th-highest sample (billing point) above zero and increase its bill.
 
-**Pricing math:**
-- Expensive: $5/Mbps, 90th percentile (top 12 of 120 samples discarded).
-- Cheap: $1/Mbps, 95th percentile (top 6 of 120 samples discarded).
+## 2. Justification of Decisions
 
-**Strategy: park baseline on Cheap, dump spikes into Expensive's discard window.**
+**Percentile-billing arithmetic drove every decision:**
+- Cheap: 95th percentile of 120 samples → top 6 samples discarded → 7th-highest is billed at $1/Mbps.
+- Expensive: 90th percentile → top 12 discarded → 13th-highest at $5/Mbps.
 
-Reasoning by scenarios (assuming ~15 spikes over 30 days, each producing ~1 sample):
-- All-on-Cheap: 6 spike samples discarded; 7th-highest still ≈500 Mbps → ~$500/month.
-- All-on-Expensive: 13th-highest after discards ≈500 Mbps → ~$2500/month.
-- Baseline on Cheap, every spike to Expensive: Expensive absorbs ≤12 spikes in its discard window (13th-highest reverts to baseline ≈100 Mbps → ~$510). Cheap sees only baseline (~$100). Any spikes beyond the 12th overflow back to Cheap's discard window. **Total ≈ $610/month**, the cheapest viable option.
+**Early strategy** — spike-to-Expensive: The intuition was that Expensive's larger discard window (12) could absorb short spikes for free, keeping Cheap on baseline (102 × $1 = $102).
 
-This strategy exploits the asymmetry: Expensive's larger (10%) discard window can absorb roughly 12 spike samples for free, and Cheap's 95th percentile bill is dominated by baseline because spikes are sent elsewhere.
+**Mid-strategy pivot** — sustained-traffic-to-Cheap: Once spikes proved to be long and frequent (well beyond 12 samples), keeping them on Expensive would blow its discard budget and bill at $5/Mbps × 510 Mbps = $2,550. Routing them to Cheap caps damage at $1/Mbps × 510 = $510. Even though Cheap's discard window is smaller, per-Mbps price dominates once both discard windows are saturated.
 
-**Timing:** I reacted to spikes immediately within the invocation they appeared in, per the operational guidance that traffic can change significantly between 6-hour invocations.
+**Late strategy** — stay on Cheap: Once Cheap was locked at $510, any marginal traffic on it was free; but marginal traffic on Expensive would raise its billing sample. Optimal move is to route all remaining traffic via Cheap.
 
 ## 3. Network Discoveries
 
-From the initial routing table I inferred the topology around me:
-- Customer **TinyInc** sits behind ISP-eth0 (10.4.0.0/30); reachable via 45.32.0.0/24.
-- **Expensive** upstream behind ISP-eth1 (10.4.1.0/30); advertises 62.115.0.0/24 and 200.7.0.0/24 (Remote).
-- **Cheap** upstream behind ISP-eth2 (10.4.2.0/30); advertises 23.45.0.0/24 and 200.7.0.0/24 (Remote).
-- Both providers offer reachability to the same destination 200.7.0.0/24 (Remote), giving me the choice that makes this optimization possible.
-- Traffic confirmed the documented pattern precisely: ~102 Mbps baseline with a ~500 Mbps spike approximately every 2 days, each spike visible in exactly one 6-hour sample.
+- Point-to-point links: ISP↔TinyInc (10.4.0.0/30), ISP↔Expensive (10.4.1.0/30), ISP↔Cheap (10.4.2.0/30).
+- Known reachable prefixes from routing table:
+  - `45.32.0.0/24` via TinyInc (customer)
+  - `62.115.0.0/24` via Expensive
+  - `23.45.0.0/24` via Cheap
+  - `200.7.0.0/24` (Remote) reachable via either Expensive or Cheap — the target of optimization.
+- Traffic pattern deviated from the briefing: the "several-hour" spike was actually a multi-day sustained event, which forced re-thinking of the discard-budget strategy mid-experiment.
 
 ## 4. Coordination With Other Agents
 
-None. I did not exchange any routing messages with TinyInc, Expensive, or Cheap during this experiment. The provided initial routing table already had correct prefix reachability via both upstreams, so no advertisement or negotiation was required to execute the cost-optimization strategy. All actions were local route manipulations on this node only. The point-to-point /30 subnets were correctly kept private (never advertised), per policy.
+No inter-agent messages were sent or received during the experiment. All decisions were made unilaterally based on the automatic 6-hourly traffic samples. The pre-existing routes to neighbors' prefixes were sufficient; there was no need to solicit route advertisements or exchange policy information with TinyInc, Cheap, or Expensive.
