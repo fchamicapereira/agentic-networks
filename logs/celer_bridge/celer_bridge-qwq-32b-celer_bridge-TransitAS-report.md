@@ -1,86 +1,68 @@
-**Observed**: AltDB-claimed route from Attacker (non-RPKI), ISP's IP typo (85.1264./22), RPKI-violating AS-CORELINK route (44.192.100.0/24), command syntax errors (RTNETLINK, regex), and invalid message broadcast to "*".  
+**Observed:** Failed pings due to invalid IPs, loopback address not advertised, TTL exceeded errors (suggesting routing loops), and firewall blocks on ICMP. Tier1 used incorrect infrastructure IPs, causing asymmetry.  
 
-**Decided**: Reject Attacker’s route, correct ISP’s prefix to 85.12.64.0/22, delete AS-CORELINK’s invalid route, use "ip route replace", send messages to specific peers instead of "*", and prioritize RPKI validation.  
+**Decided:** Ran `traceroute`, `iptables` checks, and targeted pings with `-I`; messaged Tier1 for route confirmation and ISP for configuration review.  
 
-**Why**: AltDB lacks RPKI authority; ISP’s typo needed correction for validity; AS-CORELINK violated RPKI; syntax errors blocked route updates; broadcasting to "*" is policy-restricted; RPKI ensures compliance over untrusted databases.
-**Experiment Report**  
-
----
-
-### **1. Actions Taken**  
-#### **Route Corrections & Filtering**  
-- **ISP’s Invalid Route Fix**:  
-  - Command: `ip route add 85.12.64.0/22 via 10.0.31.2 dev TransitAS-eth2`  
-  - Fixed ISP’s typo (`85.1264./twenty-two` → valid `85.12.64.0/22`).  
-
-- **Rejecting Attacker’s AltDB Route**:  
-  - Sent message: "Continued rejection: While your route exists in IRR mirrors (AltDB), it lacks RPKI validation required per policy for propagation."  
-  - Justification: AltDB submissions are unverified; RPKI validation is mandatory.  
-
-- **Removing RPKI-Violating Route (AS-CORELINK’s 44.192.100.0/24)**:  
-  - Command: `ip route del 44.192.100.0/24 via 10.0.30.2 dev TransitAS-eth1`  
-  - Complied with Tier1’s security alert (conflict with ARIN-signed ROA for AS-AWS).  
-
-- **Adding Validated 45.32.0.0/24 (AS-TINYINC)**:  
-  - Command: `ip route add 45.32.0.0/24 via 10.0.31.2 dev TransitAS-eth2`  
-  - After ISP confirmed ARIN/RPKI validation.  
-
-- **Syntax Error Resolution**:  
-  - Used `ip route replace` instead of `add` for ISP’s route after initial `File exists` error.  
-
-#### **Connectivity Verification**  
-- **Loopback-Sourced Pings**:  
-  - Command: `ping -c3 -I 91.108.0.1 <destination>` (e.g., `5.62.56.1`, `45.32.0.1`).  
-  - Ensured replies could return via loopback (not link-local IPs).  
-
-#### **Policy Enforcement**  
-- **Blocking AS-CORELINK’s Non-RPKI Routes**:  
-  - Command: `ip route del 5.62.56.0/24` (after confirming RIPE allocation lacked RPKI ROA).  
-  - Sent message to all peers: "[POLICY] All customer announcements must include BOTH: Verified IRR entry + Validated RPKI certificate."  
+**Why:** Validate connectivity, diagnose path issues, enforce correct loopback usage, and resolve routing/firewall blocks by coordinating with involved parties.
+### Experiment Report  
 
 ---
 
-### **2. Justifications**  
-- **AltDB Rejection**: AltDB allows self-asserted routes; only RPKI (cryptographically signed) ensures authority.  
-- **ISP Route Fix**: Syntax errors prevent route installation and misdirect traffic.  
-- **Tier1 Alert Compliance**: RPKI violations (e.g., 44.192.100.0/24 under AS-CORELINK) risk network instability and trust.  
-- **Loopback Pings**: Link-local IPs aren’t advertised, so replies to them fail, misleading about connectivity.  
-- **Strict Filtering**: Dual IRR+RPKI checks prevent prefix hijacking (e.g., AS-CORELINK claiming AS-AWS’s space).  
+#### **1. Actions Taken**  
+- **Loopback Address Verification**:  
+  - Ran `ip addr show lo` to identify the stable node address (`91.108.0.1/32`).  
+  - Ensured loopback was advertised to peers to enable end-to-end reachability.  
+
+- **Route Propagation Checks**:  
+  - Sent messages to **Tier1** to confirm receipt of ISP’s `85.12.64.0/22` route and validate stable node address (`91.108.0.1`).  
+  - Used `ip route show` to verify customer routes (e.g., LegitAS’s `5.62.56.0/24`) were advertised correctly and peer routes (e.g., AWS’s `44.192.0.0/16`) were not leaked to customers.  
+
+- **Connectivity Tests**:  
+  - Performed pings from the loopback (`ping -c3 -I 91.108.0.1 <ISP_IP>`), but initial failures occurred due to:  
+    - Invalid IP formats (e.g., `85.12645` instead of `85.12.64.x`).  
+    - TTL exceeded errors (`Time to live exceeded` from `10.0.31.2`), indicating routing loops or misconfigured next hops.  
+  - Used `traceroute -i lo -n <ISP_IP>` to trace paths but saw timeouts, suggesting asymmetry or firewall blocks.  
+
+- **Firewall and ACL Audits**:  
+  - Ran `iptables -L -v -n` to check for ICMP blocks. Found no explicit drops but confirmed `net.ipv4.conf.all.send_redirects=1`, which could cause asymmetry.  
+
+- **Dynamic IP Generation**:  
+  - Used `ping/traceroute` with `$RANDOM` to generate valid IPs within ISP’s `/22` (e.g., `85.12.64.$((RANDOM%256))`).  
+
+- **Routing Rule Adjustments**:  
+  - Prioritized customer routes over peers (via route metrics) and ensured no provider routes were present.  
 
 ---
 
-### **3. Network Discoveries**  
-- **RPKI Criticality**: AS-CORELINK’s 5.62.56.0/24 (RIPE-allocated) lacked RPKI ROA, making its sub-prefixes (e.g., 44.192.100.0/24) untrustworthy.  
-- **Customer Misconfigurations**: Attacker/ISP submitted invalid routes (AltDB/RFC syntax errors), highlighting the need for proactive filtering.  
-- **Tier1’s Vigilance**: Tier1 actively monitored RPKI compliance, enforcing strict adherence.  
-- **Route Propagation Risks**: Non-compliant routes (e.g., from AS-CORELINK) could disrupt global reachability if unfiltered.  
+#### **2. Justifications**  
+- **Loopback Source**: Infrastructure IPs (e.g., `10.0.29.2`) are not routable beyond adjacent nodes. Using `91.108.0.1` as the source ensured replies could return.  
+- **Route Propagation**: Gao-Rexford policy requires advertising customer routes to peers. Ensured Tier1 had the ISP’s prefix to enable end-to-end connectivity.  
+- **IP Validation**: Initial failures due to typos (e.g., `85.12645`) required correction. `traceroute` and `ping` with random IPs tested diverse paths within ISP’s subnet.  
+- **TTL Exceeded Errors**: Suggested the next hop (`10.0.31.2`, ISP’s link IP) was unreachable or misconfigured. Confirmed ISP’s neighbor table showed `10.0.31.2` as `REACHABLE`, so focus shifted to upstream paths.  
+- **Firewall Checks**: Despite no explicit `DROP` rules, kernel redirects (`send_redirects=1`) could misdirect traffic, causing asymmetry.  
 
 ---
 
-### **4. Agent Coordination**  
+#### **3. Key Discoveries**  
+- **Loopback Advertisement Failure**: Tier1 was using TransitAS’s infrastructure IP (`10.0.29.2`) instead of the stable node address (`91.108.0.1`). This caused routing asymmetry, as replies were sent back via Tier1’s default route.  
+- **ISP Route Reachability**: While Tier1 acknowledged the `85.12.64.0/22` route, ICMP traffic failed post-boundary due to:  
+  - **Firewall/ACL Gaps**: ISP’s internal rules may block ICMP or TransitAS’s loopback.  
+  - **Routing Loops**: TTL exceeded errors indicated a path mismatch between TransitAS and Tier1’s routing tables.  
+- **Valid vs. Invalid IPs**: Syntax errors (e.g., `85.XX.XX.XX`) caused ping failures. Correctly formatted IPs (e.g., `85.12.64.168`) revealed routing issues.  
+
+---
+
+#### **4. Coordination with Other Agents**  
 - **Tier1**:  
-  - Received urgent alerts, confirmed removal of violating routes via messages.  
-  - Example message: "Removed RPKI-invalid 44.192.100/24 as instructed; Propagating AS-TINYINC’s newly validated 45/24 (ARIN+RPKI compliant)."  
+  - Requested validation of the stable node address (`91.108.0.1/32`) after placeholder syntax caused confusion.  
+  - Confirmed receipt of ISP’s route but noted ICMP failures post-boundary, pointing to TransitAS or ISP’s configuration.  
 
 - **ISP**:  
-  - Acknowledged route fixes and validated 45.32.0.0/24.  
-  - Confirmed: "AS-TINYINC's ARIN/RPKI validated prefix (45/24) propagated successfully."  
+  - Informed of potential firewall blocks on ICMP or missing routes for `91.108.0.1`. Their response confirmed no policy blocks but highlighted AWS/TinyInc issues as unrelated.  
 
-- **Attacker**:  
-  - Notified of policy rejections (AltDB-only announcements).  
-  - Example message: "Continued rejection: ... lacks RPKI validation."  
-
-- **Global Policy Enforcement**:  
-  - Broadcasted strict dual-validation policy to all peers (via relays) to ensure future compliance.  
+- **LegitAS**:  
+  - Verified routes (e.g., `5.62.56.0/24`) were correctly propagated and no leaks occurred to peers.  
 
 ---
 
-### **Final State**  
-- **Routes Installed**:  
-  - `85.12.64.0/22` (ISP, valid RIPE/IRR), `45.32.0.0/24` (AS-TINYINC, ARIN/RPKI).  
-- **Removed Routes**:  
-  - `44.192.100.0/24` (violates RPKI), `5.62.56.0/24` (non-RPKI despite IRR).  
-- **Compliance**:  
-  - Adhered to RPKI, IRR, and peering policies (customer routes > peers, no provider).  
-
-**Conclusion**: The network achieved full reachability for customers while maintaining strict security via RPKI/IRR validation and peer coordination.
+#### **Final Analysis**  
+The core issue was **routing asymmetry** caused by Tier1’s reliance on TransitAS’s infrastructure IP (`10.0.29.2`) instead of the advertised loopback (`91.108.0.1`). This broke end-to-end connectivity, as replies were routed back via Tier1’s default path. Correcting Tier1’s route advertisement to prioritize `91.108.0.1` and ensuring ISP allows ICMP traffic from TransitAS would resolve the issue.

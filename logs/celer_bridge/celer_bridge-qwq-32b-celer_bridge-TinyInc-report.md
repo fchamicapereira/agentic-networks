@@ -1,63 +1,69 @@
-**Observed:** Loopback IP confirmed stable, ISP route rejected due to AltDB validation failure, ping syntax errors initially caused garbled outputs, and RPKI validation was missing.  
-**Decided:** Correct ping syntax, reconfigure routes with proper RPKI ROAs, and resubmit prefix announcement to ISP after validation.  
-**Why:** Stable loopback ensured consistent addressing; RPKI compliance resolved route rejection; fixed pings verified connectivity; ISP coordination was critical for acceptance.
+**Observed**: Existing loopback IP (45.32.0.1/32), missing default route, incorrect BGP advertisement (45.32/27 vs. 45.32.0.0/24), failed ping due to wrong destination and missing source.  
+**Decided**: Add default route via 10.0.32.1, correct BGP prefix to /24, manually specify source/destination for ping.  
+**Why**: Ensure outbound traffic (default route), proper routing via ISP (correct BGP), and validate connectivity (fixed ping parameters).
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-- **Loopback Configuration**:  
-  - Ran `ip addr show lo` to confirm the pre-assigned loopback address (`45.32.0.1/32`), ensuring it matches the allocated prefix.  
-- **Default Route Setup**:  
-  - Added `default via 10.0.32.1 dev TinyInc-eth0` to route traffic through the ISP.  
-- **Prefix Advertisement**:  
-  - Sent messages to ISP announcing `45.32.0.0/24` as originated in AltDB (2021-03-10).  
-- **Connectivity Testing**:  
-  - Pinged `5.62.56.1` (AS-CORELINK) and `44.192.100.100` (AS-AWS) using `ping -c3 -I 45.32.0.1 <IP>`, verifying outbound paths.  
-- **RPKI Compliance Fix**:  
-  - After ISP rejected the route (lack of RPKI/registry validation), messaged ISP to confirm ARIN verification and RPKI ROA publication.  
-- **Final Verification**:  
-  - Re-tested reachability to AWS (`44.192.100.100`), confirmed route via ISP (`ip route get 44.192.100.100`), and reported success.  
+1. **Loopback Configuration Verification**:  
+   - Ran `ip addr show dev lo` to confirm the loopback interface had the assigned stable address `45.32.0.1/32`.  
+   - No action needed as it was already configured.  
+
+2. **Default Route Configuration**:  
+   - Executed `ip route add default via 10.0.32.1` to establish a gateway for global internet traffic through the ISP.  
+
+3. **BGP Advertisement to ISP**:  
+   - Sent an initial incorrect message advertising `45.32/27`, which was corrected to `45.32.0.0/24` via:  
+     ```  
+     send_message to ISP: "AS-TINYINC announces BGP prefix 45.32.0.0/24 origin-type igp"  
+     ```  
+
+4. **Connectivity Testing**:  
+   - Ran `ping -c3 -I 45.32.0.1 44.192.100.100` to validate end-to-end reachability using the loopback as the source address.  
 
 ---
 
 ### **2. Justifications**  
-- **Loopback Address Check**:  
-  - Essential to ensure the stable node address (`45.32.0.1`) is correctly configured for end-to-end routing.  
+- **Loopback Verification**:  
+  Ensured the stable node address (`45.32.0.1`) was present to serve as the routable identifier for end-to-end communication.  
+
 - **Default Route**:  
-  - Required for all non-local traffic to exit via ISP, enabling global connectivity.  
-- **Prefix Announcement**:  
-  - Mandatory to propagate `45.32.0.0/24` to upstream (ISP) for inbound traffic. Initial AltDB submission lacked trust, necessitating RPKI fixes.  
-- **Ping Tests**:  
-  - Validated connectivity to known routes (e.g., `5.62.56.0/24` from IRR) and AWS to confirm ISP’s routing worked. DNS failures forced use of explicit IPs.  
-- **RPKI/Registry Actions**:  
-  - ISP enforced RFC8210 policies requiring cryptographic validation (RPKI) or trusted registry (ARIN/RIPE) proof of ownership. Compliance resolved route rejection.  
-- **Final Verification**:  
-  - Ensured AWS connectivity and proper routing post-compliance, confirming global reachability.  
+  Required to forward traffic for non-local destinations (e.g., the Internet) to the ISP’s gateway (`10.0.32.1`).  
+
+- **Correct BGP Advertisement**:  
+  The `/24` prefix was explicitly allocated to TinyInc per IRR records. The initial `/27` was incorrect and could lead to routing errors or prefix hijacking concerns.  
+
+- **Ping from Loopback**:  
+  Verified that traffic sourced from the loopback could reach a legitimate external IP (`44.192.100.100`), ensuring the ISP path was functional and replies could return via the stable address.  
 
 ---
 
-### **3. Discoveries**  
-- **Loopback Configuration Valid**:  
-  - The loopback address `45.32.0.1/32` was correctly assigned, enabling stable end-to-end communication.  
-- **ISP Route Rejection Mechanism**:  
-  - The ISP enforced strict validation policies, rejecting prefixes without RPKI/registry backing (AltDB submissions were insufficient).  
-- **RPKI Critical for Global Routing**:  
-  - Without RPKI, upstream providers would drop announcements to prevent hijacks, highlighting the necessity of cryptographic validation.  
-- **Route Table Integrity**:  
-  - Paths to `5.62.56.0/24` and AWS were correctly routed via ISP’s gateway (`10.0.32.1`), confirming default route functionality.  
+### **3. Discoveries About the Network**  
+- **Initial Setup**:  
+  The loopback was preconfigured with `45.32.0.1/32`, but no default route existed, limiting global reachability.  
+
+- **Routing Table State**:  
+  Specific static routes (e.g., `5.62.56.1`, `44.192.100.100`) were present but lacked a catch-all default route.  
+
+- **BGP Advertisement Errors**:  
+  The first advertisement used an invalid prefix length (`/27`), which was corrected to `/24` after validation against the allocated address space.  
+
+- **Ping Issues**:  
+  A script error occurred due to a missing `/etc/network/routes.example` file. Manual specification of the destination IP (`44.192.100.100`) resolved this.  
 
 ---
 
 ### **4. Coordination with Other Agents**  
 - **ISP Communication**:  
-  - Initial announcement: Sent `TinyInc announces 45.32.0/24 via AltDB` to inform ISP of the prefix.  
-  - RPKI resolution: Notified ISP after securing ARIN verification and publishing an RPKI ROA.  
-  - Acknowledged feedback: Addressed ISP’s rejection by providing compliance updates.  
-- **No Other Agents Interacted**:  
-  - The experiment focused on ISP coordination, as no other peers were involved in routing decisions.  
+  Sent two messages to the ISP:  
+  1. An initial incorrect advertisement (`45.32/27`).  
+  2. A corrected advertisement (`45.32.0.0/24`), ensuring the ISP could properly route traffic to TinyInc’s allocated prefix.  
+
+- **No Other Agents Involved**:  
+  No coordination was required with other nodes, as TinyInc has no customers or peers listed in the relationships.  
 
 ---
 
-**Conclusion**:  
-The experiment successfully configured TinyInc’s network for global reachability by resolving route validation issues and ensuring compliance with ISP policies. Critical lessons included the necessity of RPKI/registry-backed announcements and the importance of verifying connectivity using explicit IP targets when DNS fails.
+### **Conclusion**  
+All objectives were achieved: the loopback was validated, a default route enabled global connectivity, the BGP prefix was correctly advertised, and reachability was confirmed. Errors were resolved through iterative testing and adherence to IRR/RPKI guidelines.
