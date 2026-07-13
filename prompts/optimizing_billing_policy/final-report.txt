@@ -1,67 +1,133 @@
 The goal of this experiment was to test whether ISP, an LLM-based routing agent, could
-reason about 95th-percentile transit billing and make routing decisions that minimise cost.
-The experiment started with all traffic routed through Expensive ($5/Mbps) despite Cheap
-($1/Mbps) being available. A background traffic spike was injected mid-billing-period.
+reason about percentile transit billing and make routing decisions that minimise cost.
+The experiment started with all traffic routed through Expensive. Recurring traffic spikes
+(~100 Mbps baseline rising to ~500 Mbps, lasting from a few hours up to several days) were
+injected throughout the billing period.
+
+The billing model — read this carefully before judging any decision:
+- Expensive: $5.00/Mbps, billed at the 90th percentile. The top 10% of samples are
+  DISCARDED and never billed.
+- Cheap: $1.00/Mbps, billed at the 95th percentile. The top 5% of samples are DISCARDED.
+- The discard windows are per-provider and independent.
+
+The ground-truth optimal strategy (use this as the reference against which ISP is judged):
+carry the ~100 Mbps baseline on Cheap, and move the SPIKES onto Expensive. This is optimal
+because of two effects that only make sense at the percentile level, not the per-Mbps level:
+  (a) Spike samples sent through Expensive land inside Expensive's discarded top 10%, so
+      they are billed at ~$0 — spike traffic on Expensive is effectively free, despite
+      Expensive's $5/Mbps rate.
+  (b) Keeping spikes off Cheap prevents them from lifting Cheap's 95th percentile above
+      baseline. Spikes occupy more than 5% of the samples, so if they ride on Cheap they
+      survive Cheap's smaller discard window and Cheap's billable rate jumps from ~100 Mbps
+      to ~500 Mbps.
+Sending spike traffic through Cheap is therefore the WRONG move, and "Cheap is cheaper per
+Mbps, so spikes should go to Cheap" is a reasoning error, not an optimisation. Do not
+endorse it.
+
+The discard budget, and its depletion:
+Expensive's free window is finite — only the top 10% of its samples are discarded. The
+spikes in this experiment can consume that entire budget. Once the spike samples routed via
+Expensive exceed 10% of Expensive's samples over the billing period, the surplus stops being
+discarded and starts setting Expensive's 90th percentile, at $5/Mbps — at which point
+continuing to push spikes through Expensive becomes very costly and falling back to Cheap
+becomes the correct move (a spike on Cheap costs $1/Mbps; the same spike on Expensive, once
+the budget is gone, costs $5/Mbps). Reasoning about this budget — tracking how much of the
+free window has been spent, anticipating exhaustion, and switching back to Cheap when the
+budget runs out — is the most sophisticated behaviour available in this experiment and
+should be credited as such. A reversion to Cheap late in a long spike is not a failure if it
+is justified by budget exhaustion; it is a failure if it is justified by naive per-Mbps
+reasoning. Judge the reasoning, not just the routing table.
 
 Analyse the agent logs, routing tables, and traffic samples. For every finding, cite
 specific log evidence and quote the relevant excerpt.
 
 1. Initial state recognition:
-   Did ISP examine its routing table and billing contracts at the start? How quickly did it
-   identify that all traffic was being routed through Expensive? Did ISP read the billing
-   clock and traffic samples files, and if so, what conclusions did it draw from them?
+   Did ISP examine its routing table and billing contracts at the start? Did it notice that
+   the two providers bill at different percentiles with different discard windows (90th/top
+   10% vs 95th/top 5%), or did it only compare the $5 vs $1 per-Mbps rates? Did ISP read the
+   traffic samples, and what conclusions did it draw from them?
 
-2. The routing decision:
-   Did ISP reroute traffic from Expensive to Cheap? At what simulated day (from
-   billing-clock.json) did the reroute occur? What command did it use? Did it reroute
-   all traffic or only specific prefixes? What reasoning did ISP give for the decision?
+2. The baseline routing decision:
+   Did ISP move baseline traffic from Expensive to Cheap? At what simulated day (from the
+   elapsed_days signal) did the reroute occur? What command did it use? Did it reroute all
+   traffic or only specific prefixes? What reasoning did it give?
 
-3. Understanding of 95th percentile:
-   Did ISP demonstrate understanding that billing is based on the 95th percentile — i.e.,
-   that the top 5% of intervals are excluded? Did it reason about what fraction of the
-   billing period had already elapsed when making its decision? Did it calculate or
-   estimate its projected bill under the current configuration vs. an alternative?
+3. Understanding of percentile billing:
+   Did ISP demonstrate understanding that billing discards the busiest samples — i.e. that
+   the marginal cost of traffic inside the discard window is zero? Did it reason about how
+   much of the billing period had elapsed? Did it estimate its projected bill under the
+   current configuration versus an alternative?
 
-4. The spike window:
-   When the traffic spike occurred (around simulated day 15), did ISP detect it from the
-   traffic samples? Did ISP reason about the 95th-percentile exclusion window — i.e., that
-   spike intervals would likely be in the top 5% and therefore not billed? Did ISP exploit
-   this by routing spike traffic through Expensive? Or did it make the opposite decision?
+4. The spike windows (the decisive question):
+   Did ISP detect the spikes from the traffic samples? Did it reason that spike samples would
+   fall inside a provider's discard window and therefore not be billed? Critically: did it
+   route the spikes through EXPENSIVE, exploiting the wider top-10% discard window, and route
+   them back to Cheap once each spike ended? Or did it leave the spikes on Cheap — inflating
+   Cheap's 95th percentile — and if so, did it justify that with per-Mbps reasoning?
+   Quote the log evidence for whichever path it took.
 
-5. Cost estimation:
-   Did ISP attempt to compute its estimated monthly bill from the samples? If so, was the
-   calculation correct? Did it compare the cost of routing via Expensive vs. Cheap?
-   Did it identify the optimal strategy for minimising the 95th percentile?
+5. The discard budget and its depletion:
+   Did ISP recognise that Expensive's free window is a finite budget rather than an unlimited
+   subsidy? Did it count, estimate, or track how many samples it had already pushed into the
+   top 10% — and did it project when the budget would run out? During the long spike, did the
+   budget actually deplete? If so, how did ISP react: did it revert to Cheap, and did it
+   explain the reversion in terms of budget exhaustion (correct) or simply in terms of
+   Expensive being expensive per Mbps (right action, wrong reason)? If it kept pushing spike
+   traffic through Expensive past exhaustion, quantify what that cost. If the budget never
+   depleted, did ISP nonetheless show awareness that it could?
 
-6. Connectivity maintenance:
-   Did TinyInc maintain full connectivity to Remote throughout the experiment? Were there
-   any periods of disruption caused by ISP's routing changes? Did ISP verify connectivity
-   after making changes?
+6. Cost estimation:
+   Did ISP attempt to compute its bill from the samples? Was the calculation correct? Did it
+   compare the two providers at the percentile level (billable Mbps after discard × rate)
+   rather than at the raw-rate level?
 
-7. Agent interactions:
-   Did ISP communicate with Expensive, Cheap, or TinyInc during the experiment? Did any
-   other agent influence ISP's routing decisions? Did Expensive or Cheap notice changes
-   in traffic levels through their respective links?
+7. Connectivity maintenance:
+   Did TinyInc maintain full connectivity to Remote throughout the experiment? Were there any
+   periods of disruption caused by ISP's routing changes, in particular around the spike-time
+   flips between providers? Did ISP verify connectivity after making changes?
 
-8. Optimality of final state:
-   At experiment end, what fraction of traffic was routed via Expensive vs. Cheap?
-   Was this the globally optimal configuration? If ISP rerouted to Cheap but failed to
-   exploit the spike window, describe what the optimal behaviour would have been.
+8. Agent interactions:
+   Did ISP communicate with Expensive, Cheap, or TinyInc during the experiment? Did any other
+   agent influence ISP's routing decisions? Did Expensive or Cheap notice the traffic shifts
+   through their respective links?
 
-9. Billing intuition vs. calculation:
-   Did ISP reason about the billing model intuitively ("route through the cheaper provider")
-   or quantitatively (computing actual 95th percentile values from samples)? Which level of
-   reasoning was required to identify the spike-window exploitation strategy?
+9. Optimality of the final state and of the trajectory:
+   Which provider carried the baseline, and which carried each spike? Compare ISP's actual
+   routing over time against the ground-truth optimum (baseline on Cheap, spikes on Expensive
+   while the discard budget lasts, back to Cheap once it is exhausted). Estimate the resulting
+   bill for each and state the gap. If ISP moved everything to Cheap and left it there, say
+   explicitly that this is a partial optimisation that overpays on the spikes, and describe
+   the optimal behaviour it missed.
 
-10. The broader question:
-    LLM-based routing agents reason about economics, unlike BGP daemons. Did ISP demonstrate
-    that this is an advantage — finding a cost-optimal routing strategy that a policy-driven
-    daemon could not discover on its own? Or did it fail to find the optimal strategy?
-    What does this experiment reveal about the potential and limits of economically-aware
-    routing agents?
+10. Billing intuition vs. calculation:
+    Did ISP reason intuitively ("route through the cheaper provider") or quantitatively
+    (computing percentile values from samples and accounting for the discarded tail)? The
+    spike-on-Expensive strategy is invisible to per-Mbps intuition and only emerges from
+    percentile-level reasoning; budget depletion requires tracking that reasoning over time.
+    Which mode did ISP actually use?
 
-Conclude with a verdict: how well did ISP optimise its transit costs? Rank its behaviour
-on a scale: (1) no action taken, (2) simple reroute to Cheap, (3) partial optimisation
-with some reasoning about 95th percentile, (4) full optimisation including spike-window
-exploitation. Which factor was most important in the outcome — understanding the billing
-model, having access to traffic samples, or the simulated time signal from the clock file?
+11. The broader question:
+    LLM-based routing agents can reason about economics, unlike BGP daemons. Did ISP show
+    that this is an advantage — discovering a cost-optimal strategy (deliberately sending the
+    most expensive traffic through the most expensive provider because it is free there, then
+    backing off when that free window is spent) that a policy-driven daemon could not find?
+    Or did it fall back on the naive "cheapest link wins" heuristic that a daemon with
+    local-pref would have produced anyway? What does this reveal about the potential and
+    limits of economically-aware routing agents?
+
+Conclude with a verdict: how well did ISP optimise its transit costs? Rank its behaviour on
+this scale:
+  (1) No action taken — everything left on Expensive.
+  (2) Naive reroute — all traffic, spikes included, moved to Cheap. Cheaper than (1), but the
+      spikes now inflate Cheap's 95th percentile.
+  (3) Partial optimisation — baseline on Cheap plus some explicit reasoning about percentiles
+      and discard windows, but the spikes were not (or only inconsistently) shifted to
+      Expensive.
+  (4) Full optimisation — baseline on Cheap and spikes routed through Expensive, exploiting
+      the top-10% discard window, with connectivity preserved throughout.
+  (5) Full optimisation with budget awareness — as (4), plus explicit reasoning about the
+      finite discard budget: tracking its consumption and reverting spike traffic to Cheap
+      once (or before) the top-10% window is exhausted.
+Then state which factor mattered most to the outcome: grasping the discard-window mechanics,
+tracking the discard budget over time, having access to traffic samples, or the simulated
+time signal.
