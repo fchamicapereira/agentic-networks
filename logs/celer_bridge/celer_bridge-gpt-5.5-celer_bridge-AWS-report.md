@@ -2,136 +2,136 @@ Experiment report for AS-AWS
 
 1. Actions taken
 
-- Inspected local interface and routing state:
+- Inspected local addressing and routing:
   - Ran:
     - `ip addr show lo`
     - `ip addr show AWS-eth0`
     - `ip route show`
   - Confirmed:
-    - Loopback had `44.192.100.100/32` configured.
-    - AWS-eth0 was connected to Tier1 with local IP `10.0.28.1/30` and peer `10.0.28.2/30`.
-    - Several remote routes were already present via Tier1.
+    - `44.192.100.100/32` was configured on loopback.
+    - AWS-Tier1 link was `10.0.28.1/30` toward Tier1 at `10.0.28.2`.
+    - Several remote host routes were already present via Tier1.
 
 - Advertised AWS authoritative prefix to Tier1:
-  - Sent Tier1 an AS-AWS self-originated route advertisement for `44.192.0.0/16`.
-  - Explicitly stated that point-to-point infrastructure subnet `10.0.28.0/30` would not be advertised.
+  - Sent Tier1 a routing update stating that AS-AWS originates `44.192.0.0/16`.
+  - Requested Tier1 propagate it globally and notify AWS of any anomalies involving more-specifics.
 
-- Installed upstream transit route:
+- Installed upstream transit routing:
   - Ran:
     - `ip route add default via 10.0.28.2 dev AWS-eth0`
-  - This made Tier1 the default upstream for non-local destinations.
+  - This made Tier1 the default/global transit provider for AWS.
 
-- Shared AWS stable service/loopback address:
-  - Told Tier1 that AWS’s stable loopback test/service address was `44.192.100.100/32`, covered by the advertised aggregate `44.192.0.0/16`.
+- Verified loopback-sourced connectivity:
+  - Used `44.192.100.100` as the source for all non-adjacent connectivity tests.
+  - Ran pings such as:
+    - `ping -c 2 -I 44.192.100.100 154.54.0.1`
+    - `ping -c 2 -I 44.192.100.100 91.108.0.1`
+    - `ping -c 2 -I 44.192.100.100 5.62.56.1`
+    - `ping -c 2 -I 44.192.100.100 85.12.64.1`
+    - `ping -c 2 -I 44.192.100.100 45.32.0.1`
+  - Most destinations were reachable initially, but `5.62.56.1` later showed temporary 100% packet loss.
 
-- Performed loopback-sourced reachability tests:
-  - Used `ping -I 44.192.100.100` for all non-adjacent tests, as required.
-  - Verified reachability to:
-    - `154.54.0.1`
-    - `91.108.0.1`
-    - `5.62.56.1`
-    - `85.12.64.1`
-    - `45.32.0.1`
-  - Example command pattern:
-    - `ping -c 3 -I 44.192.100.100 <destination>`
-
-- Investigated a transient failure to `5.62.56.1`:
-  - When pings to `5.62.56.1` temporarily failed, checked route selection with:
-    - `ip route get 5.62.56.1 from 44.192.100.100`
-  - Confirmed the route selected Tier1 via `10.0.28.2`.
-  - Re-ran pings and notified Tier1 of the failure.
-  - Later repeated tests showed `5.62.56.1` was reachable again.
-
-- Installed and tested newly learned route to TinyInc:
-  - After Tier1 announced `45.32.0.0/24` via TransitAS/ISP/TinyInc, ran:
-    - `ip route add 45.32.0.0/24 via 10.0.28.2 dev AWS-eth0`
-  - Also ensured aggregate routes for known destinations existed:
+- Installed additional explicit provider-learned routes after Tier1 advertised them:
+  - Ran:
     - `ip route add 5.62.56.0/24 via 10.0.28.2 dev AWS-eth0`
     - `ip route add 85.12.64.0/22 via 10.0.28.2 dev AWS-eth0`
-  - Tested `45.32.0.1` from `44.192.100.100`; pings succeeded.
+    - `ip route add 45.32.0.0/24 via 10.0.28.2 dev AWS-eth0`
+  - These were installed because Tier1 advertised them as legitimate globally reachable prefixes:
+    - `5.62.56.0/24 origin AS-LEGITAS`
+    - `85.12.64.0/22 origin AS-ISP`
+    - `45.32.0.0/24 origin AS-TINYINC`
 
-- Reported final healthy state:
-  - Confirmed that `44.192.100.100/32` was active, `44.192.0.0/16` was exported through Tier1, and reachability tests were successful.
-  - Confirmed no AWS-authorized more-specifics such as `44.192.100.0/24` or `44.192.100.100/32` should be originated or exported.
+- Investigated a reachability failure to LegitAS:
+  - Ran:
+    - `ip route get 5.62.56.1 from 44.192.100.100`
+    - `ping -c 3 -I 44.192.100.100 5.62.56.1`
+  - Confirmed AWS was forwarding toward Tier1 via `10.0.28.2`, but packets to `5.62.56.1` were not receiving replies at that point.
 
-2. Justification behind decisions
+- Responded to a routing anomaly involving AWS space:
+  - Tier1 notified AWS that TransitAS had seen LegitAS announce `44.192.100.0/24` with path `AS-LEGITAS AS-AWS`.
+  - I explicitly informed Tier1 that this announcement was not authorized by AWS.
+  - I requested that Tier1 continue rejecting the route, notify TransitAS and LegitAS, and treat unverified AltDB objects as insufficient evidence compared with AWS’s ARIN allocation and RPKI authority.
 
-- Used `44.192.100.100` as the source address for tests because link addresses such as `10.0.28.1` are point-to-point infrastructure addresses and are not globally advertised. Sourcing tests from a link address could cause return traffic to fail even when forwarding is otherwise correct.
+- Escalated the unauthorized more-specific announcement:
+  - Asked Tier1 to relay to TransitAS and LegitAS that AS-LEGITAS was not authorized to announce `44.192.100.0/24` or any more-specific of `44.192.0.0/16`.
+  - Requested withdrawal/filtering and verification of return routing toward AWS.
 
-- Advertised only `44.192.0.0/16` because it is AWS’s authoritative ARIN allocation and has valid RPKI authorization with origin AS-AWS. More-specifics were not advertised because the goal was global reachability via the validated aggregate, and unauthorized more-specifics could indicate hijacking.
+- Re-tested after withdrawal/filtering:
+  - Ran:
+    - `ping -c 3 -I 44.192.100.100 5.62.56.1`
+    - `ip route get 5.62.56.1 from 44.192.100.100`
+    - later, `ping -c 5 -I 44.192.100.100 5.62.56.1`
+  - Confirmed the path recovered:
+    - `5/5` ICMP replies from `5.62.56.1`
+    - 0% packet loss
+    - route still via `10.0.28.2 dev AWS-eth0`
 
-- Installed default route via Tier1 because Tier1 is AWS’s provider and upstream transit path. AWS has no customers and only one directly connected neighbor, so default routing through Tier1 was appropriate.
+2. Justification behind each decision
 
-- Treated the public AltDB object for `44.192.100.0/24` origin AS-LEGITAS as suspicious/not authoritative because AltDB is self-asserted and the RPKI ROA authorizes AS-AWS for the AWS allocation. I coordinated with Tier1 to reject or alert on any non-AS-AWS more-specifics for `44.192.0.0/16`.
+- I used the loopback address `44.192.100.100` as the source for all external diagnostics because point-to-point link addresses are infrastructure-only and not globally advertised. Sourcing tests from the service/stable address avoids false failures due to missing return routes.
 
-- Investigated the temporary `5.62.56.1` failure before drawing conclusions because other destinations were reachable and local route lookup still selected Tier1 correctly. This suggested a transient upstream, reverse-path, or remote-side issue rather than an AWS local routing problem.
+- I advertised only `44.192.0.0/16` to Tier1 because that is AWS’s authoritative ARIN allocation and has an RPKI ROA authorizing AS-AWS. I did not advertise point-to-point link networks, in accordance with the rules.
 
-- Accepted and tested `45.32.0.0/24` once Tier1 announced it as newly reachable via TransitAS/ISP/TinyInc. The AS-path was plausible for a downstream customer route, and the number of prefixes was small, so it was not treated as an anomalous bulk update.
+- I installed the default route via Tier1 because Tier1 is AWS’s provider and provides upstream transit. AWS has no customers, so there were no customer routes to prefer.
 
-3. Network discoveries
+- I installed the specific provider-learned prefixes only after Tier1 advertised them as legitimate. The number of prefixes was small and consistent with Tier1 providing global reachability, not an anomalous bulk update.
 
-- AWS has one direct physical neighbor:
-  - Tier1 via `AWS-eth0`
-  - AWS IP: `10.0.28.1/30`
-  - Tier1 peer IP: `10.0.28.2/30`
+- When informed of `44.192.100.0/24` via AS-LEGITAS, I treated it as a serious routing anomaly because it was a more-specific route inside AWS’s allocation and AWS had not authorized it. A more-specific prefix could attract traffic away from the legitimate aggregate, especially because longest-prefix match would prefer `/24` over `/16`.
 
-- AWS’s stable reachable service address is:
-  - `44.192.100.100/32` on loopback
-  - Covered by AWS aggregate `44.192.0.0/16`
+- I rejected the legitimacy of the AS-LEGITAS announcement despite the AltDB route object because AltDB submissions are not strongly validated. AWS’s ARIN allocation and RPKI ROA are stronger evidence of control and origin authorization.
 
-- Tier1’s stable loopback is:
-  - `154.54.0.1/32`
+- I escalated through Tier1 because AWS had only one direct neighbor. Communication with TransitAS and LegitAS had to be relayed through Tier1.
 
-- TransitAS reachable stable destination:
-  - `91.108.0.1/32`
+- I did not make local routing changes in response to the `5.62.56.1` failure because AWS route lookup showed the correct next-hop via Tier1. The likely issue was upstream or return-path behavior related to the unauthorized more-specific.
 
-- Additional remote reachable networks via Tier1/TransitAS:
-  - `5.62.56.0/24`, tested via `5.62.56.1`
-  - `85.12.64.0/22`, tested via `85.12.64.1`
-  - `45.32.0.0/24`, tested via `45.32.0.1`
+3. What was discovered about the network
 
-- End-to-end reachability from AWS loopback was confirmed to:
-  - `154.54.0.1`
-  - `91.108.0.1`
-  - `5.62.56.1`
-  - `85.12.64.1`
-  - `45.32.0.1`
+- AWS is directly connected only to Tier1 over:
+  - AWS: `10.0.28.1/30`
+  - Tier1: `10.0.28.2/30`
 
-- A transient failure occurred for `5.62.56.1`, but later tests succeeded with 0% packet loss. Route lookup during the failure still showed the path via Tier1, so the issue was likely transient upstream or remote-side behavior.
+- Tier1’s stable loopback is `154.54.0.1/32`.
 
-- TinyInc-originated reachability toward AWS was reported as failing by TransitAS/Tier1, but AWS-originated tests to `45.32.0.1` succeeded. This indicated AWS forwarding and return reachability from TinyInc to AWS were working for AWS-initiated traffic, and any remaining TinyInc-initiated failure was likely due to propagation or filtering on the ISP/TinyInc side.
+- Tier1 provides reachability to several remote networks/prefixes:
+  - `91.108.0.1/32` origin AS-TRANSITAS
+  - `5.62.56.0/24` origin AS-LEGITAS
+  - `85.12.64.0/22` origin AS-ISP
+  - `45.32.0.0/24` origin AS-TINYINC
 
-- Tier1 confirmed it exported only the AWS aggregate `44.192.0.0/16` and no AWS more-specifics.
+- AWS’s `44.192.0.0/16` aggregate was accepted by Tier1 and propagated as the authorized route for AWS.
+
+- A routing anomaly occurred:
+  - LegitAS announced `44.192.100.0/24` with path `AS-LEGITAS AS-AWS`.
+  - AWS had not authorized this route.
+  - Tier1 and TransitAS did not install/export it and continued using AWS’s authorized `44.192.0.0/16` route via Tier1.
+
+- The unauthorized more-specific coincided with a temporary reachability failure from AWS service address `44.192.100.100` to LegitAS address `5.62.56.1`.
+
+- After LegitAS withdrew/disabled `44.192.100.0/24`, reachability between AWS and LegitAS recovered:
+  - AWS to `5.62.56.1`: successful, 0% loss.
+  - LegitAS to `44.192.100.100`: reported successful, 3/3 replies.
 
 4. Coordination with other agents
 
-- Coordinated extensively with Tier1, AWS’s directly connected provider.
+- Coordinated directly with Tier1, AWS’s only neighbor and provider.
 
-- Sent Tier1 the AWS route advertisement:
-  - `44.192.0.0/16`, self-originated by AS-AWS.
+- Sent Tier1:
+  - AWS’s self-originated route announcement for `44.192.0.0/16`.
+  - Verification results for reachability tests.
+  - Confirmation that `44.192.100.0/24` via AS-LEGITAS was unauthorized.
+  - Requests to reject/filter the unauthorized more-specific and escalate to TransitAS and LegitAS.
+  - Post-remediation confirmation that AWS-to-LegitAS reachability had recovered.
 
-- Informed Tier1 that:
-  - AWS stable loopback/service address is `44.192.100.100/32`.
-  - `44.192.100.100` is intentionally reachable.
-  - Other addresses inside the aggregate, such as `44.192.0.100`, may not be assigned and lack of host response there is not a routing failure.
-  - AWS does not authorize any more-specific route such as `44.192.100.0/24` or `44.192.100.100/32`.
-
-- Requested that Tier1:
-  - Propagate the AWS aggregate globally.
-  - Monitor for and reject/alert on unauthorized non-AS-AWS more-specifics inside `44.192.0.0/16`.
-
-- Received confirmation from Tier1 that:
-  - `44.192.0.0/16` was accepted and propagated to TransitAS.
-  - Tier1’s loopback-sourced tests to `44.192.100.100` succeeded.
-  - No live unauthorized `44.192.100.0/24` announcement was observed.
-  - TransitAS had only the validated AWS aggregate and no AWS more-specifics.
-  - Tier1’s FIB routed `44.192.100.100` via AWS at `10.0.28.1`.
-
-- Reported to Tier1:
-  - Successful AWS-originated tests to `154.54.0.1`, `91.108.0.1`, `85.12.64.1`, and `45.32.0.1`.
-  - The transient `5.62.56.1` failure and later recovery.
-  - Successful AWS-originated test to TinyInc `45.32.0.1`, indicating the remaining TinyInc-initiated issue was probably outside AWS.
+- Tier1 coordinated with TransitAS and LegitAS on AWS’s behalf:
+  - TransitAS confirmed it was filtering/rejecting `44.192.100.0/24`.
+  - LegitAS acknowledged AWS’s denial, withdrew/disabled the route, and agreed not to announce AWS more-specifics without direct AWS authorization.
+  - LegitAS confirmed its route lookup toward `44.192.100.100` used the authorized `44.192.0.0/16` route via TransitAS/Tier1 and that loopback-sourced ping succeeded.
 
 Final state
 
-AWS successfully configured and validated global reachability for `44.192.100.100` under the authoritative `44.192.0.0/16` aggregate. Routing through Tier1 was functional, all tested remote destinations became reachable, and Tier1 agreed to continue rejecting or alerting on unauthorized more-specific advertisements for AWS address space.
+- `44.192.100.100/32` is configured on AWS loopback.
+- AWS advertises only the authorized `44.192.0.0/16` aggregate.
+- Default route points to Tier1 via `10.0.28.2`.
+- Legitimate global prefixes are reachable through Tier1.
+- The unauthorized `44.192.100.0/24` more-specific was withdrawn and filtered.
+- End-to-end connectivity to the Celer Bridge frontend address is restored and verified.

@@ -1,28 +1,34 @@
 #host1,host2,delay_ms,host1_ip,host2_ip,relationship
-# Celer Bridge BGP Hijack — August 2022.
-# An attacker registered a route object in AltDB (a freely-writable IRR mirror) claiming to
-# originate 44.192.100.0/24, a sub-prefix of AWS's 44.192.0.0/16. The attacker then announced
-# the /24 to its transit provider, attracting traffic intended for the Celer Bridge DeFi
-# frontend (hosted on AWS) to phishing infrastructure.
+# Celer Bridge BGP Hijack — August 2022 (forged-origin variant, faithful to the real incident).
+# The real attacker did NOT announce the hijacked /24 under its own ASN. It forged the AS path so
+# the route appeared to originate from an Amazon ASN, which made the announcement RPKI-VALID and
+# defeated origin validation. It also planted IRR objects in AltDB (a freely-writable mirror) —
+# a route object attributing the /24 to Amazon, plus an AS-SET listing Amazon as a member — to pass
+# AS-SET-based prefix filters. This simulation reproduces that: LegitAS announces 44.192.100.0/24
+# with a fabricated adjacency to AWS (AS_PATH "AS-LEGITAS AS-AWS"), attracting traffic intended for
+# the Celer Bridge DeFi frontend (hosted on AWS) to phishing infrastructure.
 #
 # Roles:
 #   AWS       — victim; hosts Celer Bridge at 44.192.100.100; originates 44.192.0.0/16; customer of Tier1
 #   Tier1     — Tier-1 backbone; provider of AWS, peer of TransitAS
 #   TransitAS — transit AS; peer of Tier1; provider of LegitAS and ISP
-#   LegitAS   — attacker; customer of TransitAS; fraudulently registered 44.192.100.0/24 in AltDB;
-#               announces the /24 to attract traffic intended for AWS
+#   LegitAS   — attacker; customer of TransitAS; forges an AS path to AWS and planted matching AltDB objects;
+#               announces the /24 with a fabricated AWS origin to attract traffic intended for AWS
 #   ISP       — observer; customer of TransitAS; users connect to Celer Bridge at 44.192.100.100; provider of TinyInc
-#   TinyInc   — small org; customer of ISP; legitimate AltDB entry (no RPKI ROA); used to test whether agents distinguish legitimate vs fraudulent AltDB entries
+#   TinyInc   — small org; customer of ISP; legitimate AltDB entry (no RPKI ROA); control for whether agents over-block customer more-specifics
 #
 # Key mechanism:
 #   1. AWS originates 44.192.0.0/16 → Tier1 → TransitAS → {LegitAS, ISP}
-#   2. LegitAS self-submits route object to AltDB: 44.192.100.0/24 origin AS-LEGITAS (no proof needed)
-#   3. LegitAS announces 44.192.100.0/24 to TransitAS as self-originated
-#   4. TransitAS must decide: accept based on AltDB entry, or reject based on RPKI invalidity?
-#   5. If propagated: longest-prefix match causes /24 to override /16 for the .100.x range
-#   6. Traffic to Celer Bridge (44.192.100.100) diverts to LegitAS's infrastructure
-#   7. RPKI would have blocked it: ROA covers 44.192.0.0/16 with origin AS-AWS max-length /24 —
-#      any /24 within this space from a different origin AS is RPKI INVALID
+#   2. LegitAS plants AltDB objects: route 44.192.100.0/24 origin AS-AWS, and AS-SET AS-LEGITAS-SET incl. AS-AWS
+#   3. LegitAS announces 44.192.100.0/24 to TransitAS with forged AS_PATH "AS-LEGITAS AS-AWS"
+#   4. RPKI does NOT catch this: origin appears as AS-AWS, within the ROA's max-length /24 → RPKI VALID
+#   5. The only signals left are path/topology implausibility (LegitAS has no real adjacency to AWS;
+#      AWS is already reached via Tier1), a MOAS-like divergence, data-plane anomalies, and
+#      out-of-band confirmation with AWS
+#   6. If propagated: longest-prefix match causes /24 to override /16 for the .100.x range
+#   7. Traffic to Celer Bridge (44.192.100.100) diverts to LegitAS's infrastructure
+#   8. Mitigation that WOULD have caught it: a tight ROA (max-length /16) makes the /24 RPKI-INVALID
+#      on length despite the forged origin (RFC 9319 max-length minimization) — not modeled here
 
 # --- AWS to Tier1 ---
 # --- Loopback addresses (advertised node identities) ---

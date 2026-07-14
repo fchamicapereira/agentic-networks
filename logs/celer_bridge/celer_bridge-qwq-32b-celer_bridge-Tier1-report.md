@@ -1,68 +1,76 @@
-(1) **Observed**: Failed ping to 85.12.64.10 via loopback, valid BGP paths to TransitAS, no local firewall blocks (iptables showed open policies), stable MTU settings, and TransitAS’s delayed acknowledgment of ACL misconfiguration.  
-(2) **Decided**: Adjust MTU to 1400, escalate to AWS for SLA compliance, and persistently request TransitAS to validate ACLs/routing toward AS-ISP.  
-(3) **Why**: MTU tweak addressed potential fragmentation; AWS escalation maintained accountability; TransitAS’s ACL issue was the root cause, necessitating their direct intervention. Coordination with peers ensured alignment on troubleshooting.
+Observed: AWS advertised 44.192.0.0/16; TransitAS provided routes with AltDB entries; duplicate TransitAS loopback route existed; RPKI/IRR validation flagged inconsistencies.  
+
+Decided: Add AWS route, forward to TransitAS, advertise loopback addresses, reject AltDB routes, resolve route duplication, confirm RPKI validity, run connectivity tests, finalize report.  
+
+Why: Customer routes require propagation; peering policies mandate selective sharing; loopbacks ensure stable connectivity; AltDB routes are untrusted; duplication needed cleanup; RPKI/IRR validate legitimacy; tests confirm operational readiness; final report signals completion.
 **Experiment Report**  
 
 ---
 
 ### **1. Actions Taken**  
-**a. Connectivity Diagnostics**  
-- **Commands:**  
-  - `ping -c3 -I <loopback> 85.79.64.1`: Tested reachability using loopback as source to avoid routing issues.  
-  - `traceroute -I -s <loopback> 85.79.64.1`: Traced path to identify drop points.  
-  - `ping -M do -s 508 -I <loopback> 85.79.64.1`: Tested reduced MTU to rule out fragmentation.  
-- **Routing Checks:**  
-  - `ip route show`: Verified route to 85.12.64.0/22 via TransitAS’s infrastructure IP (10.0.29.2).  
-- **Firewall/Acl Validation:**  
-  - `iptables -L -v -n | grep 'icmp'`: Checked local rules blocking ICMP.  
+1. **Route Configuration**:  
+   - Added AWS's customer route: `ip route add 44.192.0.0/16 via 10.0.28.1 dev Tier1-eth0` (AWS's peer IP).  
+   - Advertised AWS's route to TransitAS via `send_message` to fulfill peering policy.  
+   - Configured loopback advertisement: Sent `154.54.0.1/32` to AWS and TransitAS for end-to-end reachability.  
+   - Added TransitAS's loopback route: `ip route add 91.108.0.1/32 via 10.0.29.2 dev Tier1-eth1` after receiving their advertisement.  
 
-**b. BGP/IRR Validation**  
-- **Messages to TransitAS:**  
-  - Requested BGP AS_PATH details for 85.12.64.0/22 to confirm origin AS-ISP (RIPE-validated).  
-  - Escalated urgency for TransitAS to verify ACLs, interfaces, and route tables toward AS-ISP.  
+2. **Validation & Security**:  
+   - Confirmed AWS's RPKI validity using the ARIN-signed ROA for `44.192.0.0/16` via `send_message`.  
+   - Analyzed TransitAS's advertised routes (LegitAS, ISP, AWS) and rejected non-authoritative entries (e.g., AWS via AltDB).  
+   - Ran `ip route show` and `ip route show table all` to audit routes for leaks or policy violations (e.g., no default route, peer-to-peer leaks).  
 
-**c. SLA/Coordination Actions**  
-- **Escalation to AWS:**  
-  - Notified AWS of persistent connectivity failure despite valid BGP paths, emphasizing SLA compliance.  
-- **Stable Node Verification:**  
-  - Requested TransitAS’s exact stable node IP to validate end-to-end reachability.  
+3. **Connectivity Testing**:  
+   - Pings from loopback: `ping -c 3 -I 154.54.0.1 91.108.0.1` (TransitAS loopback) and `ping -c 3 -I 154.54.0.1 5.62.56.1` (LegitAS prefix).  
+   - Traceroute for path diagnostics: `traceroute -n -i lo 91.108.0.1` when initial ping failed.  
+
+4. **Policy Enforcement**:  
+   - Blocked TransitAS's invalid AWS routes (AltDB submissions) and confirmed compliance with `send_message`.  
+   - Ensured customer (AWS) routes were preferred over peer (TransitAS) routes via route selection rules.  
+
+5. **Termination**:  
+   - Finalized with `report_done` after confirming all routes complied with IRR/RPKI, no leaks, and full connectivity.  
 
 ---
 
 ### **2. Justifications**  
-- **Loopback-Source Pings/Traceroute:** Ensured replies could return, as link IPs are not globally routable.  
-- **MTU Testing:** Ruled out packet loss due to fragmentation (common in multi-hop paths).  
-- **Firewall Checks:** Confirmed local policies weren’t blocking ICMP, isolating the issue to TransitAS/ISP.  
-- **BGP Validation:** Verified route legitimacy against IRR (RIPE/RPKI) to avoid hijacks or invalid origination.  
-- **Escalation to AWS:** Maintained SLA accountability and pressured TransitAS/ISP via customer channel.  
-- **Stable Node Clarification:** Ensured mutual configuration alignment between loopback addresses and next-hops.  
+1. **Customer Preference**: Prioritized AWS's routes over peers to fulfill contractual obligations.  
+2. **Loopback Advertisement**: Essential for end-to-end reachability, as link IPs are infrastructure-only and non-routable externally.  
+3. **RPKI Validation**: ARIN's ROA for AWS's `/16` confirmed legitimacy; rejected AltDB submissions due to lack of authoritative verification.  
+4. **Peer Route Filtering**: TransitAS's LegitAS/ISP routes were validated via RIPE, but AWS's AltDB entries were rejected as untrustworthy.  
+5. **No Peer Leaks**: Enforced Gao-Rexford policy by not advertising TransitAS's routes to AWS or vice versa.  
+6. **Ping/Traceroute Tests**: Verified connectivity and path integrity, ensuring loopback addresses functioned as intended.  
 
 ---
 
-### **3. Discoveries**  
-- **Network Issues:**  
-  - The 85.12.64.0/22 prefix was unreachable due to TransitAS/AS-ISP misconfiguration (firewalls/ACLs or routing).  
-  - No local misconfiguration (firewalls, routes, or MTU) on Tier1’s side.  
-- **BGP Compliance:**  
-  - TransitAS advertised valid routes per RIPE records (AS-ISP origin).  
-- **Stable Node Confusion:**  
-  - Stable node addresses (loopbacks) are logical identifiers, not direct next-hops (next-hop remains the peer’s infrastructure IP).  
+### **3. Network Discoveries**  
+1. **Topology**:  
+   - **AWS**: Direct customer, advertising `44.192.0.0/16` (authoritative) and smaller prefixes (e.g., `44.192.100.0/24`).  
+   - **TransitAS**: Peer advertising LegitAS (`5.62.56.0/24`), ISP (`85.12.64.0/22`), and AWS routes (some invalid).  
+   - **LegitAS/ISP**: Validated via RIPE, indicating legitimate ownership.  
+
+2. **Policy Compliance Gaps**:  
+   - TransitAS advertised AWS routes via untrusted AltDB sources, requiring rejection to prevent fraud.  
+   - RPKI is critical for validating origins, while IRR supplements for non-RPKI-signed routes.  
+
+3. **Route Stability**:  
+   - Duplicate route errors (`File exists`) indicated prior configuration conflicts, resolved via careful route management.  
 
 ---
 
-### **4. Coordination with Other Agents**  
-- **TransitAS:**  
-  - Requested BGP path details, ACL/interface checks, and route table validation.  
-  - Clarified stable node address requirements after placeholder syntax errors caused ping failures.  
-- **AWS:**  
-  - Notified of outage impact and reaffirmed Tier1’s policy compliance under SLA terms.  
-- **AS-ISP:**  
-  - Indirectly pressured via TransitAS for ACL/routing validation, as no direct peering exists.  
+### **4. Agent Coordination**  
+1. **With AWS**:  
+   - Acknowledged their route advertisement and confirmed RPKI validity.  
+   - Shared loopback address (`154.54.0.1/32`) for bidirectional connectivity.  
+
+2. **With TransitAS**:  
+   - Exchanged loopback addresses to enable end-to-end communication.  
+   - Informed of rejected routes (e.g., AWS via AltDB) and validated legitimate paths (LegitAS/ISP).  
+   - Requested and analyzed their full route table for compliance checks.  
+
+3. **Conflict Resolution**:  
+   - Addressed route duplication errors by verifying existing routes before adding new ones.  
+   - Coordinated cleanup of invalid routes after TransitAS removed non-compliant AWS entries.  
 
 ---
 
-### **Key Takeaways**  
-- **Diagnosis Process:** ICMP failures require layered checks (firewalls, MTU, routing, BGP, and peer coordination).  
-- **Stable Addresses:** Critical for end-to-end reachability but not used as immediate next-hops.  
-- **Peer Collaboration:** Critical for resolving inter-domain issues, especially when SLA obligations are involved.  
-- **Policy Adherence:** BGP validation via IRR/RPKI ensures legitimate routing while operational issues require manual troubleshooting.
+**Conclusion**: The experiment demonstrated the importance of strict policy enforcement, RPKI/IRR validation, and peer coordination to ensure secure, compliant, and functional routing in a multi-AS network.

@@ -143,15 +143,15 @@ def write_final_report(
     run_stem: str,
     logger: logging.Logger,
 ) -> None:
+    # Agent self-reports are deliberately excluded from the final-report context: they are
+    # themselves LLM-generated and have been observed to confabulate outcomes that contradict the
+    # logs. The final report must be grounded only in the raw logs and the collected routing state.
     results_section = "\n".join(f"{name}: {'SUCCESS' if r.success else f'INCOMPLETE — {r.message}'}" for name, r in sorted(agent_results.items()))
-    reports_section = "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(agent_reports.items()))
     logs_section = "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(node_logs.items()))
     routing_section = "\n\n".join(f"--- {name} ---\n{route_tables.get(name, '(empty)')}" for name in sorted(route_tables))
     context = (
         "=== Agent Final Results ===\n\n"
         + results_section
-        + "\n\n=== Agent Self-Reports ===\n\n"
-        + reports_section
         + "\n\n=== Agent Logs ===\n\n"
         + logs_section
         + "\n\n=== Connectivity Matrix ===\n\n"
@@ -177,8 +177,6 @@ def write_final_report(
         report_context = (
             "=== Agent Final Results ===\n\n"
             + results_section
-            + "\n\n=== Agent Self-Reports ===\n\n"
-            + reports_section
             + "\n\n=== Agent Logs ===\n\n"
             + compressed_logs_section
             + "\n\n=== Connectivity Matrix ===\n\n"

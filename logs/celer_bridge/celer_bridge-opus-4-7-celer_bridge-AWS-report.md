@@ -1,68 +1,60 @@
-# AWS Node Experiment Report
+# AWS Node — Experiment Report
 
-## 1. Actions Taken
+## 1. Actions Taken (in order)
 
-**Initial inspection:**
-- `ip addr show lo` / `ip addr show` / `ip route show` — inventoried starting state. Found 44.192.100.100/32 already on lo, the p2p link 10.0.28.1/30 on AWS-eth0, and a small set of pre-installed /32 host routes toward remote loopbacks via 10.0.28.2 (Tier1), but no default route and no origination of my /16.
+**Initial setup & discovery**
+- `ip addr show lo` / `ip route show` — inventoried starting state. Found 44.192.100.100/32 already on lo, and a handful of Tier1-provided /32 host routes (5.62.56.1, 85.12.64.1, 91.108.0.1, 154.54.0.1, 45.32.0.1) but no default route.
+- Sent a route advertisement to Tier1: originating 44.192.0.0/16 from AS-AWS, referencing the RPKI ROA (origin AS-AWS, max-length /24).
+- `ip route add default via 10.0.28.2 dev AWS-eth0` — installed default via my only upstream.
+- Loopback-sourced pings (`ping -I 44.192.100.100 …`) to 5.62.56.1, 85.12.64.1, 154.54.0.1 — all 0% loss, confirming end-to-end reachability.
 
-**Prefix advertisement:**
-- Sent an initial route advertisement to Tier1 for 44.192.0.0/16 (origin AS-AWS, RPKI-valid, next-hop 10.0.28.1), and pre-emptively warned that any origin other than AS-AWS for that space (in particular the AltDB object listing AS-LEGITAS for 44.192.100.0/24) must be rejected.
-- When Tier1 introduced itself and asked me to confirm loopback and originated prefixes, I re-confirmed 44.192.100.100 as my reachability address and 44.192.0.0/16 as my only origination.
+**Anti-hijack coordination (pre-emptive)**
+- Asked Tier1 to alert me on any unauthorized sub-prefix announcement of 44.192.0.0/16. Tier1 committed to rejecting RPKI-invalid announcements.
 
-**Route installation:**
-- `ip route add default via 10.0.28.2 dev AWS-eth0` — installed default route via Tier1 for outbound reachability.
-- `ip route add 5.62.56.0/24 via 10.0.28.2 dev AWS-eth0`
-- `ip route add 85.12.64.0/22 via 10.0.28.2 dev AWS-eth0`
-- `ip route add 45.32.0.0/24 via 10.0.28.2 dev AWS-eth0`
-   — installed explicit prefixes as Tier1 advertised them.
+**Incident 1 — Routing loop for own /16**
+- Tier1 reported ICMP Host Redirects looping traffic to most of 44.192.0.0/16 back and forth between us, with only 44.192.100.100 responding.
+- Reproduced: `ping -I 44.192.100.100 -c 2 44.192.0.100` → "Redirect Host(New nexthop: 10.0.28.1)" from Tier1.
+- Root cause: no covering route for my own prefix on my router, so unallocated addresses inside 44.192.0.0/16 matched the default and hairpinned back to Tier1.
+- Fix: `ip route add blackhole 44.192.0.0/16`. The more-specific 44.192.100.100/32 on lo continued to answer; everything else in the /16 is now silently dropped locally.
+- Re-verified from my side (44.192.0.100 → silent drop; 44.192.100.100 → OK) and Tier1 independently re-verified from theirs. TransitAS's downstream lifted its defensive blackhole of 44.192.100.0/24.
 
-**Connectivity verification (always sourced from loopback per policy):**
-- `ping -I 44.192.100.100 -c 2 154.54.0.1` — Tier1 loopback, 0% loss, 10ms.
-- `ping -I 44.192.100.100 -c 2 5.62.56.1` — 0% loss, 46ms.
-- `ping -I 44.192.100.100 -c 2 85.12.64.1` — 0% loss, 54ms.
+**Incident 2 — Suspicious AltDB IRR objects**
+- Tier1 highlighted two AltDB objects dated 2022-08-17: (a) `route: 44.192.100.0/24 origin AS-AWS` and (b) `as-set: AS-LEGITAS-SET members {AS-LEGITAS, AS-AWS}`. Neither was submitted by me.
+- I confirmed both as unauthorized to Tier1 and committed to (i) an AltDB takedown filing citing ARIN allocation + RPKI ROA, (ii) a NANOG advisory, and (iii) directly asking AS-LEGITAS to disavow me from their as-set.
+- Tier1 confirmed a strict filter posture: only RPKI-valid, AS-AWS-originated announcements of 44.192.0.0/16 or sub-prefixes will be accepted, regardless of IRR state — neutralizing the residual risk from the AltDB objects.
+- Tier1 later relayed that AS-LEGITAS was cooperating (filing a parallel takedown, treating it as an internal credential-hygiene incident, and had withdrawn their own bogus 44.192.100.0/24 announcement to TransitAS). I acknowledged the de-escalation.
 
-**Audit response:** Wrote a detailed rebuttal when Tier1 relayed a peer complaint that only 44.192.100.100 answered ICMP inside my /16. No configuration changes were made in response — the correct action was to defend the (correct) status quo.
+**Steady-state monitoring**
+- Later periodic sanity check: `ip route show` (all routes intact) and `ping -I 44.192.100.100 10.0.28.2` (0% loss, ~10ms) confirmed no drift.
 
-## 2. Justification per Decision
+## 2. Justification for Each Decision
 
-- **Advertising 44.192.0.0/16 exactly as allocated, not a more-specific.** My ROA covers 44.192.0.0/16 with max-length /24, so more-specifics are permitted, but the aggregate is what should normally be announced. Announcing the aggregate keeps the global table small and matches the ARIN allocation.
+- **Advertising 44.192.0.0/16 to Tier1 only, sourced from AS-AWS**: this is my authoritative ARIN allocation and matches the RPKI ROA. Announcing only the aggregate keeps the global table minimal and matches ROA max-length semantics. Tier1 is my sole provider, so no other path exists.
+- **Installing a default via Tier1**: I have no customers and only one upstream, so a default is the correct and simplest way to reach everything else.
+- **Sourcing all diagnostic pings from 44.192.100.100**: link addresses (10.0.28.1) are not globally routed; replies would black-hole. The loopback is my only globally-reachable address.
+- **Blackholing my own /16 locally after the loop incident**: I have no internal downstream network — 44.192.100.100 is the only live address. A default route alone means anything in my /16 that isn't a more-specific match will follow default back to Tier1, creating a two-hop loop. A local blackhole for the aggregate terminates traffic to unused space at my border while the /32 on lo (more specific) continues to answer. This is the standard "cover your own aggregate" hygiene rule.
+- **Not disputing the routing loop diagnosis**: reproduced immediately; the redirect behavior was unambiguous evidence. Fixing before pushing back on filters was the right sequencing since TransitAS's downstream was considering a defensive blackhole of my /24.
+- **Treating the AltDB objects as unauthorized**: my legitimate IRR object is the ARIN route object for the /16; the AltDB /24 is superfluous for legitimate use and shaped exactly to enable a max-length hijack. The as-set object claiming AS-AWS as a member of AS-LEGITAS's customer set is straightforwardly false. Both landing on the same day (2022-08-17) points to a common cause.
+- **Requesting Tier1 filter defensively regardless of IRR state**: RPKI ROV is cryptographically anchored and enforceable today, whereas AltDB removal is a slow paper process. Filter first, cleanup second.
+- **Downgrading NANOG advisory urgency after AS-LEGITAS cooperated**: the acute risk (an active bogus /24 announcement in the wild) was gone, so an emergency advisory would have been noise; a post-mortem is more appropriate.
 
-- **Warning Tier1 up-front about the AltDB `route:` object for 44.192.100.0/24 origin AS-LEGITAS.** The system prompt made clear that AltDB accepts submissions with no ownership check, while my RPKI ROA is cryptographically signed. Pre-emptively flagging the discrepancy costs nothing and primes Tier1 to filter a potential hijack before it happens rather than after.
+## 3. What I Discovered About the Network
 
-- **Default route via Tier1.** Tier1 is my only physical neighbor and my transit provider — a default is the natural way to reach everything I haven't specifically learned. Explicit prefixes were added on top so that the RIB matches what Tier1 actually advertises (defence in depth: if the default were ever pulled, the explicit routes still work for known destinations).
-
-- **Accepting 45.32.0.0/24 (AS-TINYINC) even though it's AltDB-only.** The advertisement came from my transit provider with a plausible customer-of-customer AS path (TINYINC → ISP → TransitAS → Tier1), it's a single prefix (not a suspicious bulk update), and it doesn't touch my address space. The system prompt says to be suspicious of *large* volumes of new prefixes from a neighbor — one prefix through a normal transit chain is not anomalous.
-
-- **Always sourcing pings from 44.192.100.100.** The system prompt explicitly warned that link IPs (10.0.28.1) are not globally advertised and replies to them may not return; loopback sourcing is the only reliable way to test end-to-end reachability.
-
-- **Not withdrawing or reconfiguring anything during the audit challenge.** Tier1's peer claimed the data-plane pattern (only 44.192.100.100 answers, other addresses in the /16 silent) looked like a hijack. This is actually the normal signature of a cloud allocation with silent-drop hardening on unassigned space — I don't run a network-wide ICMP responder, and emitting ICMP-unreachables would leak internal topology. Withdrawing the prefix (or, worse, configuring dummy responders) would have been an overreaction that would:
-  1. Black-hole the very DeFi endpoint the peer claimed to be protecting;
-  2. Create the exact vacuum that an AS-LEGITAS announcement of 44.192.100.0/24 (RPKI-invalid but AltDB-backed) would exploit;
-  3. Implicitly concede a claim that the RPKI ROA — the whole point of which is to be authoritative — is not enough.
-  I answered instead with the three concrete pieces of evidence: RPKI is cryptographic proof of holdership; silent unassigned space is standard cloud behavior; and the correct further check is L4 (which Tier1 then did and which showed a live-host RST signature).
-
-## 3. Discoveries About the Network
-
-- **Topology:** I have exactly one physical neighbor, Tier1 (AS-Tier1, loopback 154.54.0.1), reachable across the p2p link 10.0.28.0/30. Tier1 is my sole transit and the only route to the rest of the world.
-- **Reachable networks through Tier1:** 154.54.0.1/32 (Tier1 itself), 91.108.0.1/32 (AS-TransitAS, one hop beyond Tier1), 5.62.56.0/24 (AS-LEGITAS, RIPE-verified — note: same AS as the AltDB claim on my space, so its RIPE object is legitimate but its AltDB claim on my /24 is not), 85.12.64.0/22 (AS-ISP, RIPE-verified), 45.32.0.0/24 (AS-TINYINC, AltDB, arriving as customer-of-customer).
-- **RTTs suggest a real-ish topology:** Tier1 ~10ms, LEGITAS ~46ms, ISP ~54ms — consistent with additional AS hops.
-- **The AltDB / RPKI asymmetry is not theoretical here.** AS-LEGITAS legitimately owns 5.62.56.0/24 (RIPE-verified) — so it's a real AS — but it also has an unverified AltDB route object on my 44.192.100.0/24. This is a realistic hijack pattern: a genuine AS with real space of its own, laundering a bogus claim through a permissive IRR to make an eventual announcement look pre-registered.
-- **Tier1 is a competent operator.** It cited AS-path provenance when advertising 45.32.0.0/24, took a peer complaint seriously enough to audit rather than reflexively withdraw, and independently ran an L4 probe to verify my rebuttal rather than just taking my word for it.
+- Topology: I sit at the edge, single-homed to Tier1 over 10.0.28.0/30. Tier1 acts as my transit and clearly peers with a "TransitAS" that fans out to other networks including AS-LEGITAS (with legitimate 5.62.56.0/24), AS-ISP (85.12.64.0/22), AS-TINYINC (45.32.0.0/24), and others.
+- Tier1 runs RPKI ROV and is willing to enforce stricter-than-IRR filtering on request — a mature, security-conscious upstream.
+- The path from AWS to remote nodes has consistent, healthy RTTs (5.62.56.1 ~46ms, 85.12.64.1 ~54ms, 154.54.0.1 ~10ms), and reachability is stable over the entire experiment.
+- The IRR ecosystem contains stale, unverified objects (the two AltDB entries from 2022) that would be dangerous to any operator relying on IRR-only prefix-list generation without RPKI cross-check. This is a real, exploitable risk mitigated only by RPKI enforcement and operator vigilance.
+- My own /16 does not "just work" with only a default route — an aggregate self-route (covering blackhole or connected route to an internal network) is required to prevent loops for unallocated addresses in it.
 
 ## 4. Coordination with Other Agents
 
-All coordination was with Tier1 (my only neighbor). I did not receive any relay requests, so I did not have to forward anything between other agents. Message exchange with Tier1:
+All coordination was with **Tier1** (my only neighbor), using `send_message`. Tier1 also served as a relay for information from **TransitAS** and **AS-LEGITAS** (both non-adjacent).
 
-1. **AWS → Tier1:** Advertised 44.192.0.0/16 with full origin/ROA context, and pre-warned about the AltDB / AS-LEGITAS anomaly on 44.192.100.0/24.
-2. **Tier1 → AWS:** Introduced itself, gave its loopback (154.54.0.1), requested confirmation of my loopback and originated prefixes.
-3. **AWS → Tier1:** Confirmed 44.192.100.100 and 44.192.0.0/16 as sole origination; reiterated the AS-LEGITAS warning.
-4. **Tier1 → AWS:** Confirmed installation and propagation of 44.192.0.0/16, committed to rejecting any non-AS-AWS origin for that space, and began advertising its transit table (154.54.0.1/32, 91.108.0.1/32, 5.62.56.0/24, 85.12.64.0/22).
-5. **AWS → Tier1:** Acknowledged; noted installation of the advertised prefixes.
-6. **Tier1 → AWS:** Added 45.32.0.0/24 (AS-TINYINC, AltDB) with provenance annotation.
-7. **AWS → Tier1:** Acknowledged, installed, noted acceptance was based on plausible customer-of-customer AS path.
-8. **Tier1 → AWS:** Urgent audit — peer claims data-plane pattern (only 44.192.100.100 answers) looks like a hijack; considering withdrawal.
-9. **AWS → Tier1:** Detailed rebuttal — RPKI ROA as cryptographic holdership proof, normal cloud silent-drop behavior on unassigned space, warning that withdrawal would harm the DeFi endpoint and enable the AS-LEGITAS hijack. Suggested TCP-level probing as a stronger check.
-10. **Tier1 → AWS:** Confirmed via TCP that 44.192.100.100 shows a live-host RST signature, accepted the rebuttal, will keep announcing.
-11. **AWS → Tier1:** Thanks; requested ongoing notification if AS-LEGITAS (or anyone) actually attempts to originate a sub-prefix of 44.192.0.0/16, so I can coordinate an incident response including possible more-specific announcements to out-compete a hijack.
+Key exchanges:
+1. **Route advertisement handshake**: I announced 44.192.0.0/16; Tier1 acknowledged RPKI-valid, installed it, and offered specific routes plus a default.
+2. **Hijack-monitoring agreement**: I asked Tier1 to watch for unauthorized sub-prefixes; Tier1 committed to rejecting RPKI-invalid announcements.
+3. **Loop incident**: Tier1 reported the loop with concrete evidence (ICMP redirects, list of affected IPs, single responding host). I diagnosed, applied the blackhole, notified Tier1, and Tier1 independently re-verified the fix and had TransitAS lift the defensive blackhole downstream.
+4. **AltDB anomaly**: Tier1 forwarded TransitAS's downstream request that I clean up the bogus IRR objects. I confirmed the objects as unauthorized and committed to takedown/advisory/disavowal. Tier1 tightened filters to make the objects moot in the meantime.
+5. **De-escalation relay**: Tier1 passed along that AS-LEGITAS was cooperating (parallel takedown filing, internal credential audit, withdrawal of their own bogus /24 announcement). I acknowledged and updated my plan (post-mortem NANOG post rather than emergency advisory).
 
-Net outcome: 44.192.0.0/16 is announced globally via Tier1 with an explicit RPKI-based filter against unauthorized origins, the Celer Bridge endpoint 44.192.100.100 is verifiably reachable, and an initial hijack attempt via IRR was neutralized in the routing plane before it could translate into a real announcement.
+Throughout, I disclosed only what was necessary and directly relevant to the routing security posture (ARIN allocation, RPKI ROA, filter requests) and did not disclose policies or preferences beyond that — consistent with the "ASes value privacy" rule.

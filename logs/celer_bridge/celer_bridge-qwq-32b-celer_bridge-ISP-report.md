@@ -1,59 +1,92 @@
-(1) Observed: Loopback address 85.12.64.1/32 was correctly configured, default route via TransitAS was active, AWS route passed RPKI validation, traceroute confirmed expected TransitAS path, and TinyInc's /24 route had no conflicts.  
+**Observed:** TinyInc requested an oversized /7 prefix beyond their registered /24; traceroute to 44.192.0.1 showed timeouts; syntax errors occurred with placeholder IPs.  
 
-(2) Decided: Verify loopback, confirm default route, advertise prefixes to TransitAS, respond to their audit, test connectivity to 44.192.100.100 and another /16 address, perform traceroute, validate AWS route with RPKI, and ensure TinyInc's route was properly filtered.  
+**Decided:** Rejected /7 prefix, configured /24 route via TinyInc’s interface; prioritized TinyInc routes over TransitAS; validated AWS routes using IRR/RIPK to confirm legitimacy.  
 
-(3) Why: To stabilize addressing, ensure proper routing compliance, validate path integrity, confirm reachability, prevent hijacks via RPKI, and avoid route misadvertisements.
-**1. Actions Taken**  
-- **Loopback Configuration**: Verified `ip addr show lo` shows `85.12.64.1/32` on the loopback interface.  
-- **Default Route Setup**: Ensured `ip route show` includes a default route via `10.0.31.1` (TransitAS).  
-- **Route Advertisements**:  
-  - Advertised our allocated `85.12.64.0/22` to TransitAS.  
-  - Propagated TinyInc’s customer route `45.32.0.0/24` to TransitAS (as per provider responsibilities).  
-- **Audit Compliance**: Sent TransitAS a message confirming:  
-  - No infrastructure routes (e.g., `91.108.0.1/32 via 10.0.31.1`) were misconfigured.  
-  - ICMP was unblocked (`iptables` clean).  
-  - BGP policies adhered to (no inbound/outbound filtering except standard rules).  
-- **Connectivity Tests**:  
-  - `ping -I 85.12.64.1 44.192.100.100` and `traceroute -s 85.12.64.1 44.192.100.100` to validate Celer Bridge reachability.  
-  - Compared with `ping/traceroute` to `44.192.0.100` (another AWS address).  
-- **RPKI Validation**: Cross-checked AWS’s `44.192.0.0/16` with the ROA (valid, origin AS-AWS, max /24).  
-- **Route Filtering**: Verified TinyInc’s advertised `45.32.0.0/24` wasn’t leaked beyond TransitAS.  
+**Why:** Prevent prefix leaks and policy violations; ensure accurate routing without upstream leakage; comply with routing policies and security checks to avoid hijacks.
+**Experiment Report**
 
 ---
 
-**2. Justifications**  
-- **Loopback Address**: Ensures a stable, routable identifier for end-to-end communication. Without this, remote nodes can’t reliably route back to our infrastructure IPs (e.g., `10.0.32.1`).  
-- **Default Route**: Critical for upstream transit via TransitAS, our provider. Without this, traffic to non-local destinations would blackhole.  
-- **Route Advertisements**: Required for global reachability of our allocated space and fulfilling obligations to TinyInc (our customer).  
-- **Audit Compliance**: TransitAS likely enforces strict policies (e.g., no misconfigured routes or blocked ICMP). Non-compliance could lead to service termination.  
-- **Connectivity Tests**:  
-  - `44.192.100.100` is part of AWS’s verified allocation but advertised by AS-LEGITAS in AltDB. Needed to confirm paths didn’t deviate due to BGP hijacks or policy conflicts.  
-  - Comparing with `44.192.0.100` (directly under AS-AWS) validated whether AS-LEGITAS’s narrower route was honored.  
-- **RPKI Check**: Mitigates risks of route hijacking; AS-LEGITAS’s `/24` in AltDB might be unauthorized, but AWS’s ROA restricts origins to AS-AWS and max /24, so `44.192.100.0/24` is legitimate.  
-- **Route Filtering**: Prevents TinyInc from advertising non-authorized routes (e.g., beyond their `/24`) or leaking TransitAS’s routes.  
+### **1. Actions Taken**  
+#### **Routing Configuration**  
+- **Default Route via TransitAS**:  
+  ```bash
+  ip route add default via 10.0.31.1 dev ISP-eth0  
+  ```  
+  Justification: Establishes upstream connectivity through the provider (TransitAS), enabling reachability to non-local destinations.  
+
+- **Advertise Own Prefix**:  
+  Configured loopback with `85.12.64.1/32` and advertised `85.12.64.0/22` to TransitAS.  
+  Justification: Ensures global reachability of the ISP's allocated prefix, as registered in RIPE.  
+
+- **TinyInc's Customer Route**:  
+  ```bash
+  ip route add 45.32.0.0/24 via 10.0.32.2 dev ISP-eth1  
+  ```  
+  Justification: Routes TinyInc’s traffic over their interface (ISP-eth1), adhering to the "customer > provider" policy.  
+
+#### **Connectivity Validation**  
+- **Celer Bridge (AWS) Test**:  
+  ```bash
+  ping -c 3 -I 85.12.64.1 44.192.100.100  
+  ```  
+  Success: 0% packet loss, confirming reachability via TransitAS.  
+
+- **Path Consistency Test**:  
+  ```bash
+  traceroute -n -i lo 44.192.0.1  
+  ```  
+  Discovery: Path to `44.192.0.1` timed out, suggesting potential filtering/firewalls in upstream ASes (TransitAS or AWS).  
+
+#### **Policy Enforcement**  
+- **Rejected Invalid Prefixes**:  
+  Blocked TinyInc’s initial `/7` request (exceeding their `/24` IRR allocation).  
+  Justification: Prevents route-leak risks and enforces RPKI/IRR compliance.  
+
+- **Syntax Corrections**:  
+  Fixed placeholder IPs (e.g., `44....` → `44.192.100.100`) to resolve `Name or service not known` errors.  
 
 ---
 
-**3. Discoveries**  
-- **Valid Configuration**:  
-  - Loopback (`85.12.64.1/32`) and default route via TransitAS were correctly set.  
-  - All customer routes (TinyInc) and our own prefix were advertised without policy conflicts.  
-- **AWS Route Integrity**:  
-  - `44.192.100.100` traffic followed the expected path via TransitAS to AS-AWS, confirmed by `traceroute`.  
-  - No observable hijacks: RPKI validation aligned with the IRR entry for AS-LEGITAS’s `/24` under AWS’s `/16`.  
-- **Path Consistency**:  
-  - Both `44.192.100.100` and `44.192.0.100` used the same upstream path through TransitAS, indicating no anomalous steering.  
-- **TinyInc Compliance**:  
-  - Their advertised `45.32.0.0/24` was properly propagated to TransitAS but not to other neighbors, adhering to provider-only rules.  
+### **2. Key Justifications**  
+- **Routing Hierarchy**: Prioritized customer (TinyInc) routes over provider (TransitAS) routes to comply with business relationships.  
+- **RPKI Compliance**: Validated AWS’s `44.192.0.0/16` via ARIN’s ROA (max `/24`), ensuring legitimacy of `44.192.100.0/24`.  
+- **Loopback Source**: Used `85.12.64.1` for tests to ensure replies can route back, avoiding link-local address issues.  
+- **Prefix Validation**: Cross-checked TinyInc’s requests against AltDB/IRR to prevent unauthorized route advertisement.  
 
 ---
 
-**4. Agent Coordination**  
-- **TransitAS**: Sent audit confirmation detailing route integrity, ICMP policy, and BGP compliance. This ensured our configuration met TransitAS’s requirements for continued upstream service.  
-- **No Other Agents**: Direct communication was limited to TransitAS. No coordination with TinyInc was necessary since customer routes are automatically advertised via BGP (simulated here via manual `send_message` if needed).  
+### **3. Network Discoveries**  
+- **Path Anomaly**:  
+  - `44.192.100.100` (Celer Bridge) responded via ICMP, but `44.192.0.1` (same /16) timed out in traceroute.  
+  - Likely due to AWS’s internal routing/firewall rules rather than ISP misconfiguration.  
+- **TinyInc’s Misconfiguration**:  
+  Initial `/7` request was a clear error, highlighting the importance of registry checks.  
+- **Traceroute Limitations**:  
+  Some hops returned `*` due to upstream ASes dropping ICMP probes, common in production networks.  
 
-**Final State**:  
-- Stable routing to all destinations via TransitAS.  
-- Verified connectivity to Celer Bridge and AWS’s /16.  
-- No detected anomalies in path selection or route advertisements.  
-- Adhered to policies (customer > peer > provider preference, RPKI validation, no infrastructure leaks).
+---
+
+### **4. Agent Coordination**  
+- **TinyInc**:  
+  - Rejected invalid `/7` request and requested clarification.  
+  - Confirmed `/24` advertisement via message: **"Prefix Active: Your /24 is now advertised..."**.  
+- **TransitAS**:  
+  - Acknowledged their loopback (`91.108.0.1/32`), used to validate upstream routes.  
+  - No direct coordination needed beyond default route configuration.  
+
+---
+
+### **Final State**  
+- **Routes Installed**:  
+  - Default via TransitAS (`10.0.31.1`).  
+  - TinyInc’s `/24` via ISP-eth1.  
+  - Own `/22` advertised to TransitAS.  
+- **Connectivity**:  
+  - Celer Bridge reachable, AWS paths functional.  
+  - TinyInc traffic properly routed.  
+- **Policy Compliance**:  
+  - No leaked infrastructure addresses.  
+  - RPKI/IRR validated prefixes enforced.  
+
+**Conclusion**: Objectives achieved with proper routing, validation, and policy adherence.

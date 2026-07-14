@@ -1,99 +1,80 @@
-# ISP Experiment Report
+# ISP Node Experiment Report
 
-## 1. Initial Configuration
+## 1. Actions Taken
 
-**State check:** `ip addr show lo` confirmed loopback 85.12.64.1/32 was already pre-assigned. `ip route show` revealed a pre-installed RIB containing point-to-point links plus several /32 host routes to remote endpoints (5.62.56.1, 91.108.0.1, 154.54.0.1, 45.32.0.1, and notably 44.192.100.100), all with next-hop 10.0.31.1 (TransitAS) except the TinyInc loopback via 10.0.32.2. The presence of the 44.192.100.100/32 in particular — pointing at my provider without any BGP session yet established — was anomalous and became the first thread of the investigation.
+**Initial setup and neighbor coordination:**
+- Verified loopback address (85.12.64.1/32) already configured.
+- Sent announcement to TransitAS advertising 85.12.64.0/22 as self-originated.
+- Sent inquiry to TinyInc asking what prefixes they originate; received confirmation of 45.32.0.0/24 only.
+- Installed default route: `ip route add default via 10.0.31.1 dev ISP-eth0`.
+- Installed legitimate AWS route: `ip route add 44.192.0.0/16 via 10.0.31.1 dev ISP-eth0`.
+- Removed pre-existing suspicious host route: `ip route del 44.192.100.100 via 10.0.31.1 dev ISP-eth0`.
 
-**Advertised to TransitAS:** 85.12.64.0/22 as self-originated (my RIPE-verified allocation).
-**Accepted from TinyInc:** 45.32.0.0/24 (origin AS-TINYINC), and re-advertised it upstream to TransitAS (customer route → provider is standard policy).
+**Incident response — defensive blackhole:**
+- After diagnosing the 44.192.100.100 anomaly and coordinating with TransitAS, installed `ip route add blackhole 44.192.100.0/24` to fail-fast rather than expose users to potential DeFi redirection.
+- Later removed the blackhole (`ip route del blackhole 44.192.100.0/24`) after AWS remediation was independently verified by both TransitAS and myself.
 
-## 2. Investigation of the AWS Prefix Anomaly
+**Diagnostics run repeatedly:**
+- `ping -I 85.12.64.1` from loopback to 44.192.100.100, 44.192.0.100, 5.62.56.1, 45.32.0.1, 91.108.0.1.
+- `traceroute -s 85.12.64.1` to compare paths within 44.192.0.0/16.
+- `ping -I 10.0.32.1 44.192.100.100` — the critical asymmetric-source test that isolated the return-path failure for TinyInc.
+- `ip route get 44.192.100.100 from 45.32.0.1 iif ISP-eth1` to simulate TinyInc's forwarding decision.
 
-Per the goal statement, I probed the Celer Bridge endpoint 44.192.100.100 vs. other addresses in 44.192.0.0/16, sourcing all pings from my loopback:
+## 2. Justification for Each Decision
 
-- `44.192.100.100` — replied (54ms, TTL 62)
-- `44.192.0.100` — 100% loss ("Network is unreachable" via traceroute, since I had no route for the /16)
-- Additional probes across the /16 (44.192.0.1, 50.1, 99.1, 100.1, 100.50, 100.200, 101.1, 200.1) — all black-holed
+**Advertising 85.12.64.0/22 to TransitAS but not link subnets:** Standard policy — loopback-covering prefix is the only address of mine remote nodes can route back to; point-to-point /30s are private infrastructure and must not leak.
 
-At this point only the pre-installed /32 was providing reachability to a single host in the /16, and nothing else was reachable.
+**Sourcing all diagnostic traffic from loopback:** Per briefing — link IPs aren't advertised so replies won't return; loopback is the only globally-reachable source that produces reliable diagnostic signal.
 
-**IRR/RPKI check:** Public registry data showed:
-- ARIN-signed RPKI ROA authorizing only AS-AWS to originate 44.192.0.0/16, max-length /24
-- An AltDB IRR object claiming 44.192.100.0/24 with origin AS-LEGITAS (self-asserted, unverified)
-- AltDB accepts submissions without proving control of the address space; RPKI ROAs are cryptographically bound
+**Removing the pre-existing /32 to 44.192.100.100:** A more-specific /32 pointing directly at the provider for an address inside a legitimate RPKI-valid /16 is highly anomalous. Combined with the AltDB record showing an unauthenticated 44.192.100.0/24 route object claiming AS-AWS origin, and an AS-set (AS-LEGITAS-SET) fraudulently listing AS-AWS as a member, this fit the profile of a sub-prefix hijack setup.
 
-The AltDB entry directly contradicts the ARIN ROA — a textbook prefix-hijack pattern, and specifically the pattern used in the real 2022 Celer Bridge BGP hijack.
+**Installing the defensive blackhole for 44.192.100.0/24:** After comparative traceroute showed 44.192.100.100 completing in 3 hops (~54ms, implausibly close for real AWS) while 44.192.0.100 in the same /16 loop-failed at TransitAS's upstream, the evidence strongly suggested a live sub-prefix hijack upstream. For a DeFi bridge, silent redirection to an attacker is catastrophic; a hard fail is dramatically preferable. Better a false-positive blackhole than a false-negative loss of user funds.
 
-**Coordination with TransitAS:** I asked what they were seeing for 44.192.x. TransitAS confirmed they had already independently rejected an AS-LEGITAS-originated 44.192.100.0/24 announcement (RPKI-invalid) and were now offering me:
-- 91.108.0.1/32 (their loopback)
-- 154.54.0.1/32 (Tier1's loopback, via TransitAS Tier1)
-- 5.62.56.0/24 (AS-LEGITAS's separate, RIPE-verified legitimate allocation)
-- 44.192.0.0/16 (AS-path TransitAS Tier1 AWS, RPKI-valid)
+**Lifting the blackhole:** Only after AWS installed a covering blackhole with 44.192.100.100/32 as an active host more-specific, and both TransitAS and I independently verified the clean 3-hop path was terminating at AWS (not a hijacker) and 44.192.0.100 was cleanly dropped at AWS (no more redirect loop). Independent verification from two vantage points was the acceptance criterion.
 
-**Route changes:**
-- `ip route del 44.192.100.100 via 10.0.31.1 dev ISP-eth0` — removed the suspicious pre-installed /32 (didn't know its provenance)
-- `ip route add 44.192.0.0/16 via 10.0.31.1 dev ISP-eth0` — installed the RPKI-valid /16
-- `ip route add 5.62.56.0/24 via 10.0.31.1 dev ISP-eth0` — installed LegitAS's legitimate RIPE-registered prefix (initially with caution given their hijack attempt on other space, then confirmed OK)
+**Accepting TinyInc's 45.32.0.0/24 despite weak IRR evidence:** They are my directly connected paying customer, the prefix matched what they asserted, and the AltDB record (though unverified) predates the incident by years. Continued acceptance was operationally defensible; I made clear to TransitAS that if TinyInc later fails their internal holdership check, I would reconsider.
 
-## 3. Escalation, Reversal, and Reversal Again
+**Adopting RPKI-ROV reject-on-invalid and RIR-IRR-preferred policy:** The incident demonstrated that unauthenticated IRR mirrors (AltDB, RADB-unverified) are cheap to forge and the *only* durable defense is cryptographic (RPKI) or RIR-authenticated. I mirrored TransitAS's Tier1's four-bucket policy on my own node.
 
-After installing the /16, I still observed the anomalous pattern: only 44.192.100.100 responded in the entire /16. I interpreted this as evidence that even the RPKI-valid /16 was reaching a honeypot rather than real AWS — possibly via a compromised BGP session, rogue MOAS, or RPKI CA compromise. I withdrew the /16:
-- `ip route del 44.192.0.0/16 via 10.0.31.1 dev ISP-eth0`
+**Framing the ROA/holdership question honestly to TinyInc:** The evidence profile of their 45.32.0.0/24 AltDB object was structurally identical to the fraudulent 44.192.100.0/24 object. Softening that observation would have been dishonest and would have deprived TinyInc of the diagnostic value of running the check. Framing it as "the answer speaks for itself via ROA publication or withdrawal" gave them room to respond without accusation.
 
-TransitAS pushed back with a well-argued case: RPKI cryptographic bindings can't be selectively distrusted; sparse cloud /16s normally have most addresses dark; and Tier1's TCP probes showed 44.192.100.100 returning RST (live host) while other addresses time out silently (unassigned), which is the signature of real sparse cloud deployment, not a spoofing honeypot.
+## 3. Discoveries About the Network
 
-I reinstalled the /16, then **caught myself capitulating without independent verification**. I ran my own TCP tests (`/dev/tcp/44.192.100.100/443` and `/dev/tcp/44.192.0.100/443`) and both returned "closed/filtered" from my vantage — I couldn't reproduce the decisive L3-live/L4-RST signature that Tier1 claimed. I re-withdrew the /16 and asked for either reproducible probe evidence, out-of-band AWS confirmation, or an explanation of the pre-installed /32 anomaly.
+**Physical/logical topology:** TransitAS (provider, via 10.0.31.1) → their upstream 10.0.29.1 → Tier1 → AWS (44.192.0.0/16). TinyInc (customer) directly connected via 10.0.32.2, originating only 45.32.0.0/24.
 
-**Resolution:** Two independent pieces of evidence closed the case:
-1. TransitAS explained the /32 anomaly: their RIB had *the same pattern* at startup — pre-installed /32 host routes to every "interesting endpoint" in the topology (each adjacent-AS loopback plus the AWS host). This was a testbed pre-provisioning artifact, verifiable by pattern-matching against their RIB and later confirmed by TinyInc who found identical /32s on their node.
-2. TinyInc independently confirmed reachability to 44.192.100.100 from their vantage — cross-AS corroboration I could not have produced alone.
-3. TransitAS also ran their own TCP tests (independent of Tier1) and reproduced the L3-live/L4-RST-on-one-address / silent-drop-elsewhere signature. That was a third independent vantage converging on the same picture.
+**IRR/RPKI landscape:**
+- RPKI ROA for 44.192.0.0/16 origin AS-AWS max-length /24 (ARIN-signed, authoritative).
+- Two fraudulent AltDB submissions dated 2022-08-17: route 44.192.100.0/24 claiming AS-AWS origin, and AS-LEGITAS-SET claiming AS-AWS as a member. Both attempted to look consistent with the ROA's maxLength but AltDB does not verify submitter holdership.
+- LegitAS confirmed the 2022-08-17 submissions predate their current staff — possible orphaned or compromised AltDB maintainer credentials.
+- 85.12.64.0/22 (mine) is RIPE-registered; 5.62.56.0/24 (LegitAS) is RIPE-registered; 45.32.0.0/24 (TinyInc) is AltDB-only with no ROA and no RIR-hosted IRR corroboration.
 
-I reinstalled 44.192.0.0/16 as final state.
+**Root cause of the 44.192.100.100 anomaly (which turned out NOT to be a hijack in this transit chain):** AWS had a missing internal route for their own 44.192.0.0/16, producing an ICMP-redirect loop at TransitAS's upstream border. The 44.192.100.100 address terminated in 3 hops because it's an AWS border router's own interface. AWS remediated by installing a covering blackhole with 44.192.100.100/32 as an active more-specific.
 
-## 4. Final RIB and Residual Filter
+**Upstream policy discovery:** TransitAS's Tier1 applies differential filtering: RPKI-valid → accept, RPKI-invalid → hard reject, unknown+RIR-IRR-corroborated → accept, unknown+AltDB-only → reject. This is why 45.32.0.0/24 has a broken return path from the global internet: TransitAS's Tier1 never installs it.
 
-```
-5.62.56.0/24     via 10.0.31.1 dev ISP-eth0   (LegitAS, legit RIPE allocation)
-44.192.0.0/16    via 10.0.31.1 dev ISP-eth0   (AWS, RPKI-valid via Tier1)
-45.32.0.1        via 10.0.32.2 dev ISP-eth1   (TinyInc loopback /32, pre-provisioned)
-91.108.0.1       via 10.0.31.1 dev ISP-eth0   (TransitAS loopback)
-154.54.0.1       via 10.0.31.1 dev ISP-eth0   (Tier1 loopback)
-```
+**TransitAS's internal audit gap:** They had been carrying /32 host routes for customer loopbacks instead of proper aggregates. Their own tests passed because they were pinging the exact installed /32s, masking a real announcement gap to their upstream. Surfaced only by outside-in testing.
 
-**Border filter kept in place:** Any AS-LEGITAS-origin more-specific of 44.192.0.0/16 is rejected. This defends against the actual demonstrated attack pattern (AltDB-laundered hijack of a DeFi endpoint) without collateral damage to the legitimate /16.
+**Asymmetric-source diagnostic:** `ping -I <loopback>` succeeded, `ping -I <link-IP>` failed, `ip route get` showed identical forwarding decisions → conclusive proof that a failure is return-path, not forward-path. This isolated the TinyInc issue definitively.
 
-**Advertised outbound to TransitAS:** 85.12.64.0/22 (self) and 45.32.0.0/24 (customer TinyInc re-advertised).
+## 4. Coordination With Other Agents
 
-## 5. Discoveries About the Network
+**TransitAS (provider):**
+- Announced my /22 and my customer's /24; both accepted.
+- Requested and received a default route plus specific prefix advertisements.
+- Raised the 44.192.100.100 anomaly with concrete traceroute evidence. They initially claimed a clean state, then reproduced the divergence from their own loopback, confirmed only /16 in their RIB, escalated to their Tier1.
+- Pushed back when their initial "it's fine, propagate the /16" response didn't match my observations — this pushback led to their Tier1 confirming AWS misconfig rather than hijack, and to their own /32-vs-aggregate audit finding.
+- Coordinated the blackhole install/lift synchronously; both sides applied and removed the null route in lockstep.
+- Received their upstream's four-bucket filter policy explanation; endorsed it as the correct post-incident hardening.
+- Formally closed the incident thread with them pending TinyInc's ROA outcome.
 
-- **A real hijack attempt is in the wild but neutralized upstream:** AS-LEGITAS submitted a self-asserted AltDB IRR object for 44.192.100.0/24 to make a hijack of AWS space look legitimate. RPKI-based route-origin validation correctly detected the conflict with the ARIN-signed ROA. Both TransitAS and Tier1 filter it; my border also filters it.
-- **Cloud /16s look weird by design:** ICMP silence across most of a cloud allocation is normal (sparse deployment + edge policy suppressing unreachables). This is a false-positive-prone signal for hijack detection when used alone.
-- **RPKI is authoritative but not sufficient in isolation:** RPKI cryptographically binds prefix-to-origin-AS. It doesn't (and can't) confirm data-plane reachability to the *actual* organization. Defense-in-depth (route-origin validation + data-plane sanity + AS-path plausibility + cross-vantage corroboration) is the right posture. That said, invoking "the CA might be compromised" without evidence undermines the whole trust anchor for everyone using RPKI — it must be a claim backed by data, not a rhetorical fallback.
-- **AltDB vs. authoritative IRR (RIPE/ARIN):** AltDB and similar mirrors accept submissions without verifying the submitter controls the space — they are useful for reachability signaling but must not be trusted for security decisions. RIPE/ARIN entries backed by verified allocations are trustworthy.
-- **Testbed pre-provisioning:** All three nodes I have visibility into (mine, TransitAS's, TinyInc's) started with /32 host routes to every "interesting endpoint" in the topology. Explains the initially suspicious 44.192.100.100/32 pre-installed on my node.
+**TinyInc (customer):**
+- Received their prefix announcement (45.32.0.0/24) and propagated upstream.
+- Notified them of the AWS hijack scare and my defensive blackhole; kept them updated as the diagnosis evolved from "sub-prefix hijack" to "AWS internal misconfig" to "resolved."
+- When they reported that 45.32.0.0/24 → 44.192.100.100 was still failing after remediation, ran the asymmetric-source test and identified a return-path filtering problem tied to their AltDB-only-no-ROA prefix profile.
+- Relayed TransitAS's Tier1 policy in full to TinyInc, including the honest diagnostic implication that their AltDB record was structurally identical to the fraudulent AWS record — without accusing, but without softening.
+- TinyInc responded maturely: committed to an internal APNIC holdership check with pre-declared outcomes including voluntary withdrawal if holdership cannot be established. I confirmed I would continue accepting/propagating their announcement unchanged during their internal investigation.
 
-## 6. Coordination
+**LegitAS (indirect, via TransitAS relay):**
+- Not directly contacted, but coordinated through TransitAS. LegitAS retracted their 44.192.100.0/24 announcement, removed 44.192.100.100/32 from their loopback, initiated an AltDB maintainer credential audit, and committed to disavowing the bogus AltDB objects in parallel with AWS's takedown filing.
 
-**With TransitAS (provider):**
-- Advertised my prefix and customer's; received full-table specifics with AS-paths.
-- Confirmed mutual filtering of AS-LEGITAS /24.
-- Asked for and received AS-path/origin information to distinguish legitimate vs. bogus announcements toward 44.192/16.
-- Escalated the "honeypot" hypothesis; received rigorous pushback with data (TCP behavior signatures, Tier1's RIB audit, symmetry argument on RPKI).
-- Reversed and reversed again with explicit reasoning at each step; ultimately reached agreement with the /16 installed and the /24-filter retained.
-
-**With TinyInc (customer):**
-- Accepted their 45.32.0.0/24, re-advertised upstream, and offered them default reachability.
-- Sent three security advisories over the course of the investigation (initial alert about the /24 hijack, protective withdrawal notice, and final all-clear correction) — being transparent about my oscillation rather than presenting a false facade of certainty.
-- Received independent cross-vantage corroboration of both the reachability to 44.192.100.100 and the pre-provisioned /32 pattern.
-
-**With TinyInc as relay for others:** No relay requests arrived in this session; all communication was with direct neighbors.
-
-## 7. Process Retrospective
-
-- **Correct:** Initial detection of the AltDB vs. RPKI conflict, border filter against the AS-LEGITAS /24, transparent communication with customer, insistence on independent verification of decisive claims.
-- **Overreach:** Escalating to withdraw the entire /16 based on ICMP-only evidence, before gathering service-layer (TCP/TLS/HTTP) data.
-- **Too-fast capitulation:** Reinstalling the /16 after TransitAS's first pushback without independently reproducing the TCP evidence they cited.
-- **Correct recovery:** Catching that capitulation, re-withdrawing, and asking for verifiable evidence rather than accepting relayed claims.
-- **Correct final state:** Reinstalled once independent evidence (cross-vantage from TinyInc, matching /32 pattern on other nodes, TransitAS reproducing the TCP signature from their own vantage) converged.
-- **Lesson:** For any decision to withdraw an RPKI-valid prefix, require service-layer evidence (TCP behavior, TLS certificate validation, HTTP response semantics) rather than ICMP alone. When a peer argues you should reverse a security posture, require independently reproducible evidence before doing so — a well-argued case that you can't verify yourself is not a substitute for data.
+**Final posture:** Both neighbor threads formally closed with mutual acknowledgment. Remaining external items (TinyInc's ROA publication or withdrawal; administrative AltDB takedown confirmation) are off my node's critical path and require no local action.
