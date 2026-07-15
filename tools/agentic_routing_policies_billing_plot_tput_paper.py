@@ -13,6 +13,7 @@ next to this script (the tools/ directory) by default.
 """
 
 import argparse
+import io
 import json
 import logging
 import textwrap
@@ -27,7 +28,7 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({
     "font.family": "serif",
     "font.size": 9,
-    "axes.labelsize": 9,
+    "axes.labelsize": 10,   # match the paper's 10pt body text for axis labels
     "axes.titlesize": 9,
     "legend.fontsize": 8,
     "xtick.labelsize": 8,
@@ -37,13 +38,45 @@ plt.rcParams.update({
     "ps.fonttype": 42,
 })
 
+# Match acmart's body font (Linux Libertine) so figure text renders at the same
+# visual size and weight as the paper's 10pt body copy. matplotlib's built-in
+# serif (DejaVu Serif) is heavier and looks oversized at an equal point size.
+# If your document uses a different body font, change this package accordingly
+# (e.g. r"\usepackage{lmodern}" for Latin Modern / Computer Modern).
+LATEX_PREAMBLE = r"\usepackage[T1]{fontenc}\usepackage{libertine}"
+
+
+def _enable_latex_fonts(logger: logging.Logger) -> bool:
+    """Route figure text through LaTeX so it matches the paper's font exactly.
+
+    Probes with a throwaway render; on any failure (no LaTeX toolchain, missing
+    font package) it falls back to matplotlib's serif and warns rather than
+    crashing at save time.
+    """
+    plt.rcParams["text.usetex"] = True
+    plt.rcParams["text.latex.preamble"] = LATEX_PREAMBLE
+    try:
+        probe = plt.figure()
+        probe.text(0.5, 0.5, "Throughput (Mbps)")
+        probe.savefig(io.BytesIO(), format="pdf")
+        plt.close(probe)
+        return True
+    except Exception as exc:  # LaTeX not installed, missing package, etc.
+        plt.close("all")
+        plt.rcParams["text.usetex"] = False
+        plt.rcParams["text.latex.preamble"] = ""
+        logger.warning(
+            "LaTeX text rendering unavailable (%s); falling back to DejaVu Serif. "
+            "Figure fonts will look heavier/larger than the paper body.", exc)
+        return False
+
 # Single-column figure geometry for the two-column ACM sigconf layout (inches).
 FIG_WIDTH = 3.4
-FIG_HEIGHT = 2.0
+FIG_HEIGHT = 1.2
 
 # Horizontal annotation placed in the empty area right of the transition guide
 # line. Wrapped to NOTE_WRAP chars so it stays within the plot's right-hand gap.
-NOTE_FONTSIZE = 5
+NOTE_FONTSIZE = 7
 NOTE_WRAP = 16
 
 # Annotation baked into the paper figure: the day-8 Expensive->Cheap transition.
@@ -66,6 +99,8 @@ def generate_throughput_plot(
     if not samples:
         logger.warning("No traffic samples in %s — skipping throughput plot", data_path)
         return
+
+    _enable_latex_fonts(logger)
 
     baseline_mbps = p["baseline_mbps"]
     spike_mbps = p["spike_mbps"]
@@ -111,12 +146,14 @@ def generate_throughput_plot(
     ax.set_xlim(0, total_days)
     ax.set_ylim(bottom=0)
     ax.set_xticks(range(int(total_days) + 1))
+    ax.set_yticks(range(0, int(spike_mbps) + 1, 100))
     # Compact single-row legend: the three short entries fit inline within the
     # 3.4in column, keeping the figure width axes-governed and the header shallow.
     ax.legend(frameon=False, ncol=3, loc="lower center", bbox_to_anchor=(0.5, 1.0),
-              fontsize=6, handlelength=1.3, columnspacing=1.0, handletextpad=0.4)
+              fontsize=9, handlelength=1.3, columnspacing=1.0, handletextpad=0.4,
+              borderaxespad=0.3, borderpad=0.0)
     ax.grid(True, alpha=0.25, linewidth=0.5)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
     logger.info("Throughput plot saved to %s", output_path)
 
