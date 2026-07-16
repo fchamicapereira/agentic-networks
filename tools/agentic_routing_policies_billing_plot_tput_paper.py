@@ -73,11 +73,11 @@ def _enable_latex_fonts(logger: logging.Logger) -> bool:
 
 # Single-column figure geometry for the two-column ACM sigconf layout (inches).
 FIG_WIDTH = 3.4
-FIG_HEIGHT = 1.2
+FIG_HEIGHT = 0.9
 
 # Horizontal annotation placed in the empty area right of the transition guide
 # line. Wrapped to NOTE_WRAP chars so it stays within the plot's right-hand gap.
-NOTE_FONTSIZE = 7
+NOTE_FONTSIZE = 6
 NOTE_WRAP = 16
 
 # Annotation baked into the paper figure: the day-8 Expensive->Cheap transition.
