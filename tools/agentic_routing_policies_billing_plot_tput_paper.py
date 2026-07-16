@@ -34,6 +34,7 @@ plt.rcParams.update({
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
     "axes.linewidth": 0.6,
+    "hatch.linewidth": 0.6,  # thin, crisp diagonal hatch on the Expensive band
     "pdf.fonttype": 42,   # embed TrueType so text stays selectable/searchable
     "ps.fonttype": 42,
 })
@@ -129,30 +130,48 @@ def generate_throughput_plot(
     bg_vals.append(baseline_mbps)
 
     fig, ax = plt.subplots(figsize=figsize)
-    # Ingress drawn on top (high zorder) as sparse round dots so it stays legible
-    # over the solid Expensive/Cheap lines. Call order is kept for legend order.
-    ax.plot(bg_times, bg_vals, color="k", linewidth=1.1, zorder=5,
+    # At any instant all traffic flows through exactly ONE path (the other is zero) and the two
+    # sum to the ingress, so the split is a composition — shown as stacked, filled bands rather
+    # than overlapping lines. The bands are told apart by FILL TEXTURE (smooth vs. diagonal
+    # hatch), not colour alone: that is what keeps each spike readable as Expensive-vs-Cheap in a
+    # black & white print, where red and blue both collapse to the same grey but the hatch does
+    # not. Ingress (dotted, high zorder) traces the top of the stack as the offered-load envelope.
+    cheap_top = via_cheap
+    stack_top = [c + e for c, e in zip(via_cheap, via_expensive)]
+    ax.plot(bg_times, bg_vals, color="k", linewidth=1.0, zorder=5,
             linestyle=(0, (1, 4)), dash_capstyle="round", label="Ingress traffic")
-    ax.plot(times, via_expensive, "r-", linewidth=1.3, label="Via Expensive")
-    ax.plot(times, via_cheap, "b-", linewidth=1.3, label="Via Cheap")
-    for day, text in (notes or []):
-        ax.axvline(day, color="gray", linewidth=0.8, linestyle=":")
-        _, ymax = ax.get_ylim()
-        # Horizontal note in the empty area to the right of the guide line.
-        ax.text(day + 0.2, ymax * 0.9, textwrap.fill(text, width=NOTE_WRAP),
-                va="top", ha="left", fontsize=NOTE_FONTSIZE, color="gray")
+    # Translucency is baked into the RGBA facecolor (not the alpha= kwarg, which would also dim
+    # the hatch); the edgecolor/hatch then draw at full opacity so the diagonal pattern stays
+    # crisp and clearly grey in a B&W print.
+    # Light pastel fills that read as "translucent" over the white page — but kept OPAQUE, not
+    # alpha-blended. An alpha-<1 fill wraps the collection in a PDF transparency group that many
+    # viewers render *without* its hatch (which is why the hatch vanished in the earlier alpha
+    # version); an opaque pastel of the same colour looks identical yet keeps the hatch. Expensive
+    # carries dark-red diagonal hatching (also its black & white cue); Cheap is a plain light blue.
+    ax.fill_between(times, cheap_top, stack_top, facecolor="#ffe0e0", edgecolor="red",
+                    linewidth=0.6, hatch="/////", zorder=2, label="Via Expensive")
+    ax.fill_between(times, 0, cheap_top, facecolor="#e3ecf9", edgecolor="blue",
+                    linewidth=0.6, zorder=2, label="Via Cheap")
     ax.set_xlabel("Elapsed simulated time (days)")
     ax.set_ylabel("Throughput (Mbps)")
     ax.set_xlim(0, total_days)
-    ax.set_ylim(bottom=0)
+    # Cap the top just above the spike level. Autoscale otherwise adds its default ~5% margin,
+    # leaving a distracting empty band above the 500 Mbps line.
+    ax.set_ylim(0, spike_mbps * 1.02)
     ax.set_xticks(range(int(total_days) + 1))
     ax.set_yticks(range(0, int(spike_mbps) + 1, 100))
+    # Notes placed after the limits are fixed so they anchor to the final axes height. The text
+    # sits over the light Cheap plateau, so grey text reads directly without a backing box.
+    _, ymax = ax.get_ylim()
+    for day, text in (notes or []):
+        ax.axvline(day, color="gray", linewidth=0.8, linestyle=":")
+        ax.text(day + 0.2, ymax * 0.96, textwrap.fill(text, width=NOTE_WRAP),
+                va="top", ha="left", fontsize=NOTE_FONTSIZE, color="dimgray")
     # Compact single-row legend: the three short entries fit inline within the
     # 3.4in column, keeping the figure width axes-governed and the header shallow.
     ax.legend(frameon=False, ncol=3, loc="lower center", bbox_to_anchor=(0.5, 1.0),
               fontsize=9, handlelength=1.3, columnspacing=1.0, handletextpad=0.4,
               borderaxespad=0.3, borderpad=0.0)
-    ax.grid(True, alpha=0.25, linewidth=0.5)
     fig.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
     logger.info("Throughput plot saved to %s", output_path)

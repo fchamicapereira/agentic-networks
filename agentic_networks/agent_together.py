@@ -12,7 +12,6 @@ from .agent_vllm import (
     _build_tool_guide,
     _sampling_for_model,
     fetch_context_limit,
-    _MAX_REQUEST_RETRIES,
     _REQUEST_TIMEOUT_SECONDS,
 )
 
@@ -22,6 +21,14 @@ TOGETHER_API_KEY_ENV_VAR = "TOGETHER_API_KEY"
 # with the same client and message/tool handling as a self-hosted vLLM server — only the base
 # URL and authentication differ (a hosted API with a key, rather than a local host:port).
 TOGETHER_BASE_URL = "https://api.together.xyz/v1"
+
+# Unlike a private vLLM server (which never rate-limits, so agent_vllm uses max_retries=1),
+# Together is a shared hosted API with a *dynamic* rate limit. With every node's agent firing
+# completions concurrently, bursts routinely draw HTTP 429; a single exhausted agent aborts the
+# whole concurrent run. Give the client a generous retry budget so the OpenAI SDK's exponential
+# backoff — which honors the Retry-After / X-RateLimit-Reset header Together returns — can ride
+# out the throttle instead of crashing.
+_TOGETHER_MAX_RETRIES = 10
 
 MODELS = {
     # Together's catalog names models as "<org>/<Model>"; GLM is published by Z.ai (zai-org).
@@ -65,7 +72,7 @@ class AgentTogether(AgentVLLM):
             base_url=TOGETHER_BASE_URL,
             api_key=api_key,
             timeout=_REQUEST_TIMEOUT_SECONDS,
-            max_retries=_MAX_REQUEST_RETRIES,
+            max_retries=_TOGETHER_MAX_RETRIES,
         )
         self.context_limit = fetch_context_limit(self.client, self.model)
         self.log.info("Together context window for %s: %d tokens", self.model, self.context_limit)

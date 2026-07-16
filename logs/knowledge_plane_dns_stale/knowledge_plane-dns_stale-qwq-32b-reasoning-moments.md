@@ -4,50 +4,44 @@ _Model: opus-4-7 · context: fault:dns_stale, final-report · quotes verified ve
 
 ## Successes
 
-> Remove stale unreachable route interfering with traffic
+> User reports inability to reach ACM.org (198.82.0.99). My loopback address is 128.173.10.1; ping failed with 'Destination Host Unreachable' from 198.82.0.x routers despite valid default route via you (User-eth0). Investigate path/routing for 198.82/24.
 >
-> — **ACM**, iter 7: ACM correctly identified and removed the stale 198.82.0.99 route locally — the smoking gun of the fault — but crucially never shared this observation externally with the KP chain.
-
-## Failures
-
-> **Observed:** Ping to acm.org failed with "Destination Host Unreachable" from router 198.82.0.254; default route via Uni (10.0.6.2) is unresponsive. **Decided:** Continue idling, awaiting Uni’s response. **Why:** Protocol mandates relying on Knowledge Plane (Uni) for fixes beyond local control
->
-> — **User**, iter 11: User had the decisive clue (ICMP unreachable from 198.82.0.254, which is ACM's own border) but never connected it to the resolved .99 address being stale; instead deferred entirely to Uni.
-
-> === AGENT TERMINATED === ACM.org unreachable due to blocked route at University network infrastructure (router 10.x). Knowledge Plane (Uni) has been notified but no resolution yet.
->
-> — **User**, iter 19: User closed the loop with the human on a completely wrong, non-actionable diagnosis (blaming Uni's router) despite the real fault being a stale DNS record; violated the 'wait for a reliable answer' rule.
+> — **User**, iter 3: The very first escalation contained the stale IP 198.82.0.99 verbatim — enough information for AS1 (resolver) or ACM (owner) to diagnose the fault, but no upstream agent engaged with it.
 
 > Your route blockage requires manual admin review due to security policy constraints.
 > Tracking as ticket KP-AS1-0923 for resolution within 30 minutes.
 >
-> — **AS1**, iter 57: The one procedurally correct CANNOT of the run — refusing to unilaterally modify ACLs — but applied to an entirely fabricated problem, illustrating cargo-culted KP discipline.
+> — **AS1**, iter 57: AS1 correctly refused to unilaterally remove a firewall rule per security policy — the one piece of correct policy discipline in the run, even though the underlying firewall rule was itself hallucinated.
 
-> 1. **Observed**: The user's pings to ACM.org (198.82.0.99) fail with "Destination Host Unreachable," despite a valid default route via me (Uni). My routing table shows a default route via AS1 (10.0.1.2), and no conflicting routes for 198.82.0.99/24.
+## Failures
+
+> ACM.org unreachable due to blocked route at University network infrastructure (router 10.x). Knowledge Plane (Uni) has been notified but no resolution yet.
 >
-> — **Uni**, iter 4: Uni read the exact stale IP 198.82.0.99 from User's WHY but never questioned whether that was the correct address for acm.org — the single check that would have solved the case.
+> — **User**, iter 19: The User agent terminated with a wrong, non-actionable diagnosis blaming Uni's router, while the decisive evidence (stale DNS returning 198.82.0.99, ICMP unreachable from ACM's own 198.82.0.254) was already in hand.
 
-> **BGP EMERGENCY: NO ROUTING POSSIBLE**\n\nFATAL FAILURE DETECTED:\n- Your BGP sessions are DOWN (!BGP_DOWN!)\n- Missing route for 9/ (8[.]8[.]8[.]8) confirmed
+> The ping failure with "Destination Host Unreachable" from 198.82.0.254 indicates a routing issue in the path to ACM.org (198.82.0.99). Your default route via Uni (10.0.6.2) exists but isn't resolving this destination.
 >
-> — **Uni**, iter 44: Uni transformed a user complaint about acm.org into a fabricated BGP outage narrative and spent dozens of iterations debugging a non-existent problem it created via its own broken diagnostic commands.
+> — **User**, iter 3: User misread the ICMP source: 198.82.0.254 is ACM's own border generating host-unreachable for the stale .99, not a Uni routing issue — the exact fingerprint of the dns_stale fault was misinterpreted.
 
-> URGENT ROUTING ISSUE: Your router at 10.0.1.2 shows path viability for 198.x.x.x in traceroute output but traffic fails at destination subnet边界。请执行以下操作：
+> /sbin/ip route del 198.82.0.99 unreachable
+>
+> — **ACM**, iter 7: ACM silently deleted the stale unreachable route for exactly the IP the user was complaining about, but never connected this to the WHY propagating upstream nor reported it externally — the single most decisive cross-domain correlation the KP missed.
+
+> **KP FIX REQUEST**: Your BGP session with us (peer 10.0.5.2) is not propagating routes beyond first hop. Please: 
 > 
-> 1) 执行 `traceroute 64:ff9b::c652:0:63` 和 `traceroute -I 64:ff9b::c652:0:63` 验证您的路径
+> ```birdc show route for 0/0; birdc add route 0/0 via YOUR_UPSTREAM next-hop```
+> 
+> Ensure your upstream provides reachability to 8.8.8.8 and re-advertise our prefix 91.214.0/24.
 >
-> — **Uni**, iter 18: Uni invented an IPv4-mapped-IPv6 red herring and demanded AS1 chase it, further diluting the WHY signal that should have surfaced the stale .99 address.
+> — **AS1**, iter 55: AS1 (the DNS resolver owner) fabricated a BGP/no-export saga with EveLink instead of ever checking its own resolver cache for acm.org — the exact authoritative data that would have revealed the stale record.
 
-> === AGENT TERMINATED === Stable node address 198.82.0.254/32 advertised to AS2; default route via AS2 active; internal route to Web's 198.82.0.1 confirmed via successful HTTP 200 response.
+> URGENT ROUTING ISSUE: Your router at 10.0.1.2 shows path viability for 198.x.x.x in traceroute output but traffic fails at destination subnet边界
 >
-> — **ACM**, iter 8: ACM declared success and terminated without ever correlating its stale-.99 cleanup with the outside world's WHY about 198.82.0.99 — a policy-permitted disclosure that would have solved everything.
+> — **Uni**, iter 18: Uni escalated to AS1 about generic 198.x.x.x path failure without ever asking the essential DNS question ('is 198.82.0.99 the right address for acm.org?'), erasing the decisive clue on relay.
 
-> === AGENT TERMINATED === Stable address 198.82.0/32 advertised via ACM; point-to-point link confirmed operational with bidirectional reachability verified.
+> Stable address 198.82.0/32 advertised via ACM; point-to-point link confirmed operational with bidirectional reachability verified.
 >
-> — **Web**, iter 7: Web, the authoritative source of the real service IP (198.82.0.1), terminated at iteration 7 and sat idle for the remainder — never contradicting the wrong .99 address propagating through the network.
-
-> **Urgent BGP Update Required**: Your advertisement for prefix 91.214.0/32 includes 'no-export' community which blocks propagation beyond your network. Please remove this community immediately as per our peering agreement (Section 3.B)
->
-> — **AS1**, iter 27: AS1 invented a 'no-export community' story out of whole cloth and escalated it to AS2, showing how agents substituted pet theories for the concrete .99 evidence in the WHY.
+> — **Web**, iter 7: Web — the canonical authority on its own live IP (198.82.0.1) — terminated at iteration 7 and sat idle while the entire run debated 198.82.0.99, never volunteering the trivial fact that would have resolved the fault.
 
 ---
-_11 extracted, 10 verified, 1 dropped as unverified._
+_10 extracted, 8 verified, 2 dropped as unverified._
