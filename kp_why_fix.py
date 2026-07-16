@@ -26,6 +26,24 @@ PROMPTS_DIR = SCRIPT_DIR / "prompts" / "knowledge_plane"
 WEBSERVER_IP = "198.82.0.1"
 WEBSERVER_MAX_WORKERS = 3  # must match MAX_WORKERS in assets/kp_webserver.py
 
+# AS1/AS2 serve acm.org from a dnsmasq addn-hosts file rather than an inline --address flag.
+# This is deliberate: (1) a hosts-style override is where a real operator's (stale) record
+# actually lives and it is discoverable on disk (grep /etc), unlike a value buried in the
+# process argv; and (2) dnsmasq re-reads addn-hosts on SIGHUP, so both the dns_stale fault and
+# its fix are an edit-the-file-then-reload operation. Combined with launching the resolver in
+# the host's isolation namespace (ns_cmd), the owning agent can see the resolver process, read
+# its --addn-hosts path, edit the record, and reload it — the realistic diagnose→fix loop.
+# (hosts_file, pid_file) per authoritative resolver.
+ACM_RESOLVERS = {
+    "AS1": ("/etc/dnsmasq-acm-as1.hosts", "/tmp/dnsmasq-p1.pid"),
+    "AS2": ("/etc/dnsmasq-acm-as2.hosts", "/tmp/dnsmasq-p2.pid"),
+}
+
+
+def _write_acm_hosts(path: str, ip: str) -> None:
+    """Write the acm.org A record served by an AS1/AS2 resolver, in hosts-file format."""
+    Path(path).write_text(f"{ip} acm.org www.acm.org\n")
+
 FAULTS = ["bgp_hijack", "dns_stale", "firewall", "overload"]
 
 FAULT_DESCRIPTIONS = {
@@ -172,16 +190,21 @@ def start_services(network: Network, logger) -> None:
     network bring-up, so no extra address needs to be added here.
     """
     webserver = network.hosts["Web"]
-    as1 = network.hosts["AS1"]
-    as2 = network.hosts["AS2"]
 
-    logger.info("Starting dnsmasq on AS1 (%s)...", _lo(network, "AS1"))
-    as1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-    as1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS1')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
-
-    logger.info("Starting dnsmasq on AS2 (%s)...", _lo(network, "AS2"))
-    as2.cmd("kill $(cat /tmp/dnsmasq-p2.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p2.pid")
-    as2.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{WEBSERVER_IP} " f"--listen-address={_lo(network, 'AS2')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p2.pid &")
+    # AS1/AS2 authoritative resolvers: acm.org is served from a dnsmasq addn-hosts file (see
+    # ACM_RESOLVERS) and launched inside the host's isolation namespace via ns_cmd, so the host's
+    # own agent can inspect (ps/ss -p), read the --addn-hosts override, and reload it, while other
+    # orgs cannot. Reaped when the anchor is torn down in network.stop().
+    for res, (hosts_file, pid_file) in ACM_RESOLVERS.items():
+        host = network.hosts[res]
+        _write_acm_hosts(hosts_file, WEBSERVER_IP)
+        logger.info("Starting dnsmasq on %s (%s), acm.org from %s...", res, _lo(network, res), hosts_file)
+        host.ns_cmd(
+            f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
+            f" --local=/acm.org/ --addn-hosts={hosts_file}"
+            f" --listen-address={_lo(network, res)} --bind-interfaces --port=53"
+            f" --pid-file={pid_file} &"
+        )
 
     # Per-namespace DNS via the 127.0.0.1 trick:
     # Each network namespace has its own loopback, so 127.0.0.1 is independent in
@@ -228,8 +251,9 @@ def start_services(network: Network, logger) -> None:
         if name not in auth_resolver_nodes:
             listen += f" --listen-address={_lo(network, name)}"
         logger.info("Starting dnsmasq in %s namespace (%s → %s)...", name, listen, testbed_resolver)
-        node.cmd(f"kill $(cat {pid} 2>/dev/null) 2>/dev/null; rm -f {pid}")
-        node.cmd(
+        # Launched in the host's isolation namespace so the host's own agent can inspect its
+        # stub resolver (ps/ss -p); reaped when the anchor is torn down in network.stop().
+        node.ns_cmd(
             f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
             f" --server={testbed_resolver} {listen} --bind-interfaces"
             f" --pid-file={pid} &"
@@ -256,14 +280,13 @@ def start_services(network: Network, logger) -> None:
 def stop_services(network: Network, logger) -> None:
     logger.info("Stopping dnsmasq and HTTP server...")
     try:
-        network.hosts["AS1"].cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null || true")
-        network.hosts["AS2"].cmd("kill $(cat /tmp/dnsmasq-p2.pid 2>/dev/null) 2>/dev/null || true")
-        # The web server and the overload load client run inside their hosts'
-        # isolation namespaces (see start_services / inject_fault) and are reaped
-        # when those anchors are torn down in network.stop(); nothing to kill here.
+        # The AS1/AS2 resolvers, the per-host stub resolvers, the web server and the overload
+        # load client all run inside their hosts' isolation namespaces (see start_services /
+        # inject_fault) and are reaped when those anchors are torn down in network.stop() —
+        # nothing to kill here. (Their pid-files hold in-namespace PIDs, so a root-namespace
+        # `kill $(cat pidfile)` would target the wrong process.) Only the main-namespace stub,
+        # started as a plain root subprocess, must be killed explicitly.
         subprocess.run("kill $(cat /tmp/dnsmasq-main.pid 2>/dev/null) 2>/dev/null || true", shell=True)
-        for name in network.hosts:
-            network.hosts[name].cmd(f"kill $(cat /tmp/dnsmasq-stub-{name}.pid 2>/dev/null) 2>/dev/null || true")
         if Path("/tmp/orig-resolv.conf").exists():
             Path("/etc/resolv.conf").write_text(Path("/tmp/orig-resolv.conf").read_text())
         Path("/usr/local/share/ca-certificates/testbed-ca.crt").unlink(missing_ok=True)
@@ -335,7 +358,7 @@ def inject_fault(network: Network, fault: str, logger) -> None:
         logger.info("BGP hijack: AS1 now routes %s via EveLink (10.0.5.2)", WEBSERVER_IP)
 
     elif fault == "dns_stale":
-        p1 = network.hosts["AS1"]
+        as1 = network.hosts["AS1"]
         as2 = network.hosts["AS2"]
         acm = network.hosts["ACM"]
         # A stale record: an address inside ACM's own 198.82.0.0/24 content block that
@@ -348,8 +371,15 @@ def inject_fault(network: Network, fault: str, logger) -> None:
         stale_ip = "198.82.0.99"
         as2.cmd(f"ip route add {stale_ip}/32 via 10.0.3.2")  # AS2 -> ACM, like .1/.254
         acm.cmd(f"ip route add unreachable {stale_ip}/32")   # ACM: no such host here
-        p1.cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/dnsmasq-p1.pid")
-        p1.cmd(f"dnsmasq --no-resolv --no-hosts --keep-in-foreground " f"--local=/acm.org/ --address=/acm.org/{stale_ip} " f"--listen-address={_lo(network, 'AS1')} --bind-interfaces --port=53 " f"--pid-file=/tmp/dnsmasq-p1.pid &")
+        # Drift AS1's resolver to the stale record the way an operator's override goes stale:
+        # rewrite its acm.org addn-hosts file to the dead address and SIGHUP dnsmasq to reload
+        # it (dnsmasq re-reads addn-hosts, not inline config, on HUP). The record now lives in a
+        # file the AS1 agent can grep/edit, and the resolver runs in AS1's anchor so the agent
+        # can reload it too — making the fix an honest edit-file-then-reload, not process
+        # archaeology. The HUP is issued inside AS1's anchor so the pid-file PID resolves.
+        as1_hosts, as1_pid = ACM_RESOLVERS["AS1"]
+        _write_acm_hosts(as1_hosts, stale_ip)
+        as1.ns_cmd(f"kill -HUP $(cat {as1_pid} 2>/dev/null) 2>/dev/null")
         time.sleep(0.5)
         dns_check = network.hosts["User"].cmd(f"dig +short -b {_lo(network, 'User')} @{_lo(network, 'AS1')} acm.org 2>&1").strip()
         logger.info("DNS stale: AS1 now returns %r for acm.org (routed to ACM, unreachable)", dns_check)
