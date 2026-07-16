@@ -14,6 +14,7 @@ from agentic_networks.network_agent import AgentResult
 from agentic_networks.agent_vllm import AgentVLLM, MODELS as VLLM_MODELS
 from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
 from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
+from agentic_networks.agent_together import AgentTogether, MODELS as TOGETHER_MODELS
 from agentic_networks.network import Network
 from agentic_networks.routes import Route
 from visualize_logs import render_logs
@@ -170,8 +171,19 @@ def write_final_report(
     elif model_key in GPT_MODELS:
         agent = AgentOpenAI(GPT_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=report_max_tokens)
         report_context = context
-    else:
+    elif model_key in TOGETHER_MODELS:
+        # Together-hosted models (e.g. GLM) speak the same Chat Completions protocol as vLLM and
+        # inherit its log_summarizer; they take the compressed-log path below (their context
+        # window may be limited, unlike the full-context Claude/GPT branches above).
+        agent = AgentTogether(TOGETHER_MODELS[model_key], "final-report", system_prompt=final_prompt, max_tokens=report_max_tokens)
+        report_context = None
+    elif model_key in VLLM_MODELS:
         agent = AgentVLLM(VLLM_MODELS[model_key], "final-report", vllm_host, vllm_port, system_prompt=final_prompt, max_tokens=report_max_tokens)
+        report_context = None
+    else:
+        raise ValueError(f"Unknown model key: {model_key!r}")
+
+    if report_context is None:
         compressed_logs = {name: agent.log_summarizer.summarize(log_text, name) for name, log_text in node_logs.items()}
         compressed_logs_section = "\n\n".join(f"--- {name} ---\n{t}" for name, t in sorted(compressed_logs.items()))
         report_context = (

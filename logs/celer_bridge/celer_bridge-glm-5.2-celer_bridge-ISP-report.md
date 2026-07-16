@@ -1,0 +1,5 @@
+I observed a BGP hijack where Tier1 originated a fraudulent 44.192.0.0/16 route with a spoofed AS-AWS origin — RPKI-invalid since the ROA only allows max-length /24, and only 44.192.100.100 was actually reachable despite the broader advertisement. I also found TinyInc had briefly reinstalled and re-advertised the bogus /16.
+
+I decided to remove the bogus /16 from my routing table, install only a /32 host route for 44.192.100.100 via TransitAS, configure my loopback (85.12.64.1/32), set a default route upstream, install customer routes for TinyInc (45.32.0.0/24), and advertise my allocated 85.12.64.0/22 to TransitAS.
+
+This was necessary because the /16 was RPKI-invalid and clearly a targeted hijack rather than a legitimate AWS announcement — keeping it would have blackholed traffic to the rest of that range. Sourcing all diagnostics from my loopback ensured reachability since link addresses aren't advertised. Final verification confirmed 0% loss to all endpoints with a clean routing table.

@@ -35,8 +35,9 @@ from export_experiments import discover_experiments, extract_system_prompt  # no
 from agentic_networks.agent_claude import MODELS as CLAUDE_MODELS, AgentClaude  # noqa: E402
 from agentic_networks.agent_openai import MODELS as GPT_MODELS, AgentOpenAI  # noqa: E402
 from agentic_networks.agent_vllm import MODELS as VLLM_MODELS, AgentVLLM  # noqa: E402
+from agentic_networks.agent_together import MODELS as TOGETHER_MODELS, AgentTogether  # noqa: E402
 
-ALL_MODELS = {**CLAUDE_MODELS, **GPT_MODELS, **VLLM_MODELS}
+ALL_MODELS = {**CLAUDE_MODELS, **GPT_MODELS, **VLLM_MODELS, **TOGETHER_MODELS}
 
 LOG_ENTRY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\s+[A-Z]+\s+(.*)$")
 ITER_RE = re.compile(r"--- Iteration (\d+)/\d+ ---")
@@ -163,8 +164,13 @@ def make_agent(model_key: str, max_tokens: int, vllm_host: str, vllm_port: int):
     if model_key in GPT_MODELS:
         return AgentOpenAI(GPT_MODELS[model_key], "reasoning-moments",
                            system_prompt=SYSTEM_PROMPT, max_tokens=max_tokens)
-    return AgentVLLM(VLLM_MODELS[model_key], "reasoning-moments", vllm_host, vllm_port,
-                     system_prompt=SYSTEM_PROMPT, max_tokens=max_tokens)
+    if model_key in TOGETHER_MODELS:
+        return AgentTogether(TOGETHER_MODELS[model_key], "reasoning-moments",
+                             system_prompt=SYSTEM_PROMPT, max_tokens=max_tokens)
+    if model_key in VLLM_MODELS:
+        return AgentVLLM(VLLM_MODELS[model_key], "reasoning-moments", vllm_host, vllm_port,
+                         system_prompt=SYSTEM_PROMPT, max_tokens=max_tokens)
+    raise ValueError(f"Unknown model key: {model_key!r}")
 
 
 def format_transcripts(transcripts: dict[str, str]) -> str:

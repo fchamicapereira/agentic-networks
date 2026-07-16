@@ -15,8 +15,10 @@ from .agent_openai import AgentOpenAI
 from .agent_openai import MODELS as GPT_MODELS
 from .agent_vllm import AgentVLLM
 from .agent_vllm import MODELS as VLLM_MODELS
+from .agent_together import AgentTogether
+from .agent_together import MODELS as TOGETHER_MODELS
 
-MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS}
+MODELS = {**CLAUDE_MODELS, **VLLM_MODELS, **GPT_MODELS, **TOGETHER_MODELS}
 
 Reactor = Callable[["AgenticNetwork", int], None]
 
@@ -88,8 +90,12 @@ def _create_network_agent(
         llm_agent = AgentClaude(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
     elif model_key in GPT_MODELS:
         llm_agent = AgentOpenAI(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
-    else:
+    elif model_key in TOGETHER_MODELS:
+        llm_agent = AgentTogether(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
+    elif model_key in VLLM_MODELS:
         llm_agent = AgentVLLM(model, node_name, vllm_host, vllm_port, system_prompt, max_tokens, tool_defs, window_size)
+    else:
+        raise ValueError(f"Unknown model key: {model_key!r}")
 
     return NetworkAgent(
         node_name=node_name,

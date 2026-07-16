@@ -1,0 +1,5 @@
+I audited my local configuration and confirmed my loopback (154.54.1.1/32), two interfaces (to AS1 and ACM), and existing routes. Connectivity tests from my loopback to AS1, Uni, and ACM all succeeded, including an HTTP 200 from ACM's web server.
+
+AS1 reported two issues from their customer Uni. First, 198.82.0.99 (acm.org) is unreachable — I found no route to it; my table only has 198.82.0.1 and 198.82.0.254 via ACM, so ACM hasn't advertised that prefix. Second, Uni experiences TCP timeouts to 198.82.0.1, but I can curl it successfully and my iptables/nftables have zero filtering rules.
+
+I escalated both issues to ACM: asking them to either advertise 198.82.0.99 or fix the DNS record, and to check for ACLs filtering Uni's 128.173.x.x subnet. I confirmed to AS1 that AS2 is not the cause. I chose not to modify any neighbor configurations because both problems originate in ACM's domain, and ACL changes require admin approval per policy.

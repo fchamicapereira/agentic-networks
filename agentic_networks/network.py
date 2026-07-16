@@ -1,5 +1,6 @@
 import csv
 import shutil
+import subprocess
 import tempfile
 import time
 
@@ -53,11 +54,76 @@ class NetworkHost(Host):
         self.cmd(f"rm -rf /var/run/frr/{self.name}")
         self.cmd(f"mkdir -p /var/run/frr/{self.name}")
         self.cmd(f"chown frr:frr /var/run/frr/{self.name}")
+        # Populated by start_isolation(); when set, this host runs its commands in
+        # a private PID+mount namespace (see below).
+        self.anchor_pid: int | None = None
+        self._anchor_outer: int | None = None
 
     def cmd(self, *args, **kwargs) -> str:
         result = super().cmd(*args, **kwargs)
         assert isinstance(result, str)
         return result
+
+    # --- Per-host PID/mount-namespace isolation --------------------------------
+    # Vanilla mininet hosts share the PID (and procfs) namespace, so any host's
+    # `ps`/`/proc` sees every other host's processes and the experiment
+    # orchestrator's command line. start_isolation() anchors a private PID+mount
+    # namespace per host (sharing the host's network namespace); ns_cmd/ns_popen
+    # then run commands inside it. Per-host anchors are siblings, so a host sees
+    # only its own processes, while the network-level view (`ss`) is unchanged.
+    #
+    # mnexec's `-a` cannot re-enter a PID namespace, so isolated execution goes
+    # through `nsenter` rather than host.popen. This is opt-in (Network.start
+    # isolate_hosts=True); experiments that rely on FRR unix sockets keep the
+    # default shared-namespace behaviour.
+
+    def start_isolation(self) -> None:
+        # A long-lived `sleep` is the namespace's init; killing it later tears the
+        # namespace down along with everything running in it. --fork makes the
+        # sleep (not unshare) the process placed in the new PID namespace.
+        outer = int(self.cmd(
+            "unshare --pid --mount --fork --mount-proc sleep infinity "
+            ">/dev/null 2>&1 & echo $!"
+        ).strip().split()[-1])
+        inner = outer
+        for _ in range(100):
+            try:
+                children = open(f"/proc/{outer}/task/{outer}/children").read().split()
+            except OSError:
+                children = []
+            if children:
+                inner = int(children[0])
+                break
+            time.sleep(0.05)
+        self._anchor_outer = outer
+        self.anchor_pid = inner
+
+    def stop_isolation(self) -> None:
+        # Killing the namespace's init (inner) makes the kernel reap everything in
+        # it; the outer unshare wrapper is cleaned up too.
+        for pid in (self.anchor_pid, self._anchor_outer):
+            if pid:
+                subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+        self.anchor_pid = None
+        self._anchor_outer = None
+
+    def _nsenter_argv(self, command: str) -> list[str]:
+        assert self.anchor_pid is not None
+        return ["nsenter", "--target", str(self.anchor_pid),
+                "--net", "--mount", "--pid", "--", "bash", "-c", command]
+
+    def ns_cmd(self, command: str) -> str:
+        # Blocking command inside the host's isolation namespace (like host.cmd,
+        # but in the private PID+mount namespace). Used to launch a host's own
+        # inspectable workload (services, fault loads) so its agent can see them.
+        result = subprocess.run(self._nsenter_argv(command), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+        return result.stdout
+
+    def ns_popen(self, command: str, **kwargs) -> subprocess.Popen:
+        # Popen-compatible entry point for agent command execution inside the
+        # isolation namespace (see MininetHost.exec).
+        return subprocess.Popen(self._nsenter_argv(command), **kwargs)
 
     def zebra(self, config_file: Path) -> str:
         return self.cmd(f"/usr/lib/frr/zebra -d -N {self.name} -f {config_file} 2>&1")
@@ -171,11 +237,18 @@ class Network:
 
         return table.get_string()
 
-    def start(self) -> None:
+    def start(self, isolate_hosts: bool = False) -> None:
         # Start a live Mininet emulation for this network topology.
         #
         # Populates self.net and self.hosts with real Mininet objects.
-        # Call self.net.stop() when done.
+        # Call self.stop() when done.
+        #
+        # isolate_hosts=True gives each host a private PID+mount namespace so an
+        # agent's `ps`/`/proc` sees only its own host's processes, not other
+        # hosts' or the orchestrator's (see NetworkHost.start_isolation). Opt-in
+        # because it routes agent execution through nsenter and gives each host a
+        # private mount namespace, which experiments relying on FRR unix sockets
+        # do not need.
         self.net = Mininet(link=TCLink, host=NetworkHost)
         self.hosts = {name: cast(NetworkHost, self.net.addHost(name, ip=None)) for name in self.ifaces_per_host}
 
@@ -194,6 +267,12 @@ class Network:
             for iface in ifaces:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
+
+        if isolate_hosts:
+            # After interfaces/routes exist, anchor each host's private PID+mount
+            # namespace (it inherits the fully-configured network namespace).
+            for host in self.hosts.values():
+                host.start_isolation()
 
     def clear_routing_tables(self, keep_connected: bool = True) -> None:
         # Flush routes on every node so agents must establish reachability themselves.
@@ -416,6 +495,11 @@ class Network:
     def stop(self) -> None:
         # Stop the live Mininet emulation.
         assert self.net is not None, "stop() called on a network that was never started"
+        # Tear down per-host isolation namespaces first; killing each anchor reaps
+        # everything running inside it (services, fault loads).
+        for host in self.hosts.values():
+            if host.anchor_pid is not None:
+                host.stop_isolation()
         self.net.stop()
 
     def print(self):

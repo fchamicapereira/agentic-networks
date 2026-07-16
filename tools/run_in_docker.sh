@@ -55,6 +55,7 @@ docker run --rm \
     -w /workspace \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    -e TOGETHER_API_KEY="${TOGETHER_API_KEY:-}" \
     -e TQDM_DISABLE="${TQDM_DISABLE:-}" \
     "$IMAGE_NAME" \
     sudo -E /app/env/bin/python3 "$PYTHON_SCRIPT_REL" $SCRIPT_ARGS

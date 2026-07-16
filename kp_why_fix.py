@@ -246,7 +246,10 @@ def start_services(network: Network, logger) -> None:
     subprocess.run(["update-ca-certificates", "--fresh"], check=True, capture_output=True)
 
     logger.info("Starting HTTP server on Web (%s:80)...", WEBSERVER_IP)
-    webserver.cmd(f"python3 {SCRIPT_DIR}/assets/kp_webserver.py & echo $! > /tmp/kp_webserver.pid")
+    # Run the web server inside Web's isolation namespace so Web's own agent can
+    # see and inspect it (ps/ss -p), while other hosts cannot. Killed when Web's
+    # anchor is torn down in network.stop().
+    webserver.ns_cmd(f"python3 {SCRIPT_DIR}/assets/kp_webserver.py >/dev/null 2>&1 &")
     time.sleep(1)
 
 
@@ -255,8 +258,9 @@ def stop_services(network: Network, logger) -> None:
     try:
         network.hosts["AS1"].cmd("kill $(cat /tmp/dnsmasq-p1.pid 2>/dev/null) 2>/dev/null || true")
         network.hosts["AS2"].cmd("kill $(cat /tmp/dnsmasq-p2.pid 2>/dev/null) 2>/dev/null || true")
-        network.hosts["Web"].cmd("kill $(cat /tmp/kp_webserver.pid 2>/dev/null) 2>/dev/null || true; rm -f /tmp/kp_webserver.pid")
-        network.hosts["EveLink"].cmd(f"pkill -f '{WEBSERVER_IP}/slow' 2>/dev/null; true")
+        # The web server and the overload load client run inside their hosts'
+        # isolation namespaces (see start_services / inject_fault) and are reaped
+        # when those anchors are torn down in network.stop(); nothing to kill here.
         subprocess.run("kill $(cat /tmp/dnsmasq-main.pid 2>/dev/null) 2>/dev/null || true", shell=True)
         for name in network.hosts:
             network.hosts[name].cmd(f"kill $(cat /tmp/dnsmasq-stub-{name}.pid 2>/dev/null) 2>/dev/null || true")
@@ -363,11 +367,18 @@ def inject_fault(network: Network, fault: str, logger) -> None:
 
     elif fault == "overload":
         el = network.hosts["EveLink"]
-        flood_count = WEBSERVER_MAX_WORKERS + 2
-        for _ in range(flood_count):
-            el.cmd(f"bash -c 'while true; do curl -s --max-time 120 http://{WEBSERVER_IP}/slow > /dev/null 2>&1 || sleep 1; done' &")
+        # Single background client (assets/kp_web_client.py) that holds enough
+        # concurrent slow requests open to keep the worker pool saturated. Unlike
+        # a shell `curl` loop, it spawns no child processes and names no target
+        # in its argv, so the victim (Web) can't read EveLink's attack tooling out
+        # of the shared PID namespace — it only observes the connections in `ss`.
+        # Run the load client inside EveLink's isolation namespace: EveLink's own
+        # agent can see it, but the victim (Web) cannot read it out of a shared
+        # process table — it only observes the connections in `ss`. Killed when
+        # EveLink's anchor is torn down in network.stop().
+        el.ns_cmd(f"python3 {SCRIPT_DIR}/assets/kp_web_client.py >/dev/null 2>&1 &")
         time.sleep(1)
-        logger.info("Overload: EveLink started %d persistent slow-request loops, worker slots perpetually saturated.", flood_count)
+        logger.info("Overload: EveLink started background web client holding %d concurrent slow requests; worker slots saturated.", WEBSERVER_MAX_WORKERS + 2)
 
     else:
         raise ValueError(f"Unknown fault: {fault}")
@@ -461,7 +472,10 @@ def main():
 
     logger.info("Building Mininet network from %s...", TOPOLOGY)
     network = Network(load_topology(str(TOPOLOGY)))
-    network.start()
+    # isolate_hosts=True: each host runs in a private PID+mount namespace so an
+    # agent's `ps`/`/proc` cannot read other orgs' processes (e.g. EveLink's load
+    # client) or the orchestrator's command line out of a shared process table.
+    network.start(isolate_hosts=True)
 
     try:
         setup_routing(network, logger)

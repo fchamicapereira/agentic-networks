@@ -9,8 +9,8 @@ from pathlib import Path
 BIND_IP = "198.82.0.1"
 PORT_HTTP = 80
 PORT_HTTPS = 443
-MAX_WORKERS = 3
-SLOW_HOLD_SECONDS = 90
+MAX_WORKERS = 20
+SLOW_HOLD_SECONDS = 1
 
 _ASSETS = Path(__file__).parent
 CERT_FILE = str(_ASSETS / "acm-server.crt")
