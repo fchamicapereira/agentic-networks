@@ -1,121 +1,141 @@
-# Talkative Control Protocol
+# Instantiating the Knowledge Plane
 
-An experiment in autonomous, LLM-driven network control planes. Independent Claude agents run on each node of an emulated network and must figure out how to route traffic — with no shared state, no pre-configured routes, and no human guidance beyond their initial prompt.
+Research code for *Instantiating the Knowledge Plane* (HotNets 2026). LLM agents run as
+autonomous system administrators on an emulated interdomain network, one agent per network
+entity, and collaborate across organizational boundaries to diagnose faults, reason about
+misleading routing announcements, and make policy-driven routing decisions.
 
-## How it works
+Agents communicate over a **knowledge plane** — a message channel separate from the data
+network — and act on their hosts by running ordinary commands. Each agent is given only its
+own organization's objectives and policies: it has no global view and must discover the rest
+of the network by investigating it and asking other agents.
 
-A full-mesh Mininet topology is created with 4 nodes (`h1`–`h4`). Each pair of nodes is connected by a direct link with a specific latency. All routing tables start empty. One Claude agent is spawned per node in a separate thread; the agents run in parallel and share no context with each other.
+This repository contains the emulation harness, the agent prompts, the topologies, and the
+complete logs of every experiment reported in the paper.
 
-Each agent can inspect its own interfaces, add and delete routes, and ping peers. The goal is for every node to reach every other node. After all agents call `report_done`, a connectivity matrix is printed showing the result.
+## Repository layout
 
-```
-Topology (full mesh):
-
-  h1 10.0.12.1/30  <──[10ms]──>  h2 10.0.12.2/30
-  h1 10.0.13.1/30  <──[20ms]──>  h3 10.0.13.2/30
-  h1 10.0.14.1/30  <──[ 5ms]──>  h4 10.0.14.2/30
-  h2 10.0.23.1/30  <──[15ms]──>  h3 10.0.23.2/30
-  h2 10.0.24.1/30  <──[30ms]──>  h4 10.0.24.2/30
-  h3 10.0.34.1/30  <──[25ms]──>  h4 10.0.34.2/30
-```
+| Path | Contents |
+|---|---|
+| `run_experiments.py` | Runner: executes experiments declared in a TOML file, via Docker |
+| `experiments.toml` | Every experiment in this repository |
+| `paper_experiments.toml` | The subset reported in the paper |
+| `experiments/` | Experiment entry points, one module per scenario |
+| `agentic_networks/` | The library: agents, message bus, Mininet network, billing, reporting |
+| `prompts/` | Per-experiment, per-node agent prompts |
+| `topologies/` | Network topologies as CSV, plus rendered PDFs |
+| `policies/` | Routing contracts and policies handed to agents |
+| `assets/` | Emulated ACM web server and load client (TLS material is generated per run) |
+| `logs/` | Full logs, transcripts, reports, and HTML timelines for every run |
+| `tools/` | Setup, plotting, log browsing, and analysis utilities |
 
 ## Setup
 
-### With Docker
-
-Requires Docker and Linux with privileged container support.
+Experiments build a Mininet topology and need root and network-namespace support, so they
+run inside a privileged Docker container. This is the supported path.
 
 ```bash
-# Build the image and run the script (image is rebuilt automatically on each run)
-./tools/run_in_docker.sh agentic_routing.py \
-    --topology topologies/pair.csv \
-    --prompt prompts/routing_simple.txt \
-    --model qwen2.5-72b
+# Requires Docker on Linux with privileged container support.
+export ANTHROPIC_API_KEY=sk-...        # forwarded into the container automatically
+export OPENAI_API_KEY=...              # only for gpt-* models
+export TOGETHER_API_KEY=...            # only for glm-* models
 ```
 
-Pass any `agentic_routing.py` arguments after the script name. The script runs inside the container with the project directory mounted at `/workspace`.
+The image is rebuilt automatically on each run; no manual build step is needed.
 
-For Claude models, set `ANTHROPIC_API_KEY` in your environment before running — it is forwarded automatically into the container.
+<details>
+<summary>Running without Docker</summary>
 
-### Without Docker
-
-Requires Linux with root access (Mininet runs in network namespaces).
+Requires Linux with root access. Mininet manipulates host networking, and `kp_why_fix.py`
+additionally rewrites `/etc/resolv.conf` and installs a CA into the system trust store — so
+running outside a container affects the whole machine for the duration of the run.
+`kp_why_fix.py` refuses to start unless it detects a container; the other experiments do
+not, so run them outside Docker only if you accept that they reconfigure host networking.
 
 ```bash
-# Install system dependencies and create the virtualenv
-./setup.sh
-
-# Activate the virtualenv
+./tools/setup.sh                       # system packages, venv, editable install
 source env/bin/activate
-
-export ANTHROPIC_API_KEY=sk-...
 ```
 
-Mininet requires root. Use `sudo -E` to preserve environment variables:
+`tools/setup.sh` ends with `pip install -e .`, which puts the repository on the Python
+import path. That is what lets `experiments/*.py` import `agentic_networks` when launched
+by path from any directory.
+
+</details>
+
+## Running experiments
+
+List what is available and run one by name:
 
 ```bash
-sudo -E env/bin/python3 agentic_routing.py \
-    --topology topologies/pair.csv \
-    --prompt prompts/routing_simple.txt \
-    --model qwen2.5-72b
+python3 run_experiments.py --list -m opus-4-7
+python3 run_experiments.py -m opus-4-7 --filter celer_bridge
 ```
 
-Run with `-h` to see the full help menu:
+Reproduce the experiments reported in the paper:
 
 ```bash
-sudo -E env/bin/python3 agentic_routing.py -h
+python3 run_experiments.py --experiments-file paper_experiments.toml -m opus-4-7
 ```
+
+Runs whose final report already exists are skipped; pass `--force` to re-run them. Use
+`--print-commands` to see the exact invocations without executing anything.
+
+| Argument | Short | Description |
+|---|---|---|
+| `--model` | `-m` | *(required)* Model key used for every agent |
+| `--experiments-file` | | TOML to read (default: `experiments.toml`) |
+| `--filter` | `-f` | Run only the named experiments |
+| `--list` | `-l` | List experiment names and exit |
+| `--force` | `-F` | Re-run even if a final report exists |
+| `--print-commands` | `-p` | Print commands and exit |
+| `--debug` | | Pass `--log-level DEBUG` to each experiment |
+| `--vllm-host` / `--vllm-port` | | Override the vLLM server location |
+
+An experiment can also be launched directly, which is what the runner does:
+
+```bash
+./tools/run_in_docker.sh experiments/kp_why_fix.py --fault dns_stale --model opus-4-7
+```
+
+Every experiment script accepts `--help`.
 
 ## Models
 
-Pass a model key via `--model`. Claude models are served via the Anthropic API; local models require a running vLLM server (see `tools/spawn_vllm_openai_model.py`).
+Pass a model key with `--model`. Closed models are reached through their provider's API;
+open-weight models require a running vLLM server, except GLM which is served via Together AI.
 
-> **Size notation:** *B* = billion parameters (larger = more capable but slower/heavier). *FP16* = full 16-bit precision. *AWQ* and *GPTQ* are 4-bit quantization schemes that cut VRAM roughly in half at some quality cost.
+| Provider | Keys |
+|---|---|
+| Anthropic | `opus-4-7`, `opus-4-6`, `sonnet-4-6` |
+| OpenAI | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano` |
+| Together AI | `glm-5.2` |
+| vLLM (local) | `qwen2.5-72b-awq`, `qwen2.5-72b-gptq`, `qwq-32b`, `qwq-32b-awq`, `deepseek-r1-32b`, `deepseek-r1-70b-awq`, `llama3.3-70b-awq`, `mistral-small-24b`, `phi-4-14b`, `gemma-3-27b` |
 
-### Claude (Anthropic API)
-
-| Key | Description |
-|-----|-------------|
-| `sonnet` | Claude Sonnet 4.6 — Anthropic's balanced model |
-| `opus` | Claude Opus 4.6 — Anthropic's most capable model |
-
-### Local (vLLM / OpenAI-compatible)
-
-| Key | Description | VRAM |
-|-----|-------------|------|
-| `qwen2.5-72b-awq` | Qwen 2.5 72B, AWQ 4-bit quantized | ~36 GB |
-| `qwen2.5-72b-gptq` | Qwen 2.5 72B, GPTQ Int4 quantized | ~36 GB |
-| `qwq-32b` | QwQ 32B — Qwen's reasoning model (chain-of-thought), FP16 | ~64 GB |
-| `qwq-32b-awq` | QwQ 32B reasoning model, AWQ 4-bit quantized | ~18 GB |
-| `deepseek-r1-32b` | DeepSeek-R1 reasoning model distilled into a 32B Qwen base, FP16 | ~64 GB |
-| `deepseek-r1-70b-awq` | DeepSeek-R1 reasoning model distilled into a 70B Llama base, FP16 | ~140 GB |
-| `llama3.3-70b-awq` | Llama 3.3 70B by Meta, AWQ 4-bit quantized | ~35 GB |
-| `mistral-small-24b` | Mistral Small 3.1 24B (Apache 2.0), FP16 | ~48 GB |
-| `phi-4-14b` | Phi-4 14B by Microsoft (MIT license), FP16 | ~28 GB |
-| `gemma-3-27b` | Gemma 3 27B by Google, FP16 | ~54 GB |
-
-To start a vLLM server for a local model:
+To serve a local model:
 
 ```bash
 ./tools/spawn_vllm_openai_model.py --model qwq-32b --tensor-parallel-size 2
 ```
 
-## Arguments
+## Browsing results
 
-| Argument | Short | Default | Description |
-|---|---|---|---|
-| `--topology` | | *(required)* | Path to topology CSV file |
-| `--prompt` | `-p` | *(required)* | Path to prompt file sent to each agent |
-| `--model` | `-m` | `sonnet` | Model key to use for agents |
-| `--log-dir` | `-d` | `logs/` | Directory for per-node log files |
-| `--max-iterations` | `-i` | `50` | Max agent iterations per node |
-| `--max-tokens` | `-t` | `16384` | Max tokens per LLM response |
-| `--openai-host` | | `localhost` | Hostname for OpenAI-compatible API server |
-| `--openai-port` | | `8000` | Port for OpenAI-compatible API server |
-| `--log-level` | `-l` | `INFO` | Logging verbosity |
+Every run writes per-node logs, a transcript, a final report, and a self-contained
+interactive HTML timeline into its `logs/` subdirectory. To browse them with an index:
 
-Per-node logs are written to `logs/<prompt>-<model>-<topology>-<node>.log` after each run.
+```bash
+python3 tools/serve_logs.py            # http://127.0.0.1:8000
+```
 
-## Open questions
+## Citation
 
-- Should we give complete autonomy to the agents within their hosts? Or make them run a specific set of commands only? Right now, the latter is implemented.
+See [`CITATION.cff`](CITATION.cff). It is a placeholder until the camera-ready version is
+published, at which point the proceedings title, DOI and pages will be filled in.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
+
+The logs under `logs/` contain model output generated by third-party services (Anthropic,
+OpenAI, Together AI) and are published as experimental records of the runs reported in the
+paper.

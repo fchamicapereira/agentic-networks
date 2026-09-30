@@ -40,7 +40,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from agentic_networks.agentic_network import MODELS
 from agentic_networks.network_agent import AgentResult
-from experiment import collect_node_logs, setup_logging, write_final_report
+from agentic_networks.experiment import collect_node_logs, setup_logging, write_final_report
 
 DEFAULT_PROMPTS_ROOT = REPO_ROOT / "prompts"
 

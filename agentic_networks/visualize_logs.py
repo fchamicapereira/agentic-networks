@@ -6,10 +6,10 @@ downward; iterations ("epochs") are the synchronization primitive across hosts, 
 epoch events are ordered globally by timestamp so vertical position reflects real ordering.
 
 Usage:
-    ./visualize_logs.py LOG1 LOG2 ... [-o OUT.html] [--open]
+    python -m agentic_networks.visualize_logs LOG1 LOG2 ... [-o OUT.html] [--open]
 
 Programmatic use:
-    from visualize_logs import render_logs, parse_logs
+    from agentic_networks.visualize_logs import render_logs, parse_logs
     html = render_logs(["a.log", "b.log"], output_path="out.html")
 """
 
@@ -22,10 +22,11 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .paths import ASSETS_DIR
+
 # The HTML/CSS/JS shell lives in assets/ to keep this module readable. It is inlined into every
 # rendered file, so the *output* stays fully self-contained even though the template is external.
-_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-_TEMPLATE_PATH = _ASSETS_DIR / "timeline_template.html"
+_TEMPLATE_PATH = ASSETS_DIR / "timeline_template.html"
 _DATA_PLACEHOLDER = "__DATA_JSON__"
 
 # A log record starts with "HH:MM:SS  LEVEL  ...". Lines without this header are continuation

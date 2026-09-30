@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
 from agentic_networks.agentic_network import AgenticNetwork, MODELS
-from experiment import (
+from agentic_networks.experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
     collect_node_logs,

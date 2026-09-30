@@ -19,6 +19,6 @@ cd "$REPO_ROOT"
 for csv in "$TOPO_DIR"/*.csv; do
     name="$(basename "$csv" .csv)"
     echo "==> $name"
-    python render_topology.py "$csv" -o "$TOPO_DIR/$name.pdf"
-    python optimal_routing.py       "$csv" -o "$TOPO_DIR/$name-optimal-routing.pdf"
+    python tools/render_topology.py "$csv" -o "$TOPO_DIR/$name.pdf"
+    python tools/optimal_routing.py       "$csv" -o "$TOPO_DIR/$name-optimal-routing.pdf"
 done

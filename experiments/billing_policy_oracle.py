@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Billing-policy routing experiment.
+Oracle billing-policy routing experiment.
 
-Starts with routing pre-configured (all ISP traffic through Expensive),
-background UDP traffic already flowing, and a simulated billing clock running.
-ISP agents must figure out how to minimise transit costs given percentile billing.
+Identical to experiments/billing_policy.py except:
+  - The spike schedule is fixed (not a CLI argument).
+  - The ISP agent is given the full spike schedule upfront in its prompt.
 
-Multiple traffic spikes are injected at configurable hours throughout the billing
-period. A throughput plot is generated at the end.
+The fixed schedule matches:
+  --spike-hours 24:6 42:6 72:6 96:12 120:6 144:6 168:120 --days 14
 """
 
 import argparse
-import json
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
@@ -21,7 +19,14 @@ from agentic_networks.agentic_network import AgenticNetwork, MODELS
 from agentic_networks.billing_clock import BillingClock
 from agentic_networks.traffic_generator import TrafficGenerator
 from agentic_networks.traffic_sampler import TrafficSampler
-from experiment import (
+from experiments.billing_policy import (
+    SpikeWindow,
+    remote_addrs,
+    setup_routing,
+    save_plot_data,
+)
+from agentic_networks.billing_plot import generate_throughput_plot
+from agentic_networks.experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
     collect_node_logs,
@@ -33,155 +38,19 @@ from experiment import (
     write_final_report,
     write_timeline_html,
 )
-from tools.agentic_routing_policies_billing_plot_tput import generate_throughput_plot
-
-# ---------------------------------------------------------------------------
-# Data types
-# ---------------------------------------------------------------------------
 
 
-@dataclass
-class SpikeWindow:
-    time: float   # hours from experiment start
-    duration: float  # hours
-
-
-# ---------------------------------------------------------------------------
-# Address assignments come from the topology's loopbacks. Each node's announced
-# prefix is the /24 containing its loopback.
-# ---------------------------------------------------------------------------
-
-
-def _announced_prefix(loopback: str) -> str:
-    # "85.12.64.1/32" -> "85.12.64.0/24"
-    a, b, c, _ = loopback.split("/")[0].split(".")
-    return f"{a}.{b}.{c}.0/24"
-
-
-def loopbacks_from_network(network: Network) -> dict[str, tuple[str, str]]:
-    # node -> (loopback/32, announced /24), derived from the topology loopbacks.
-    return {name: (lo, _announced_prefix(lo)) for name, lo in network.loopback_per_host.items()}
-
-
-def remote_addrs(network: Network) -> tuple[str, str]:
-    # (announced /24, loopback IP) for Remote — the destination whose traffic ISP optimises.
-    lo = network.loopback_per_host["Remote"]
-    return _announced_prefix(lo), lo.split("/")[0]
-
-
-
-# ---------------------------------------------------------------------------
-# Pre-routing setup
-# ---------------------------------------------------------------------------
-
-
-def _nexthop(network: Network, from_node: str, to_node: str) -> str:
-    """Return the peer IP that from_node uses to reach to_node directly."""
-    for iface in network.ifaces_per_host[from_node]:
-        if iface.peer == to_node:
-            return iface.peer_ip.split("/")[0]
-    raise ValueError(f"No direct link {from_node} → {to_node}")
-
-
-def setup_routing(network: Network) -> None:
-    """Pre-configure full routing. ISP routes Remote via Expensive (suboptimal)."""
-
-    loopbacks = loopbacks_from_network(network)
-
-    def add(host_name: str, prefix: str, via: str) -> None:
-        network.hosts[host_name].cmd(f"ip route add {prefix} via {via} 2>/dev/null || true")
-
-    # Enable IP forwarding and add semantic loopbacks on every node
-    for name, host in network.hosts.items():
-        host.cmd("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1")
-        lo_addr, _ = loopbacks[name]
-        host.cmd(f"ip addr add {lo_addr} dev lo 2>/dev/null || true")
-
-    # TinyInc: everything via ISP
-    nh = _nexthop(network, "TinyInc", "ISP")
-    for node in ("ISP", "Expensive", "Cheap", "Remote"):
-        _, pfx = loopbacks[node]
-        add("TinyInc", pfx, nh)
-
-    # ISP: customers via their link; Remote via Expensive (SUBOPTIMAL starting point)
-    _, tinyinc_pfx = loopbacks["TinyInc"]
-    add("ISP", tinyinc_pfx, _nexthop(network, "ISP", "TinyInc"))
-    _, exp_pfx = loopbacks["Expensive"]
-    add("ISP", exp_pfx, _nexthop(network, "ISP", "Expensive"))
-    _, chp_pfx = loopbacks["Cheap"]
-    add("ISP", chp_pfx, _nexthop(network, "ISP", "Cheap"))
-    add("ISP", loopbacks["Remote"][1], _nexthop(network, "ISP", "Expensive"))  # suboptimal
-
-    # Expensive: ISP/TinyInc back via ISP link; Remote/Cheap via Remote link
-    nh_isp = _nexthop(network, "Expensive", "ISP")
-    nh_rem = _nexthop(network, "Expensive", "Remote")
-    for node in ("ISP", "TinyInc"):
-        _, pfx = loopbacks[node]
-        add("Expensive", pfx, nh_isp)
-    add("Expensive", "10.4.0.0/30", nh_isp)  # TinyInc-ISP link subnet
-    _, rem_pfx = loopbacks["Remote"]
-    add("Expensive", rem_pfx, nh_rem)
-    _, chp_pfx = loopbacks["Cheap"]
-    add("Expensive", chp_pfx, nh_rem)  # Cheap reachable through Remote
-
-    # Cheap: symmetric to Expensive
-    nh_isp = _nexthop(network, "Cheap", "ISP")
-    nh_rem = _nexthop(network, "Cheap", "Remote")
-    for node in ("ISP", "TinyInc"):
-        _, pfx = loopbacks[node]
-        add("Cheap", pfx, nh_isp)
-    add("Cheap", "10.4.0.0/30", nh_isp)  # TinyInc-ISP link subnet
-    add("Cheap", rem_pfx, nh_rem)
-    _, exp_pfx = loopbacks["Expensive"]
-    add("Cheap", exp_pfx, nh_rem)  # Expensive reachable through Remote
-
-    # Remote: return path to ISP/TinyInc via Expensive (arbitrary)
-    nh_exp = _nexthop(network, "Remote", "Expensive")
-    nh_chp = _nexthop(network, "Remote", "Cheap")
-    for node in ("ISP", "TinyInc"):
-        _, pfx = loopbacks[node]
-        add("Remote", pfx, nh_exp)
-    add("Remote", "10.4.0.0/30", nh_exp)  # TinyInc-ISP link subnet
-    _, exp_pfx = loopbacks["Expensive"]
-    add("Remote", exp_pfx, nh_exp)
-    _, chp_pfx = loopbacks["Cheap"]
-    add("Remote", chp_pfx, nh_chp)
-
-
-# ---------------------------------------------------------------------------
-# Experiment data persistence
-# ---------------------------------------------------------------------------
-
-
-def save_plot_data(
-    samples: list[dict],
-    baseline_mbps: float,
-    spike_mbps: float,
-    spikes: list[SpikeWindow],
-    total_days: int,
-    step_hours: float,
-    output_path: Path,
-) -> None:
-    data = {
-        "params": {
-            "baseline_mbps": baseline_mbps,
-            "spike_mbps": spike_mbps,
-            "spikes": [{"time": s.time, "duration": s.duration} for s in spikes],
-            "total_days": total_days,
-            "step_hours": step_hours,
-        },
-        "samples": samples,
-    }
-    output_path.write_text(json.dumps(data, indent=2))
-
-
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
+def _spike_schedule_text(spikes: list[SpikeWindow]) -> str:
+    lines = []
+    for s in spikes:
+        t = int(s.time) if s.time == int(s.time) else s.time
+        d = int(s.duration) if s.duration == int(s.duration) else s.duration
+        lines.append(f"  Hour {t:>4} — duration {d:>3} h")
+    return "\n".join(lines)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Billing-policy routing experiment")
+    parser = argparse.ArgumentParser(description="Oracle billing-policy routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
     parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
@@ -193,12 +62,8 @@ def parse_args():
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
+    parser.add_argument("--days", type=int, default=14, metavar="N")
 
-    # Billing-specific
-    parser.add_argument("--days", type=int, default=14, metavar="N", help="Experiment duration in days (default: 14); the billing period is always 30 days")
-    parser.add_argument("--step-hours", type=float, default=6.0, metavar="H", help="Simulated hours per iteration (default: 6)")
-    parser.add_argument("--baseline-mbps", type=float, default=100.0, metavar="M", help="Baseline traffic flow rate in Mbps (default: 100)")
-    parser.add_argument("--spike-mbps", type=float, default=500.0, metavar="M", help="Spike traffic flow rate in Mbps (default: 500)")
     def spike_window(s: str) -> SpikeWindow:
         try:
             time_str, dur_str = s.split(":")
@@ -207,26 +72,26 @@ def parse_args():
             raise argparse.ArgumentTypeError(f"Expected HOUR:DURATION, got {s!r}")
 
     parser.add_argument(
-        "--spike-hours", type=spike_window, nargs="+",
+        "--spike-hours",
+        type=spike_window,
+        nargs="+",
         default=[
-            SpikeWindow(time=24,  duration=6),
-            SpikeWindow(time=42,  duration=6),
-            SpikeWindow(time=72,  duration=6),
-            SpikeWindow(time=96,  duration=12),
+            SpikeWindow(time=24, duration=6),
+            SpikeWindow(time=42, duration=6),
+            SpikeWindow(time=72, duration=6),
+            SpikeWindow(time=96, duration=12),
             SpikeWindow(time=120, duration=6),
             SpikeWindow(time=144, duration=6),
             SpikeWindow(time=168, duration=120),
         ],
         metavar="HOUR:DURATION",
-        help="Spike windows as HOUR:DURATION pairs (default: 24:6 42:6 72:6 96:12 120:6 144:6 168:120)",
+        help="Spike windows as HOUR:DURATION pairs (default: the standard oracle schedule)",
     )
-    parser.add_argument("--sample-interval-minutes", type=float, default=15.0, metavar="M", help="Virtual minutes between billing samples (default: 15)")
+    parser.add_argument("--step-hours", type=float, default=6.0, metavar="H")
+    parser.add_argument("--baseline-mbps", type=float, default=100.0, metavar="M")
+    parser.add_argument("--spike-mbps", type=float, default=500.0, metavar="M")
+    parser.add_argument("--sample-interval-minutes", type=float, default=15.0, metavar="M")
     return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 
 def main():
@@ -237,7 +102,6 @@ def main():
 
     logger = setup_logging(args.log_level)
 
-    # Load topology and start network
     logger.info("Building Mininet network...")
     network = Network(load_topology(args.topology))
     network.start()
@@ -248,17 +112,23 @@ def main():
     logger.info("Verifying initial connectivity...")
     initial_connectivity = network.test_all_connectivity(label="Initial Connectivity Matrix")
     if "FAIL" in initial_connectivity:
-        raise SystemExit("Pre-flight check failed: connectivity matrix has FAILs — fix routing before starting the experiment.")
+        raise SystemExit("Pre-flight check failed: connectivity matrix has FAILs.")
 
-    # Load prompts
     prompts_dir = Path(args.prompts_dir)
+    spikes = args.spike_hours
     step_hours_val = int(args.step_hours) if args.step_hours == int(args.step_hours) else args.step_hours
     billing_samples_val = round(30 * 24 / args.step_hours)
-    template_vars = {"step_hours": str(step_hours_val), "billing_samples": str(billing_samples_val)}
+    template_vars = {
+        "step_hours": str(step_hours_val),
+        "billing_samples": str(billing_samples_val),
+        "spike_schedule": _spike_schedule_text(spikes),
+    }
+
     def _render(text: str) -> str:
         for key, val in template_vars.items():
             text = text.replace("{" + key + "}", val)
         return text
+
     prompts = {f.stem: _render(f.read_text()) for f in sorted(prompts_dir.glob("*.txt")) if f.stem != "final-report"}
     if not prompts:
         raise SystemExit(f"No prompt files found in {prompts_dir}")
@@ -270,16 +140,13 @@ def main():
     logger.info("Writing per-node logs to %s/", log_dir)
     logger.info("Using model: %s (%s)", args.model, MODELS[args.model])
 
-    # Billing clock — always a 30-day period; the experiment covers only args.days of it
     clock = BillingClock(total_days=30)
 
-    # Determine ISP's provider interfaces from topology
     provider_ifaces = {iface.peer: iface.iface for iface in network.ifaces_per_host["ISP"] if iface.peer in ("Expensive", "Cheap")}
     logger.info("ISP provider interfaces: %s", provider_ifaces)
 
     remote_prefix, remote_loopback = remote_addrs(network)
 
-    # Traffic sampler — driven by reactor
     sampler = TrafficSampler(
         network=network,
         billing_node="ISP",
@@ -288,7 +155,6 @@ def main():
         billing_clock=clock,
     )
 
-    # Traffic generator (iperf3)
     generator = TrafficGenerator(
         network=network,
         source="TinyInc",
@@ -297,22 +163,18 @@ def main():
         spike_mbps=args.spike_mbps,
     )
 
-    # Start everything
     generator.start_servers()
-    time.sleep(1)  # Let servers initialise
+    time.sleep(1)
 
     sampler.start()
     generator.start_flow()
-    time.sleep(2)  # Let traffic establish before agents begin
+    time.sleep(2)
 
-    # ------------------------------------------------------------------
-    # Reactors
-    # ------------------------------------------------------------------
     step_hours = args.step_hours
     step_days = step_hours / 24.0
     max_iterations = round(args.days * 24.0 / step_hours)
 
-    spike_events: list[tuple[int, int]] = sorted((round(s.time / step_hours), round((s.time + s.duration) / step_hours)) for s in args.spike_hours)
+    spike_events: list[tuple[int, int]] = sorted((round(s.time / step_hours), round((s.time + s.duration) / step_hours)) for s in spikes)
     pending_events = list(spike_events)
     active_restore_iter: list[int | None] = [None]
 
@@ -320,10 +182,6 @@ def main():
     sample_interval_days = args.sample_interval_minutes / (24 * 60)
 
     def sample_reactor(_, step: int) -> None:
-        # Samples are taken at the START of step N, before spike/restore fires.
-        # They are labeled with step N-1's virtual time and measure traffic under
-        # the routing decisions agents made in step N-1.  This guarantees the
-        # billing record reflects what agents actually configured.
         if step == 0:
             return
         prev_elapsed_start = (step - 1) * step_days
@@ -370,20 +228,17 @@ def main():
         )
         results = anet.run(concurrent=not args.sequential)
 
-        # Capture the final step's routing state (step max_iterations-1)
         clock.set_elapsed(args.days)
         final_elapsed_start = (max_iterations - 1) * step_days
         for i in range(samples_per_step):
             sampler.sample(elapsed_override=final_elapsed_start + i * sample_interval_days)
 
-        # Results summary
         print("\n=== Agent Results ===")
         for name in network.hosts:
             r = results[name]
             status = "SUCCESS" if r.success else f"INCOMPLETE: {r.message}"
             print(f"  {name} [{status}]")
 
-        # Collect routing state and connectivity
         route_tables = collect_route_tables(network)
         connectivity = network.test_all_connectivity()
 
@@ -392,14 +247,12 @@ def main():
         report_path.write_text("=== Connectivity Matrix ===\n" + connectivity + "\n\n=== Routing Tables ===\n\n" + routing_section + "\n")
         logger.info("Report written to %s", report_path)
 
-        # Agent self-reports
         logger.info("Gathering agent self-reports...")
         agent_reports = anet.gather_reports()
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
         write_timeline_html(log_dir, run_stem, network.hosts, logger)
 
-        # Final analysis report
         final_report_file = prompts_dir / "final-report.txt"
         if final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
@@ -428,13 +281,12 @@ def main():
     finally:
         chown_to_user(log_dir)
 
-    # Save experiment data and generate throughput plot
     data_path = log_dir / f"{run_stem}-data.json"
     save_plot_data(
         samples=sampler.samples,
         baseline_mbps=args.baseline_mbps,
         spike_mbps=args.spike_mbps,
-        spikes=args.spike_hours,
+        spikes=spikes,
         total_days=args.days,
         step_hours=step_hours,
         output_path=data_path,

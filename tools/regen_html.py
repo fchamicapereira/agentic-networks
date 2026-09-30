@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from visualize_logs import parse_logs, render_logs
+from agentic_networks.visualize_logs import parse_logs, render_logs
 
 
 def _group_logs(log_files: list[Path]) -> dict[tuple[Path, str], list[Path]]:

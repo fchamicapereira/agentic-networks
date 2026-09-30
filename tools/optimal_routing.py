@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 """
-optimal_routing.py — Compute min-delay optimal routes and render a Graphviz PDF.
+tools/optimal_routing.py — Compute min-delay optimal routes and render a Graphviz PDF.
 
 Uses Dijkstra's algorithm on the link-delay graph to find the shortest-latency
 path between every pair of hosts, then visualises the resulting next-hop
 routing decisions using the same PDF renderer as the live experiments.
 
 Usage:
-    python optimal_routing.py <topology.csv> [-o <output>]
+    python tools/optimal_routing.py <topology.csv> [-o <output>]
 
 Arguments:
     topology    Path to a topology CSV file (same format as topologies/).

@@ -8,7 +8,8 @@ from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
 from agentic_networks.agentic_network import AgenticNetwork, MODELS
-from experiment import (
+from agentic_networks import paths, testbed_certs
+from agentic_networks.experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
     collect_node_logs,
@@ -19,9 +20,8 @@ from experiment import (
     write_timeline_html,
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-TOPOLOGY = SCRIPT_DIR / "topologies" / "knowledge_plane.csv"
-PROMPTS_DIR = SCRIPT_DIR / "prompts" / "knowledge_plane"
+TOPOLOGY = paths.TOPOLOGIES_DIR / "knowledge_plane.csv"
+PROMPTS_DIR = paths.PROMPTS_DIR / "knowledge_plane"
 
 WEBSERVER_IP = "198.82.0.1"
 WEBSERVER_MAX_WORKERS = 3  # must match MAX_WORKERS in assets/kp_webserver.py
@@ -100,7 +100,7 @@ def _lo(network: Network, node: str) -> str:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Knowledge Plane WHY/FIX experiment")
-    parser.add_argument("--dry-run", action="store_true", default=False, help="Set up the network, run wget from User, print the result, then exit " "(no fault injection, no agents)")
+    parser.add_argument("--dry-run", action="store_true", default=False, help="Build the network, inject the fault and verify it took hold, then tear down " "and exit without running any agents. Use it to check the testbed before spending tokens.")
     parser.add_argument("--fault", choices=FAULTS, required=True, help="Fault scenario to inject")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
@@ -261,10 +261,15 @@ def start_services(network: Network, logger) -> None:
 
     Path("/etc/resolv.conf").write_text("nameserver 127.0.0.1\n")
 
+    # Mint this run's TLS chain into a temporary directory. Nothing is checked into the
+    # repository, so the CA installed below is trusted only by this container and only for
+    # as long as it lives. The directory is on the container's root filesystem, which the
+    # hosts' private mount namespaces share, so Web can read it.
+    certs = testbed_certs.generate(hostname="acm.org", ip=WEBSERVER_IP, logger=logger)
+
     logger.info("Installing testbed CA into system trust store...")
-    ca_src = SCRIPT_DIR / "assets" / "testbed-ca.crt"
     subprocess.run(
-        ["cp", str(ca_src), "/usr/local/share/ca-certificates/testbed-ca.crt"],
+        ["cp", str(certs.ca_cert), "/usr/local/share/ca-certificates/testbed-ca.crt"],
         check=True,
     )
     subprocess.run(["update-ca-certificates", "--fresh"], check=True, capture_output=True)
@@ -273,7 +278,10 @@ def start_services(network: Network, logger) -> None:
     # Run the web server inside Web's isolation namespace so Web's own agent can
     # see and inspect it (ps/ss -p), while other hosts cannot. Killed when Web's
     # anchor is torn down in network.stop().
-    webserver.ns_cmd(f"python3 {SCRIPT_DIR}/assets/kp_webserver.py >/dev/null 2>&1 &")
+    webserver.ns_cmd(
+        f"python3 {paths.ASSETS_DIR}/kp_webserver.py"
+        f" --cert {certs.server_cert} --key {certs.server_key} >/dev/null 2>&1 &"
+    )
     time.sleep(1)
 
 
@@ -317,27 +325,68 @@ def phase1_check(network: Network, logger) -> None:
     logger.info("Phase 1 HTTP: OK — baseline verified.")
 
 
+# A fault does not take hold the instant inject_fault() returns: the overload client has to
+# open enough connections to saturate the worker pool, and a route or resolver change needs a
+# moment to be observable from User. Probing once immediately therefore reports a spurious
+# "setup bug" on a slow or loaded machine, so each check is retried until it holds.
+_FAULT_SETTLE_TIMEOUT_SECONDS = 30.0
+_FAULT_SETTLE_INTERVAL_SECONDS = 1.0
+
+
+def _await_fault(probe, holds, logger) -> tuple[bool, str]:
+    """Poll ``probe`` until ``holds(result)`` is true or the settle timeout expires.
+
+    Returns the outcome and the last observed value, so the caller can report what it
+    actually saw rather than just that it timed out.
+    """
+    deadline = time.monotonic() + _FAULT_SETTLE_TIMEOUT_SECONDS
+    observed = ""
+    attempt = 0
+    while True:
+        observed = probe()
+        if holds(observed):
+            if attempt:
+                logger.info("Fault settled after %d additional probe(s).", attempt)
+            return True, observed
+        if time.monotonic() >= deadline:
+            return False, observed
+        attempt += 1
+        time.sleep(_FAULT_SETTLE_INTERVAL_SECONDS)
+
+
 def phase2_check(network: Network, fault: str, logger) -> None:
     user = network.hosts["User"]
     loopback = _lo(network, "User")
 
     if fault == "dns_stale":
-        dns_out = user.cmd("dig +short acm.org 2>&1").strip()
-        if WEBSERVER_IP in dns_out:
-            logger.error("Phase 2 FAILED: AS1 DNS still returns correct IP — setup bug, aborting.")
+        ok, dns_out = _await_fault(
+            lambda: user.cmd("dig +short acm.org 2>&1").strip(),
+            lambda out: WEBSERVER_IP not in out,
+            logger,
+        )
+        if not ok:
+            logger.error("Phase 2 FAILED: AS1 DNS still returns correct IP (%r) — setup bug, aborting.", dns_out)
             exit(1)
         logger.info("Phase 2 dns_stale: OK — AS1 now returns %r.", dns_out)
 
     elif fault == "overload":
-        http_code = user.cmd(f"curl -s -o /dev/null -w '%{{http_code}}' --interface {loopback} " f"--max-time 10 http://{WEBSERVER_IP}/ 2>&1").strip()
-        if http_code != "503":
+        ok, http_code = _await_fault(
+            lambda: user.cmd(f"curl -s -o /dev/null -w '%{{http_code}}' --interface {loopback} " f"--max-time 10 http://{WEBSERVER_IP}/ 2>&1").strip(),
+            lambda code: code == "503",
+            logger,
+        )
+        if not ok:
             logger.error("Phase 2 FAILED: expected HTTP 503, got %r — setup bug, aborting.", http_code)
             exit(1)
         logger.info("Phase 2 overload: OK — server returned 503.")
 
     else:
-        wget_out = user.cmd(f"wget -q --bind-address {loopback} --timeout=5 --tries=1 " f"-O /dev/null http://{WEBSERVER_IP}/ 2>&1; echo exit:$?")
-        if "exit:0" in wget_out:
+        ok, wget_out = _await_fault(
+            lambda: user.cmd(f"wget -q --bind-address {loopback} --timeout=5 --tries=1 " f"-O /dev/null http://{WEBSERVER_IP}/ 2>&1; echo exit:$?"),
+            lambda out: "exit:0" not in out,
+            logger,
+        )
+        if not ok:
             logger.error("Phase 2 FAILED: User can still reach %s after %s — setup bug, aborting.", WEBSERVER_IP, fault)
             exit(1)
         logger.info("Phase 2 %s: OK — User cannot reach %s.", fault, WEBSERVER_IP)
@@ -406,7 +455,7 @@ def inject_fault(network: Network, fault: str, logger) -> None:
         # agent can see it, but the victim (Web) cannot read it out of a shared
         # process table — it only observes the connections in `ss`. Killed when
         # EveLink's anchor is torn down in network.stop().
-        el.ns_cmd(f"python3 {SCRIPT_DIR}/assets/kp_web_client.py >/dev/null 2>&1 &")
+        el.ns_cmd(f"python3 {paths.ASSETS_DIR}/kp_web_client.py >/dev/null 2>&1 &")
         time.sleep(1)
         logger.info("Overload: EveLink started background web client holding %d concurrent slow requests; worker slots saturated.", WEBSERVER_MAX_WORKERS + 2)
 

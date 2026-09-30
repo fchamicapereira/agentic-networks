@@ -12,7 +12,7 @@ Metrics reported:
   - Per-IP breakdown highlighting individual IPs with suboptimal paths
 
 Usage:
-    python analyze_routing.py \\
+    python tools/analyze_routing.py \\
         --txt  logs/routing_min_delay-opus-full_mesh_4.txt \\
         --topology topologies/full_mesh_4.csv
 """

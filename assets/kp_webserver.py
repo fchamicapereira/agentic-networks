@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
+import argparse
 import http.server
 import socketserver
 import ssl
 import threading
 import time
-from pathlib import Path
 
 BIND_IP = "198.82.0.1"
 PORT_HTTP = 80
 PORT_HTTPS = 443
-MAX_WORKERS = 20
-SLOW_HOLD_SECONDS = 1
+# A deliberately small worker pool, and a /slow request that occupies a worker for a long
+# time: together they let the overload fault saturate the server with a handful of
+# connections, which is what makes every other client see 503. Both values are load-bearing
+# for that experiment and must stay in step with CONCURRENCY in kp_web_client.py and
+# WEBSERVER_MAX_WORKERS in experiments/kp_why_fix.py — raising the pool above the client's
+# concurrency silently turns the fault into a no-op, and the server just answers 200.
+MAX_WORKERS = 3
+SLOW_HOLD_SECONDS = 90
 
-_ASSETS = Path(__file__).parent
-CERT_FILE = str(_ASSETS / "acm-server.crt")
-KEY_FILE  = str(_ASSETS / "acm-server.key")
+# The TLS material is generated per run (agentic_networks/testbed_certs.py) and passed in,
+# rather than read from a fixed path here: a CA checked into the repository would have a
+# published private key, and this CA is installed into the container's trust store.
+_args = argparse.ArgumentParser(description="Emulated ACM web server for the knowledge-plane testbed")
+_args.add_argument("--cert", required=True, metavar="FILE", help="Server certificate (PEM)")
+_args.add_argument("--key", required=True, metavar="FILE", help="Server private key (PEM)")
+_opts = _args.parse_args()
+
+CERT_FILE = _opts.cert
+KEY_FILE = _opts.key
 
 _sem = threading.Semaphore(MAX_WORKERS)
 

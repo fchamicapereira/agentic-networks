@@ -4,7 +4,7 @@
 Vanilla Mininet hosts get their own *network* namespace but share the *PID* (and
 procfs) namespace with every other host — and with the experiment orchestrator.
 As a result, any host running `ps` sees every other host's processes and the
-runner's own command line (e.g. `kp_why_fix.py --fault overload`), letting an
+runner's own command line (e.g. `experiments/kp_why_fix.py --fault overload`), letting an
 agent read another org's private workload — and the scenario itself — straight
 out of the process table.
 

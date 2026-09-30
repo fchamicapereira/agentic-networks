@@ -19,7 +19,7 @@ spawning `curl`:
   not EveLink's private workload.
 
 HOST/PORT and the concurrency below mirror assets/kp_webserver.py (BIND_IP and
-MAX_WORKERS) and the overload fault in kp_why_fix.py; keep them in sync.
+MAX_WORKERS) and the overload fault in experiments/kp_why_fix.py; keep them in sync.
 """
 
 import socket

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the paper-ready throughput figure from a saved experiment data JSON.
 
-This is the paper variant of agentic_routing_policies_billing_plot_tput.py.
+This is the paper variant of agentic_networks/billing_plot.py.
 Differences from the working/diagnostic plot:
   - Vector PDF output by default (set --output *.png for a raster).
   - Serif fonts and print-friendly sizing to match a two-column paper (\\textwidth).
@@ -9,7 +9,7 @@ Differences from the working/diagnostic plot:
   - Lighter grid, thinner lines, tighter margins.
 Figure geometry is fixed at FIG_WIDTH x FIG_HEIGHT inches, sized for a
 single-column figure in the two-column ACM sigconf layout. The PDF is written
-next to this script (the tools/ directory) by default.
+alongside the input data file by default.
 """
 
 import argparse
@@ -180,7 +180,7 @@ def generate_throughput_plot(
 def main():
     parser = argparse.ArgumentParser(description="Generate paper-ready throughput figure from experiment data")
     parser.add_argument("data_json", metavar="DATA_JSON", help="Path to *-data.json file")
-    parser.add_argument("--output", "-o", metavar="OUT", help="Output path (default: <tools dir>/<stem>-tput-paper.pdf)")
+    parser.add_argument("--output", "-o", metavar="OUT", help="Output path (default: alongside the input data, <stem>-tput-paper.pdf)")
 
     def note(s: str) -> tuple[float, str]:
         try:
@@ -203,7 +203,10 @@ def main():
     if not data_path.exists():
         raise SystemExit(f"File not found: {data_path}")
 
-    default_out = Path(__file__).resolve().parent / data_path.name.replace("-data.json", "-tput-paper.pdf")
+    # Write the figure beside the run it came from, not next to this script: the plot
+    # belongs with that experiment's other artifacts in logs/, where serve_logs.py
+    # surfaces it and where it cannot be mistaken for a checked-in source file.
+    default_out = data_path.parent / data_path.name.replace("-data.json", "-tput-paper.pdf")
     output_path = Path(args.output) if args.output else default_out
 
     generate_throughput_plot(data_path, output_path, logger, notes=DEFAULT_NOTES + args.note)

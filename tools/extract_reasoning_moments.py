@@ -49,10 +49,10 @@ _QUOTE_CHARS = " \t\n\r\"'“”‘’"
 
 
 def load_fault_descriptions() -> dict:
-    """ast-extract FAULT_DESCRIPTIONS from kp_why_fix.py without importing it
+    """ast-extract FAULT_DESCRIPTIONS from experiments/kp_why_fix.py without importing it
     (it pulls in Mininet, unavailable outside the Docker image)."""
     try:
-        mod = ast.parse((REPO_ROOT / "kp_why_fix.py").read_text(encoding="utf-8"))
+        mod = ast.parse((REPO_ROOT / "experiments" / "kp_why_fix.py").read_text(encoding="utf-8"))
         for node in mod.body:
             if isinstance(node, ast.Assign) and any(
                     getattr(t, "id", None) == "FAULT_DESCRIPTIONS" for t in node.targets):

@@ -10,17 +10,17 @@ from typing import Iterable
 from tqdm import tqdm
 from mininet.log import setLogLevel
 
-from agentic_networks.network_agent import AgentResult
-from agentic_networks.agent_vllm import AgentVLLM, MODELS as VLLM_MODELS
-from agentic_networks.agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
-from agentic_networks.agent_openai import AgentOpenAI, MODELS as GPT_MODELS
-from agentic_networks.agent_together import AgentTogether, MODELS as TOGETHER_MODELS
-from agentic_networks.network import Network
-from agentic_networks.routes import Route
-from visualize_logs import render_logs
+from .network_agent import AgentResult
+from .agent_vllm import AgentVLLM, MODELS as VLLM_MODELS
+from .agent_claude import AgentClaude, MODELS as CLAUDE_MODELS
+from .agent_openai import AgentOpenAI, MODELS as GPT_MODELS
+from .agent_together import AgentTogether, MODELS as TOGETHER_MODELS
+from .network import Network
+from .paths import LOGS_DIR
+from .routes import Route
+from .visualize_logs import render_logs
 
-SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_LOG_DIR = SCRIPT_DIR / "logs"
+DEFAULT_LOG_DIR = LOGS_DIR
 
 # The final report is a summary — it never needs the large output budget the action loop uses.
 # Capping it leaves room for the input context on small-context (e.g. 32k) local models.

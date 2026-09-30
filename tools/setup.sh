@@ -13,6 +13,7 @@ sudo apt-get install -y \
   python3-tk python3-numpy python3-scipy python3-matplotlib \
   python3.10-venv \
   curl \
+  openssl \
   dnsmasq \
   dnsutils \
   iptables \
@@ -30,4 +31,5 @@ sudo apt-get install -y \
   strace
 
 python3 -m venv env
-pip3 install -r requirements.txt
+env/bin/pip3 install -r requirements.txt
+env/bin/pip3 install -e .
