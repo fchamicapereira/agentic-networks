@@ -1,5 +1,8 @@
 # Instantiating the Knowledge Plane
 
+**[Project page](https://fchamicapereira.github.io/agentic-networks/)** ·
+**[Browse experiment logs](https://fchamicapereira.github.io/agentic-networks/logs/)**
+
 Research code for *Instantiating the Knowledge Plane* (HotNets 2026). LLM agents run as
 autonomous system administrators on an emulated interdomain network, one agent per network
 entity, and collaborate across organizational boundaries to diagnose faults, reason about
