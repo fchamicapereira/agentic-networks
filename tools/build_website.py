@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
-"""serve_logs.py — Browse experiment logs over HTTP.
+"""build_website.py — Assemble the project website as a static site.
 
-Serves the logs directory as static files (so the ``*.html`` timelines and
-``*-routes.pdf`` render natively in the browser) and adds a generated dashboard
-at ``/`` that groups every experiment run with one-click links to its timeline,
-final report, reasoning-moments quotes, transcript, routes PDF, and per-host
-logs/reports.
+Produces a directory that can be served as-is: the landing page from website/ at the
+root, and every experiment artifact under logs/, indexed by a generated dashboard.
 
-Runs are discovered the same way the other tools cluster them: each run writes a
-``{run_stem}-final-report.md``, so the run stem identifies the run and its
-sibling artifacts (``{run_stem}.html``, ``{run_stem}.txt``,
-``{run_stem}-routes.pdf``, ``{run_stem}-reasoning-moments.md``,
-``{run_stem}-{host}.log``, ...).
+    <output>/index.html          the landing page (from website/)
+    <output>/logs/index.html     generated dashboard of all runs
+    <output>/logs/<category>/    timelines, reports, transcripts, routes PDFs
+    <output>/logs/**/*.md.html   reports pre-rendered for the browser
+
+Both the local server (tools/serve_website.py) and the GitHub Pages workflow call this,
+so what you see locally is byte-for-byte what gets deployed.
+
+Every link generated here is relative. The deployed site is a *project* page living under
+https://<user>.github.io/<repo>/, so an absolute "/logs/..." would resolve against the
+domain root and 404.
 
 Usage:
-    python tools/serve_logs.py                 # serve <repo>/logs on 127.0.0.1:8000
-    python tools/serve_logs.py --port 9000
-    python tools/serve_logs.py --logs-dir path/to/logs --host 0.0.0.0
+    python3 tools/build_website.py                  # build into <repo>/_site
+    python3 tools/build_website.py -o /tmp/site
+    python3 tools/build_website.py --clean
 """
 
 import argparse
 import html
 import json
+import os
+import shutil
 import sys
+
 from collections import defaultdict
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT = REPO_ROOT / "_site"
 
 FINAL_SUFFIX = "-final-report.md"
 HOST_REPORT_SUFFIX = "-report.md"
 
-# Suffixes we serve inline as UTF-8 text so they render in the browser instead of
-# triggering a download.
-INLINE_TEXT_SUFFIXES = {".md", ".log", ".txt", ".json", ".csv"}
 
+# --- run discovery ---------------------------------------------------------------
 
 def discover_runs(logs_dir: Path) -> dict[str, list[dict]]:
     """Map a category (logs-relative parent dir) -> list of run descriptors.
@@ -75,8 +78,8 @@ def discover_runs(logs_dir: Path) -> dict[str, list[dict]]:
 
         category = str(d.relative_to(logs_dir))
         for stem in sorted(stems):
-            def sibling(suffix: str) -> Path | None:
-                p = d / f"{stem}{suffix}"
+            def sibling(suffix: str, _d=d, _stem=stem) -> Path | None:
+                p = _d / f"{_stem}{suffix}"
                 return p if p.exists() else None
 
             hosts = {h: {"log": v.get("log"), "report": v.get("report")}
@@ -94,8 +97,18 @@ def discover_runs(logs_dir: Path) -> dict[str, list[dict]]:
     return runs_by_category
 
 
+# --- dashboard -------------------------------------------------------------------
+
 def _url(logs_dir: Path, path: Path) -> str:
-    return "/" + quote(str(path.relative_to(logs_dir)))
+    """Link target relative to the dashboard, which sits at the logs root.
+
+    Markdown is linked through its pre-rendered sibling so the browser shows a
+    formatted report rather than downloading the source.
+    """
+    rel = path.relative_to(logs_dir)
+    if rel.suffix == ".md":
+        rel = rel.with_name(rel.name + ".html")
+    return quote(str(rel))
 
 
 def _link(logs_dir: Path, path: Path | None, label: str) -> str:
@@ -109,8 +122,7 @@ def render_dashboard(logs_dir: Path) -> bytes:
     total_runs = sum(len(v) for v in runs_by_category.values())
 
     parts: list[str] = [_PAGE_HEAD.format(
-        n_runs=total_runs, n_cats=len(runs_by_category),
-        root=html.escape(str(logs_dir)))]
+        n_runs=total_runs, n_cats=len(runs_by_category))]
 
     if not runs_by_category:
         parts.append(f'<p class="missing">No runs (*{FINAL_SUFFIX}) found under '
@@ -150,13 +162,15 @@ def render_dashboard(logs_dir: Path) -> bytes:
     return "".join(parts).encode("utf-8")
 
 
+# --- markdown pre-rendering ------------------------------------------------------
+
 def load_md_renderer() -> str | None:
     """Extract the mdToHtml() JS function from the timeline template.
 
     The renderer is defined once in assets/timeline_template.html (used for the
     timelines); reusing it here keeps the two markdown views identical. Returns
-    None if the template can't be found, in which case .md files fall back to
-    being served as plain text.
+    None if the template can't be found, in which case .md files are left as
+    plain text with no rendered sibling.
     """
     tpl = REPO_ROOT / "assets" / "timeline_template.html"
     try:
@@ -168,55 +182,99 @@ def load_md_renderer() -> str | None:
         return None
 
 
-class LogsHandler(SimpleHTTPRequestHandler):
-    """Static file server for the logs dir, with a generated dashboard at /."""
-
-    logs_dir: Path  # set in main() before serving
-    md_js: str | None = None  # mdToHtml() source, or None to serve .md raw
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        route = parsed.path
-        if route in ("/", "/index.html"):
-            self._send_html(render_dashboard(self.logs_dir))
-            return
-        if (route.endswith(".md") and self.md_js
-                and "raw" not in parse_qs(parsed.query)):
-            self._serve_markdown(route)
-            return
-        super().do_GET()
-
-    def _serve_markdown(self, route: str) -> None:
-        fs_path = Path(self.translate_path(route))
-        if not fs_path.is_file():
-            self.send_error(404, "File not found")
-            return
-        text = fs_path.read_text(encoding="utf-8", errors="replace")
+def render_markdown_pages(logs_out: Path, md_js: str) -> int:
+    """Write a browsable <name>.md.html beside every .md file under logs_out."""
+    index = logs_out / "index.html"
+    count = 0
+    for md in sorted(logs_out.rglob("*.md")):
+        text = md.read_text(encoding="utf-8", errors="replace")
         # Escape "</" so a literal "</script>" in the markdown can't end the tag.
         src_json = json.dumps(text).replace("</", "<\\/")
         page = (_MD_PAGE
-                .replace("__TITLE__", html.escape(fs_path.name))
-                .replace("__RAW__", html.escape(route + "?raw=1"))
-                .replace("__MD_JS__", self.md_js)
+                .replace("__TITLE__", html.escape(md.name))
+                .replace("__INDEX__", html.escape(os.path.relpath(index, md.parent)))
+                .replace("__RAW__", html.escape(quote(md.name)))
+                .replace("__MD_JS__", md_js)
                 .replace("__SRC__", src_json))
-        self._send_html(page.encode("utf-8"))
+        md.with_name(md.name + ".html").write_text(page, encoding="utf-8")
+        count += 1
+    return count
 
-    def _send_html(self, body: bytes) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def guess_type(self, path):
-        ctype = super().guess_type(path)
-        if Path(path).suffix.lower() in INLINE_TEXT_SUFFIXES:
-            return "text/plain; charset=utf-8"
-        return ctype
+# --- assembly --------------------------------------------------------------------
 
-    def log_message(self, fmt, *args):  # quieter, single-line logging
-        sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
+def sync_tree(src: Path, dst: Path) -> int:
+    """Copy src into dst, skipping files already identical in size and mtime.
 
+    Rebuilds during local iteration then cost a directory walk rather than a fresh
+    copy of every log artifact.
+    """
+    copied = 0
+    for path in sorted(src.rglob("*")):
+        if not path.is_file():
+            continue
+        target = dst / path.relative_to(src)
+        if target.exists():
+            s, t = path.stat(), target.stat()
+            if s.st_size == t.st_size and int(s.st_mtime) == int(t.st_mtime):
+                continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        copied += 1
+    return copied
+
+
+def build(website_dir: Path, logs_dir: Path, output: Path, clean: bool = False) -> None:
+    if clean and output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
+
+    n_page = sync_tree(website_dir, output)
+    print(f"  landing page : {n_page} file(s) from {website_dir.relative_to(REPO_ROOT)}/")
+
+    logs_out = output / "logs"
+    n_logs = sync_tree(logs_dir, logs_out)
+    print(f"  log artifacts: {n_logs} file(s) copied, {sum(1 for _ in logs_out.rglob('*') if _.is_file())} total")
+
+    (logs_out / "index.html").write_bytes(render_dashboard(logs_out))
+    print("  dashboard    : logs/index.html")
+
+    md_js = load_md_renderer()
+    if md_js is None:
+        print("  WARNING: timeline template not found; .md files left unrendered.", file=sys.stderr)
+    else:
+        n_md = render_markdown_pages(logs_out, md_js)
+        print(f"  markdown     : {n_md} report(s) pre-rendered")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT,
+                        help="Directory to build into (default: <repo>/_site)")
+    parser.add_argument("--website-dir", type=Path, default=REPO_ROOT / "website",
+                        help="Source of the landing page (default: <repo>/website)")
+    parser.add_argument("--logs-dir", type=Path, default=REPO_ROOT / "logs",
+                        help="Experiment logs to publish (default: <repo>/logs)")
+    parser.add_argument("--clean", action="store_true",
+                        help="Delete the output directory before building")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    for label, d in (("website", args.website_dir), ("logs", args.logs_dir)):
+        if not d.is_dir():
+            print(f"ERROR: {label} directory not found: {d}", file=sys.stderr)
+            return 1
+
+    print(f"Building site into {args.output}")
+    build(args.website_dir, args.logs_dir, args.output, clean=args.clean)
+    print("Done.")
+    return 0
+
+
+# --- page templates --------------------------------------------------------------
 
 _PAGE_HEAD = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -228,6 +286,8 @@ _PAGE_HEAD = """<!DOCTYPE html>
          padding: 1.5rem; background: #fff; color: #1c2330; }}
   h1 {{ margin: 0 0 .25rem; }}
   .sub {{ color: #888; margin: 0 0 1rem; }}
+  .home {{ display: inline-block; margin-bottom: 1rem; color: #2563eb;
+          text-decoration: none; font-size: .9rem; }}
   #filter {{ width: 100%; box-sizing: border-box; padding: .5rem .6rem;
             font-size: 1rem; margin-bottom: 1.25rem; border: 1px solid #8884;
             border-radius: .4rem; }}
@@ -248,8 +308,9 @@ _PAGE_HEAD = """<!DOCTYPE html>
   table.hosts td {{ padding: .1rem .8rem .1rem 0; }}
   table.hosts td:first-child {{ font-family: ui-monospace, monospace; }}
 </style></head><body>
+<a class="home" href="../index.html">&larr; Instantiating the Knowledge Plane</a>
 <h1>Experiment logs</h1>
-<p class="sub">{n_runs} run(s) across {n_cats} categor(ies) &mdash; serving <code>{root}</code></p>
+<p class="sub">{n_runs} run(s) across {n_cats} categor(ies)</p>
 <input id="filter" type="search" placeholder="Filter runs (name, category, host)&hellip;" autofocus>
 """
 
@@ -271,8 +332,8 @@ _PAGE_TAIL = """
 """
 
 # Standalone page for a single .md file: renders it client-side with the same
-# mdToHtml() used by the timelines. Placeholders: __TITLE__, __RAW__, __MD_JS__,
-# __SRC__ (a JSON string literal).
+# mdToHtml() used by the timelines. Placeholders: __TITLE__, __INDEX__, __RAW__,
+# __MD_JS__, __SRC__ (a JSON string literal).
 _MD_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -300,7 +361,7 @@ _MD_PAGE = """<!DOCTYPE html>
   .md th, .md td { border: 1px solid #d6dbe3; padding: 4px 9px; }
 </style></head><body>
 <div class="bar"><span class="name">__TITLE__</span>
-  <a href="/">&larr; index</a><a href="__RAW__">raw</a></div>
+  <a href="__INDEX__">&larr; index</a><a href="__RAW__">raw</a></div>
 <div id="md" class="md"></div>
 <script>
 __MD_JS__
@@ -309,40 +370,6 @@ document.title = "__TITLE__";
 </script>
 </body></html>
 """
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--logs-dir", type=Path, default=REPO_ROOT / "logs",
-                        help="Logs directory to serve (default: <repo>/logs).")
-    parser.add_argument("--host", default="127.0.0.1",
-                        help="Address to bind (default: 127.0.0.1).")
-    parser.add_argument("--port", type=int, default=8000,
-                        help="Port to listen on (default: 8000).")
-    args = parser.parse_args()
-
-    logs_dir = args.logs_dir.resolve()
-    if not logs_dir.is_dir():
-        print(f"ERROR: logs directory not found: {logs_dir}", file=sys.stderr)
-        return 1
-
-    LogsHandler.logs_dir = logs_dir  # read by handler instances
-    LogsHandler.md_js = load_md_renderer()
-    if LogsHandler.md_js is None:
-        print("WARNING: timeline template not found; serving .md files as raw text.",
-              file=sys.stderr)
-    handler = partial(LogsHandler, directory=str(logs_dir))
-
-    with ThreadingHTTPServer((args.host, args.port), handler) as httpd:
-        print(f"Serving {logs_dir} at http://{args.host}:{args.port}/ "
-              f"(Ctrl-C to stop)")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nStopped.")
-    return 0
 
 
 if __name__ == "__main__":

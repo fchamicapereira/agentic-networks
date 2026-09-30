@@ -204,7 +204,7 @@ def main():
         raise SystemExit(f"File not found: {data_path}")
 
     # Write the figure beside the run it came from, not next to this script: the plot
-    # belongs with that experiment's other artifacts in logs/, where serve_logs.py
+    # belongs with that experiment's other artifacts in logs/, where the website
     # surfaces it and where it cannot be mistaken for a checked-in source file.
     default_out = data_path.parent / data_path.name.replace("-data.json", "-tput-paper.pdf")
     output_path = Path(args.output) if args.output else default_out

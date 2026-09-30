@@ -27,6 +27,7 @@ complete logs of every experiment reported in the paper.
 | `policies/` | Routing contracts and policies handed to agents |
 | `assets/` | Emulated ACM web server and load client (TLS material is generated per run) |
 | `logs/` | Full logs, transcripts, reports, and HTML timelines for every run |
+| `website/` | Project landing page, published with GitHub Pages |
 | `tools/` | Setup, plotting, log browsing, and analysis utilities |
 
 ## Setup
@@ -121,11 +122,20 @@ To serve a local model:
 ## Browsing results
 
 Every run writes per-node logs, a transcript, a final report, and a self-contained
-interactive HTML timeline into its `logs/` subdirectory. To browse them with an index:
+interactive HTML timeline into its `logs/` subdirectory. The project website indexes all
+of them, and runs locally with one command:
 
 ```bash
-python3 tools/serve_logs.py            # http://127.0.0.1:8000
+python3 tools/serve_website.py         # http://127.0.0.1:8080
 ```
+
+That builds the site into `_site/` (gitignored) and serves it: the landing page from
+`website/`, a searchable dashboard of every run, and each run's timeline, report,
+transcript and routes PDF. `--no-build` serves an existing build without rebuilding.
+
+The site is published to GitHub Pages by `.github/workflows/pages.yml`, which runs the
+same `tools/build_website.py`. The built site is never committed — logs are assembled
+into it at deploy time rather than duplicated in the repository.
 
 ## Citation
 
