@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import ipaddress
 import subprocess
 import time
 
@@ -24,6 +25,9 @@ TOPOLOGY = paths.TOPOLOGIES_DIR / "knowledge_plane.csv"
 PROMPTS_DIR = paths.PROMPTS_DIR / "knowledge_plane"
 
 WEBSERVER_IP = "198.82.0.1"
+# Where the testbed resolvers point every name other than acm.org: any address outside the
+# topology will do, since AS2 answers for all of them (see _answer_for_the_internet).
+INTERNET_IP = "104.18.32.7"
 WEBSERVER_MAX_WORKERS = 3  # must match MAX_WORKERS in assets/kp_webserver.py
 
 # AS1/AS2 serve acm.org from a dnsmasq addn-hosts file rather than an inline --address flag.
@@ -154,12 +158,17 @@ def setup_routing(network: Network, logger) -> None:
     add(p1, "10.0.5.0/30", "10.0.5.2", src=_lo(network, "AS1"))  # so EveLink link subnet is reachable
     add(p1, "default", "10.0.2.2", src=_lo(network, "AS1"))
 
-    # AS2 → customer prefixes (ACM+Web) via 10.0.3.2; default via AS1
+    # AS2 → customer prefixes (ACM+Web) via 10.0.3.2; everything behind AS1 via 10.0.2.1
     # (Web's loopback is 198.82.0.1, the acm.org service address.)
     add(p2, f"{_lo(network, 'ACM')}/32", "10.0.3.2", src=_lo(network, "AS2"))
     add(p2, f"{_lo(network, 'Web')}/32", "10.0.3.2", src=_lo(network, "AS2"))
     add(p2, "10.0.4.0/30", "10.0.3.2", src=_lo(network, "AS2"))  # so ACM–Web link subnet is reachable
-    add(p2, "default", "10.0.2.1", src=_lo(network, "AS2"))
+    add(p2, f"{_lo(network, 'AS1')}/32", "10.0.2.1", src=_lo(network, "AS2"))
+    add(p2, f"{_lo(network, 'Uni')}/32", "10.0.2.1", src=_lo(network, "AS2"))
+    add(p2, f"{_lo(network, 'EveLink')}/32", "10.0.2.1", src=_lo(network, "AS2"))
+    add(p2, "10.0.1.0/30", "10.0.2.1", src=_lo(network, "AS2"))  # Uni NATs campus traffic to 10.0.1.1
+    add(p2, "10.0.5.0/30", "10.0.2.1", src=_lo(network, "AS2"))
+    _answer_for_the_internet(p2, logger)
 
     # ACM → Web via direct link; default via AS2
     add(acm, f"{_lo(network, 'Web')}/32", "10.0.4.2", src=_lo(network, "ACM"))
@@ -183,6 +192,30 @@ def setup_routing(network: Network, logger) -> None:
     univ.cmd(f"iptables -t nat -A POSTROUTING -o Uni-eth1 ! -s {uni_lo} -j MASQUERADE")
 
 
+# Address space that belongs to the testbed: link subnets, the campus behind Uni's NAT, ACM's
+# content block, and the transit ASes' and EveLink's loopbacks. Everything else is "the Internet".
+TESTBED_SPACE = ["10.0.0.0/8", "128.173.0.0/16", "198.82.0.0/24", "4.2.2.1/32", "154.54.1.1/32", "91.214.0.1/32"]
+# Never claimed: unspecified, loopback, and multicast/reserved space.
+_NOT_INTERNET = ["0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/3"]
+
+
+def _answer_for_the_internet(host, logger) -> None:
+    """Make `host` answer for every address outside the testbed.
+
+    The testbed has no Internet beyond its nodes, but agents sanity-check it while
+    troubleshooting (e.g. ping 8.8.8.8). A probe that fails turns into a phantom outage that the
+    KP then chases instead of the real fault. Local routes for the complement of the testbed's
+    address space make `host` reply as any outside address, without touching routing inside the
+    testbed. They must go in the local table: the kernel ignores local routes elsewhere.
+    """
+    outside = [ipaddress.ip_network("0.0.0.0/0")]
+    for block in map(ipaddress.ip_network, TESTBED_SPACE + _NOT_INTERNET):
+        outside = [part for net in outside for part in (net.address_exclude(block) if block.subnet_of(net) else [net])]
+    for net in outside:
+        host.cmd(f"ip route add local {net} dev lo table local")
+    logger.info("%s answers for addresses outside the testbed (%d local routes).", host.name, len(outside))
+
+
 def start_services(network: Network, logger) -> None:
     """Start dnsmasq resolvers and the HTTP server.
 
@@ -195,13 +228,17 @@ def start_services(network: Network, logger) -> None:
     # ACM_RESOLVERS) and launched inside the host's isolation namespace via ns_cmd, so the host's
     # own agent can inspect (ps/ss -p), read the --addn-hosts override, and reload it, while other
     # orgs cannot. Reaped when the anchor is torn down in network.stop().
+    # There is no upstream to recurse to, so every other name resolves to INTERNET_IP, an address
+    # outside the topology that AS2 answers for (see _answer_for_the_internet). Without this dnsmasq
+    # answers REFUSED ("Not Ready"), which reads as a broken resolver. acm.org is unaffected:
+    # --local=/acm.org/ is more specific, so acm.org names come only from the hosts file.
     for res, (hosts_file, pid_file) in ACM_RESOLVERS.items():
         host = network.hosts[res]
         _write_acm_hosts(hosts_file, WEBSERVER_IP)
         logger.info("Starting dnsmasq on %s (%s), acm.org from %s...", res, _lo(network, res), hosts_file)
         host.ns_cmd(
             f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
-            f" --local=/acm.org/ --addn-hosts={hosts_file}"
+            f" --local=/acm.org/ --address=/#/{INTERNET_IP} --addn-hosts={hosts_file}"
             f" --listen-address={_lo(network, res)} --bind-interfaces --port=53"
             f" --pid-file={pid_file} &"
         )
