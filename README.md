@@ -1,6 +1,7 @@
 # Instantiating the Knowledge Plane
 
 **[Project page](https://fchamicapereira.github.io/agentic-networks/)** ·
+**[Paper data](https://fchamicapereira.github.io/agentic-networks/paper-data/)** ·
 **[Browse experiment logs](https://fchamicapereira.github.io/agentic-networks/logs/)**
 
 Research code for *Instantiating the Knowledge Plane* (HotNets 2026). LLM agents run as
@@ -29,6 +30,7 @@ complete logs of every experiment reported in the paper.
 | `topologies/` | Network topologies as CSV, plus rendered PDFs |
 | `policies/` | Routing contracts and policies handed to agents |
 | `assets/` | Emulated ACM web server and load client (TLS material is generated per run) |
+| `paper-data/` | **Frozen snapshot of the runs reported in the paper** (5 scenarios × 4 models), with their inputs and checksums; never modified — see its README |
 | `logs/` | Full logs, transcripts, reports, and HTML timelines for every run |
 | `website/` | Project landing page, published with GitHub Pages |
 | `tools/` | Setup, plotting, log browsing, and analysis utilities |

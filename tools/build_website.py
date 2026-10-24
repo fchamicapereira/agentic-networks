@@ -8,6 +8,8 @@ root, and every experiment artifact under logs/, indexed by a generated dashboar
     <output>/logs/index.html     generated dashboard of all runs
     <output>/logs/<category>/    timelines, reports, transcripts, routes PDFs
     <output>/logs/**/*.md.html   reports pre-rendered for the browser
+    <output>/paper-data/         the frozen snapshot of the paper's runs, with its own index
+    <output>/demo/recordings/    the paper runs as demo event streams (demo/EVENTS.md)
 
 Both the local server (tools/serve_website.py) and the GitHub Pages workflow call this,
 so what you see locally is byte-for-byte what gets deployed.
@@ -34,6 +36,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "demo" / "tools"))
+
+import logs_to_events  # noqa: E402
+
+PAPER_DATA = REPO_ROOT / "paper-data"
 DEFAULT_OUTPUT = REPO_ROOT / "_site"
 
 FINAL_SUFFIX = "-final-report.md"
@@ -162,6 +169,56 @@ def render_dashboard(logs_dir: Path) -> bytes:
     return "".join(parts).encode("utf-8")
 
 
+# --- paper data page ---------------------------------------------------------------
+
+def render_paper_page(paper_out: Path) -> bytes:
+    """Index of the frozen paper snapshot, driven by its runs.json: one table per scenario,
+    one row per model, linking each run's replay, timeline, reports, and agent logs."""
+    meta = json.loads((paper_out / "runs.json").read_text())
+
+    def link(rel: str | None, label: str) -> str:
+        if rel is None or not (paper_out / rel).exists():
+            return f'<span class="missing">{html.escape(label)}</span>'
+        if rel.endswith(".md"):
+            rel += ".html"
+        return f'<a href="{quote(rel)}">{html.escape(label)}</a>'
+
+    parts = [_PAPER_HEAD.format(paper=html.escape(meta["paper"]), commit=html.escape(meta["source_commit"][:7]),
+                                n=sum(len(s["runs"]) for s in meta["scenarios"]))]
+    for sc in meta["scenarios"]:
+        parts.append(f'<section><h2>{html.escape(sc["title"])}</h2>'
+                     f'<p class="where">{html.escape(sc["paper"])}</p><table class="runs">'
+                     '<tr><th>Model</th><th>Watch</th><th>Read</th><th>Raw</th></tr>')
+        for run in sc["runs"]:
+            stem, d = run["stem"], sc["logs_dir"]
+
+            def f(suffix: str, _d=d, _stem=stem, _files=run["files"]) -> str | None:
+                rel = f"{_d}/{_stem}{suffix}"
+                return rel if rel in _files else None
+
+            agents = " ".join(link(f"{d}/{stem}-{n}.log", n) for n in sc["nodes"])
+            extras = [link(f(sfx), label) for sfx, label in
+                      ((".txt", "transcript"), ("-routes.pdf", "routes.pdf"), ("-data.json", "traffic data"),
+                       ("-tput-paper.pdf", "Figure 3")) if f(sfx)]
+            parts.append(
+                f'<tr><td class="model">{html.escape(run["model_label"])}</td>'
+                f'<td><a href="../demo/#{quote(sc["id"])}/{quote(run["model"])}">replay</a> &middot; '
+                f'{link(f(".html"), "timeline")}</td>'
+                f'<td>{link(f("-final-report.md"), "final report")} &middot; '
+                f'{link(f("-reasoning-moments.md"), "quotes")}</td>'
+                f'<td><details><summary>agent logs</summary>{agents}</details>'
+                + "".join(f" &middot; {e}" for e in extras) + '</td></tr>')
+        parts.append("</table></section>")
+    inputs = sorted(p.relative_to(paper_out).as_posix() for p in (paper_out / "inputs").rglob("*")
+                    if p.is_file() and not p.name.endswith(".md.html"))
+    parts.append('<section><h2>Inputs</h2><p class="where">What the agents were given: prompts, '
+                 'topologies, the experiment config, and the code defining the shared system prompt, '
+                 'tools, and each scenario.</p><ul class="inputs">'
+                 + "".join(f"<li>{link(rel, rel[len('inputs/'):])}</li>" for rel in inputs) + "</ul></section>")
+    parts.append(_PAPER_TAIL)
+    return "".join(parts).encode("utf-8")
+
+
 # --- markdown pre-rendering ------------------------------------------------------
 
 def load_md_renderer() -> str | None:
@@ -224,7 +281,8 @@ def sync_tree(src: Path, dst: Path) -> int:
     return copied
 
 
-def build(website_dir: Path, logs_dir: Path, output: Path, clean: bool = False) -> None:
+def build(website_dir: Path, logs_dir: Path, output: Path, clean: bool = False,
+          paper_dir: Path = PAPER_DATA) -> None:
     if clean and output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -245,6 +303,18 @@ def build(website_dir: Path, logs_dir: Path, output: Path, clean: bool = False) 
     else:
         n_md = render_markdown_pages(logs_out, md_js)
         print(f"  markdown     : {n_md} report(s) pre-rendered")
+
+    paper_out = output / "paper-data"
+    if paper_dir.is_dir():
+        sync_tree(paper_dir, paper_out)
+        (paper_out / "index.html").write_bytes(render_paper_page(paper_out))
+        if md_js is not None:
+            render_markdown_pages(paper_out, md_js)
+        print("  paper data   : paper-data/ (frozen snapshot of the paper's runs)")
+        n_rec = logs_to_events.write_recordings(output / "demo" / "recordings", paper_dir)
+        print(f"  demo         : {n_rec} recording(s) in demo/recordings/")
+    else:
+        print(f"  WARNING: {paper_dir} not found; no paper data page and no demo recordings.", file=sys.stderr)
 
 
 def parse_args():
@@ -286,6 +356,9 @@ _PAGE_HEAD = """<!DOCTYPE html>
          padding: 1.5rem; background: #fff; color: #1c2330; }}
   h1 {{ margin: 0 0 .25rem; }}
   .sub {{ color: #888; margin: 0 0 1rem; }}
+  .paper-note {{ margin: 0 0 1rem; padding: .5rem .7rem; border-left: 3px solid #2563eb;
+                background: #f4f7fd; }}
+  .paper-note a {{ color: #2563eb; font-weight: 600; }}
   .home {{ display: inline-block; margin-bottom: 1rem; color: #2563eb;
           text-decoration: none; font-size: .9rem; }}
   #filter {{ width: 100%; box-sizing: border-box; padding: .5rem .6rem;
@@ -311,7 +384,57 @@ _PAGE_HEAD = """<!DOCTYPE html>
 <a class="home" href="../index.html">&larr; Instantiating the Knowledge Plane</a>
 <h1>Experiment logs</h1>
 <p class="sub">{n_runs} run(s) across {n_cats} categor(ies)</p>
+<p class="paper-note">Every run, including exploratory ones that are not in the paper.
+The runs reported in the paper are in <a href="../paper-data/">Paper data</a>.</p>
 <input id="filter" type="search" placeholder="Filter runs (name, category, host)&hellip;" autofocus>
+"""
+
+_PAPER_HEAD = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper data</title>
+<style>
+  :root {{ color-scheme: light; }}
+  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 60rem;
+         padding: 1.5rem; background: #fff; color: #1c2330; }}
+  h1 {{ margin: 0 0 .25rem; }}
+  .sub {{ margin: 0 0 .5rem; }}
+  .frozen {{ margin: 0 0 1.5rem; padding: .55rem .8rem; border-left: 3px solid #2563eb;
+            background: #f4f7fd; font-size: .92rem; }}
+  .home {{ display: inline-block; margin-bottom: 1rem; color: #2563eb;
+          text-decoration: none; font-size: .9rem; }}
+  a {{ color: #2563eb; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  section {{ margin-bottom: 1.8rem; }}
+  h2 {{ font-size: 1.1rem; border-bottom: 1px solid #8883; padding-bottom: .2rem; margin-bottom: .2rem; }}
+  .where {{ color: #666; margin: 0 0 .5rem; font-size: .9rem; }}
+  table.runs {{ border-collapse: collapse; width: 100%; font-size: .92rem; table-layout: fixed; }}
+  table.runs th:nth-child(1) {{ width: 24%; }} table.runs th:nth-child(2) {{ width: 20%; }}
+  table.runs th:nth-child(3) {{ width: 24%; }}
+  table.runs th {{ text-align: left; font-weight: 600; color: #666; font-size: .8rem;
+                  border-bottom: 1px solid #8883; padding: .2rem .6rem .2rem 0; }}
+  table.runs td {{ padding: .35rem .6rem .35rem 0; border-bottom: 1px solid #8882; vertical-align: top; }}
+  td.model {{ font-weight: 600; white-space: nowrap; }}
+  details {{ display: inline; }}
+  summary {{ cursor: pointer; color: #2563eb; display: inline; }}
+  details[open] summary {{ margin-right: .4rem; }}
+  .missing {{ color: #aaa; }}
+  ul.inputs {{ columns: 2; font-family: ui-monospace, monospace; font-size: .85rem; padding-left: 1.2rem; }}
+  code {{ font-family: ui-monospace, monospace; }}
+  @media (max-width: 640px) {{ ul.inputs {{ columns: 1; }} table.runs {{ font-size: .85rem; }} }}
+</style></head><body>
+<a class="home" href="../index.html">&larr; Instantiating the Knowledge Plane</a>
+<h1>Paper data</h1>
+<p class="sub">The {n} runs reported in <em>{paper}</em>.</p>
+<p class="frozen"><strong>Frozen snapshot.</strong> These files are exactly the runs the paper
+reports, copied from commit <code>{commit}</code> and never changed since: every file is listed
+with its SHA-256 in <a href="MANIFEST.sha256">MANIFEST.sha256</a>
+(<a href="README.md.html">about this snapshot</a>, <a href="runs.json">runs.json</a>).
+Later and exploratory runs are in the <a href="../logs/">full experiment log</a>.</p>
+"""
+
+_PAPER_TAIL = """
+</body></html>
 """
 
 _PAGE_TAIL = """
