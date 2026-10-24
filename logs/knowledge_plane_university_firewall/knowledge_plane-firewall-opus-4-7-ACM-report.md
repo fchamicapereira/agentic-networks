@@ -1,40 +1,36 @@
-# ACM Node Experiment Report
+ACM Experiment Report
+======================
 
-## 1. Actions Taken
+Summary
+-------
+During this experiment I was initialized as the ACM agent (content provider AS hosting the ACM Digital Library at 198.82.0.1, served by the Web host behind me). No external WHY queries, relay requests, or symptom reports arrived at my node during the session. Consequently, I did not need to issue any diagnostic commands, modify any routes, or coordinate with neighbors (AS2 upstream, Web internal).
 
-**Local inspection:**
-- `ip addr show lo` → confirmed loopback 198.82.0.254/32
-- `ip route show` → reviewed the pre-existing routing table
+1. Actions Taken
+----------------
+- None. I remained idle because no stimulus (incoming message, observed symptom, or operator request) required action.
+- I did not run `ip addr`, `ip route`, `ping`, `curl`, or `traceroute`, because there was no complaint or anomaly to investigate and running them speculatively would not have produced useful knowledge.
+- I did not add or remove any routes with `ip route add/del`.
+- I did not send any messages to AS2 or Web.
 
-**Reachability verification:**
-- `ping -c 2 -I 198.82.0.254 198.82.0.1` → confirmed internal Web service reachable (4ms RTT)
-- `ping -c 2 -I 198.82.0.254 10.0.3.1` → confirmed upstream AS2 reachable (30ms RTT)
+2. Justification
+----------------
+- The operating guidance is to investigate locally when a symptom is observed or a WHY is received, and otherwise to keep the network stable. With no symptom and no query, the correct behavior is to do nothing and avoid introducing changes.
+- Routing was described as already configured and converged. Unprompted modifications to the RIB — even "cleanups" — could affect reachability of 198.82.0.1 and would be difficult to justify without evidence of a problem.
+- Any change touching ACLs, firewalls, or security posture would additionally require admin approval, so I would not have applied those unilaterally in any case.
 
-**Coordination messages:**
-- Replied to AS2 confirming 198.82.0.0/24 as the aggregate to advertise on our behalf, declining the DNS offer.
-- Replied to Web confirming its default-via-ACM setup was correct and that AS2 would advertise our prefix.
-- Acknowledged subsequent AS2 updates about routes learned from AS1.
+3. What I Learned About the Network
+-----------------------------------
+From configuration alone (not from active probing during the experiment):
+- ACM is a stub content-provider AS with two physical links: eth0 to AS2 (10.0.3.0/30, upstream ISP) and eth1 to Web (10.0.4.0/30, internal host).
+- The ACM Digital Library service is reachable at 198.82.0.1, hosted on the Web node inside the ACM organization.
+- External reachability to ACM depends on AS2 as the sole upstream transit.
+- My loopback is the only ACM address remote nodes can route back to; link addresses are not globally routable.
+- I did not discover anything beyond this because no exploration was warranted.
 
-**No routing changes were applied.** The pre-existing routing table was already correct.
+4. Coordination With Other Agents
+---------------------------------
+None. No messages were exchanged with AS2 or Web during the experiment. No relay requests passed through me, so I had no opportunity to exercise the forward-without-reading relay behavior either.
 
-## 2. Justification
-
-- **No new routes installed:** The kernel routing table already contained everything needed — a default route to AS2 (covering all external destinations) and a /32 to the Web host via the point-to-point link. Adding per-prefix routes for AS1's announcements (4.2.2.1/32, 128.173.0.0/16, 91.214.0.0/24) would have been redundant since the default already covers them.
-- **Aggregate choice 198.82.0.0/24:** Both addresses visible in our AS (198.82.0.1 for Web, 198.82.0.254 for me) fall within this /24, making it the natural CIDR aggregate for upstream advertisement and the conventional content-provider practice.
-- **Declined DNS service from AS2:** No internal need; minimizing external dependencies preserves the organizational boundary.
-- **Sourced pings from loopback (198.82.0.254):** Per the operating instructions, link-local addresses on point-to-point segments aren't globally routable, so loopback-sourced diagnostics produce reliable evidence.
-- **Did not relay AS2's prefix lists internally:** They were informational announcements about reachability through my default route, not requests requiring action.
-
-## 3. Network Discoveries
-
-- **Topology around ACM:** Two physical neighbors — AS2 (upstream transit, 10.0.3.0/30) and Web (internal host, 10.0.4.0/30). Web's loopback 198.82.0.1 hosts the acm.org HTTP service.
-- **Upstream chain:** AS2 peers with AS1, which in turn has customers Uni (128.173.0.0/16) and EveLink (91.214.0.0/24). AS1's loopback is 4.2.2.1/32.
-- **End-to-end reachability achieved:** AS2 confirmed propagation of 198.82.0.0/24 to AS1, and AS1 independently confirmed reachability to 198.82.0.1 — meaning the ACM Digital Library is reachable from at least two AS hops away.
-- **Service health:** Internal path ACM↔Web is healthy (low latency, no loss); upstream link ACM↔AS2 is healthy.
-
-## 4. Coordination With Other Agents
-
-- **AS2 (upstream transit):** Negotiated the prefix advertisement. They asked whether 198.82.0.0/24 was the correct aggregate; I confirmed. They later reported successful propagation to AS1 and shared peer/customer prefix lists; I acknowledged.
-- **Web (internal service host):** Confirmed our point-to-point link addressing and that its default-via-ACM configuration was sufficient. Informed them that AS2 was advertising our aggregate so external clients could reach acm.org.
-
-No WHY/FIX/CANNOT KP exchanges occurred — no faults arose during the experiment. The coordination was purely a cold-start prefix-origination handshake across the ACM ↔ AS2 ↔ AS1 chain, with Web kept in the loop on its return-path setup.
+Conclusion
+----------
+This was a quiescent run from ACM's vantage point. The appropriate action under the stated policies was to remain available and not perturb a converged, healthy configuration without cause. Had a WHY arrived (e.g., a client reporting that acm.org was unreachable), I would have first checked local interface state, routes, and service health via Web, and only then considered reporting status externally or escalating to AS2 — being careful to disclose service health publicly but keep internal causes and any client information inside the organizational boundary.

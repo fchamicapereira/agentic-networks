@@ -1,151 +1,93 @@
-Experiment report
+Experiment report:
 
 1. Actions taken
 
-- Checked local addressing and routing:
-  - Ran `ip addr show lo`, `ip addr show User-eth0`, and `ip route show`.
-  - Found stable loopback address `128.173.10.1/32`.
-  - Found point-to-point link to Uni on `User-eth0`: local `10.0.6.1/30`, peer `10.0.6.2/30`.
-  - Found default route already installed:
-    - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+- I checked the laptop’s loopback address, routing table, resolver configuration, DNS result for acm.org, HTTPS reachability, and ICMP reachability with:
 
-- Reproduced the user’s reported failure to load `acm.org`:
-  - Ran `getent ahosts acm.org`.
-  - Observed `acm.org` resolved to `198.82.0.1`.
-  - Ran `curl -v --max-time 10 http://acm.org/`.
-  - The HTTP connection to `198.82.0.1:80` timed out after 10 seconds.
-  - Ran `curl -v --max-time 10 https://acm.org/`.
-  - The HTTPS connection to `198.82.0.1:443` also timed out after 10 seconds.
-  - Ran `ping -c 3 -I 128.173.10.1 198.82.0.1`.
-  - Observed 100% packet loss.
+  - `ip addr show lo`
+  - `ip route show`
+  - `cat /etc/resolv.conf`
+  - `getent ahosts acm.org`
+  - `curl -4 -I --connect-timeout 5 --max-time 10 https://acm.org/`
+  - `ping -c 3 -I 128.173.10.1 acm.org`
 
-- Collected supporting local diagnostics:
-  - Ran `cat /etc/resolv.conf`.
-  - Found DNS configured to use `nameserver 127.0.0.1`.
-  - Ran `ip route get 198.82.0.1 from 128.173.10.1`.
-  - Confirmed traffic to `198.82.0.1` from my stable loopback would go via `10.0.6.2 dev User-eth0`.
+- I observed that the stable loopback address was `128.173.10.1/32`.
 
-- Processed Uni’s route advertisement:
-  - Uni advertised stable loopback `128.173.0.1/32` reachable via `10.0.6.2`.
-  - Installed the route using:
-    - `ip route add 128.173.0.1/32 via 10.0.6.2 dev User-eth0 src 128.173.10.1`
-  - Advertised my own stable loopback to Uni:
-    - `128.173.10.1/32` reachable via `10.0.6.1`.
+- I observed the route table contained:
+  - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+  - `10.0.6.0/30 dev User-eth0 proto kernel scope link src 10.0.6.1`
 
-- Contacted the Knowledge Plane through Uni:
-  - Sent Uni the objective observations:
-    - `acm.org` resolved to `198.82.0.1`.
-    - HTTP and HTTPS to `198.82.0.1` timed out.
-    - ICMP from `128.173.10.1` to `198.82.0.1` had 100% loss.
-    - Route lookup selected Uni as next hop via `10.0.6.2`.
-  - Asked the KP to investigate routing, filtering, DNS mapping, or destination service/path failure.
+- I did not add, delete, or modify any routes.
 
-- Verified local connectivity to Uni:
-  - Ran `ping -c 3 -I 128.173.10.1 128.173.0.1`.
-  - Received 3/3 replies, 0% packet loss.
-  - Ran `ping -c 3 -I 128.173.10.1 10.0.6.2`.
-  - Received 3/3 replies, 0% packet loss.
+- I contacted the local Knowledge Plane contact, Uni, using `send_message`. I reported:
+  - The owner’s original complaint that `https://acm.org/` failed to load.
+  - The local diagnostics I performed.
+  - That `acm.org` resolved to `198.82.0.1`.
+  - That HTTPS connection attempts timed out.
+  - That ping sourced from the loopback address had 100% packet loss.
 
-- Tested an unrelated hostname:
-  - Ran `getent ahosts example.com | head -5` and `curl -I --max-time 10 http://example.com/`.
-  - The `curl` test failed with `Could not resolve host: example.com`, indicating DNS resolution was not generally successful for that name at that moment. This was not the primary failure under investigation because `acm.org` did resolve successfully.
+- After receiving the Knowledge Plane diagnosis from Uni, I reported the result back to the owner.
 
-- Received KP diagnosis from Uni:
-  - Uni/KP reported:
-    - Forwarding was enabled on Uni.
-    - Uni’s route lookup for traffic from `128.173.10.1` to `198.82.0.1` selected the upstream path via AS1 at `10.0.1.2`.
-    - Uni could reach AS1’s stable loopback `4.2.2.1`.
-    - Uni had explicit iptables DROP rules for `198.82.0.0/24` in both FORWARD and OUTPUT.
-    - This block includes `198.82.0.1`, the resolved address for `acm.org`.
-    - KP could not apply the fix autonomously because it involved changing security policy; administrators were notified.
+2. Justification behind each decision
 
-- Reported the diagnosis to the laptop owner:
-  - Explained that the failure was caused by a Uni firewall block on `198.82.0.0/24`, not by the browser or laptop.
-  - Noted that administrators had already been notified and that approval was required before the firewall policy could be changed.
+- I first performed local diagnostics instead of immediately relaying the owner’s complaint because the owner’s description was non-technical and could have been caused by many different issues: DNS failure, local routing failure, upstream reachability failure, firewall filtering, or a remote server problem.
 
-- Per Uni’s later request, verified reachability from my stable loopback to several destinations:
-  - Ran:
-    - `ping -c 3 -I 128.173.10.1 4.2.2.1`
-    - `ping -c 3 -I 128.173.10.1 91.214.0.1`
-    - `ping -c 3 -I 128.173.10.1 154.54.1.1`
-    - `ping -c 3 -I 128.173.10.1 198.82.0.1`
-  - Results:
-    - AS1 `4.2.2.1`: 3/3 replies, 0% packet loss, average RTT about 24.051 ms.
-    - EveLink `91.214.0.1`: 3/3 replies, 0% packet loss, average RTT about 44.071 ms.
-    - AS2 `154.54.1.1`: 3/3 replies, 0% packet loss, average RTT about 64.074 ms.
-    - ACM `198.82.0.1`: 0/3 replies, 100% packet loss.
-  - Reported these results back to Uni.
+- I checked `ip addr show lo` because the instructions stated that the loopback address is the stable node address and should be used as the source for diagnostic traffic to non-adjacent nodes. The stable address found was `128.173.10.1/32`.
 
-2. Justification behind decisions
+- I checked the routing table to confirm that the laptop had a default route through Uni and that traffic would be sourced appropriately from the loopback address. The default route was already configured via `10.0.6.2` on `User-eth0`.
 
-- I first checked local interface and route state because remote nodes can only route back to my loopback address, not my point-to-point link address. This confirmed that diagnostic traffic should be sourced from `128.173.10.1`.
+- I checked `/etc/resolv.conf` and DNS resolution to determine whether the problem was name resolution. DNS was functioning locally: `acm.org` resolved to `198.82.0.1`.
 
-- I reproduced the user’s complaint instead of forwarding it directly because the laptop owner’s browser failure needed objective technical evidence. I tested DNS, HTTP, HTTPS, ICMP, and route selection.
+- I used `curl -4 -I` to test the actual user-facing service, HTTPS, without downloading the full page. The connection timed out, which reproduced the owner’s complaint objectively.
 
-- I used `curl` to ports 80 and 443 because a web page load could fail due to either HTTP or HTTPS connectivity issues. Both timing out suggested a lower-level reachability or filtering problem.
+- I used `ping` sourced from `128.173.10.1` to test basic reachability to the resolved destination while avoiding misleading results from using the point-to-point link address. Ping also failed with 100% packet loss.
 
-- I used `ping -I 128.173.10.1` to source traffic from the stable loopback as required, avoiding misleading failures caused by replies to non-routable point-to-point addresses.
+- I contacted Uni because the laptop is not part of the Knowledge Plane and Uni is the local KP contact. The evidence suggested the problem was beyond the local laptop.
 
-- I installed Uni’s advertised loopback route because Uni is my directly connected KP contact and its stable loopback needed to be reachable for end-to-end control communication.
+- I did not alter routing rules because routing was already configured and converged, and there was no evidence that a local route change would fix the issue.
 
-- I advertised my own loopback to Uni because remote nodes must route back to `128.173.10.1/32`, not to the link address `10.0.6.1`.
+3. What I discovered about the network
 
-- I contacted Uni/KP only after collecting local evidence, so the KP had concrete observations: DNS result, failed service tests, failed ICMP, and route lookup.
+- The laptop’s stable address is `128.173.10.1/32`.
 
-- I accepted the KP’s firewall diagnosis because it was consistent with all observed symptoms:
-  - Local route selection existed.
-  - Upstream connectivity from Uni existed.
-  - Other upstream loopbacks were reachable.
-  - Only the ACM prefix `198.82.0.0/24` was blocked.
-  - My own later pings confirmed reachability to AS1, EveLink, and AS2 but not ACM.
+- The laptop is directly connected to Uni over `User-eth0`:
+  - Local link address: `10.0.6.1/30`
+  - Peer address: `10.0.6.2/30`
 
-- I did not attempt to modify Uni’s firewall because I do not manage Uni directly and the KP explicitly stated the change required administrator approval due to security-policy implications.
-
-3. Discoveries about the network
-
-- My node, User, has stable loopback `128.173.10.1/32`.
-
-- User is directly connected only to Uni:
-  - User side: `10.0.6.1/30`
-  - Uni side: `10.0.6.2/30`
-
-- The default route from User points to Uni:
+- The laptop’s default route points to Uni:
   - `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
 
-- Uni’s stable loopback is `128.173.0.1/32`, reachable via `10.0.6.2`.
+- DNS resolution for `acm.org` worked and returned `198.82.0.1`, so the failure was not a DNS resolution failure.
 
-- `acm.org` resolved to `198.82.0.1`.
+- HTTPS connectivity to `198.82.0.1` failed with a connection timeout.
 
-- Traffic from User’s stable loopback to `198.82.0.1` was routed toward Uni but failed for ICMP, HTTP, and HTTPS.
+- ICMP reachability to `198.82.0.1`, sourced from the stable loopback address, also failed.
 
-- The failure was not due to missing local route or broken User-Uni connectivity:
-  - User could ping Uni’s loopback `128.173.0.1`.
-  - User could ping Uni’s link address `10.0.6.2`.
+- The Knowledge Plane diagnosed the root cause as a university gateway firewall policy. Uni had explicit firewall DROP rules for destination `198.82.0.0/24` in both `FORWARD` and `OUTPUT`.
 
-- Broader upstream reachability existed:
-  - AS1 `4.2.2.1` reachable with 0% loss.
-  - EveLink `91.214.0.1` reachable with 0% loss.
-  - AS2 `154.54.1.1` reachable with 0% loss.
+- Since `acm.org` resolved to `198.82.0.1`, that firewall policy directly blocked the destination.
 
-- ACM `198.82.0.1` remained unreachable with 100% packet loss.
+- The issue was therefore not caused by the laptop, DNS, local routing, or upstream reachability. It was caused by a university firewall rule blocking the destination network.
 
-- The root cause reported by the KP was Uni’s firewall:
-  - Explicit iptables DROP rules existed for `198.82.0.0/24` in FORWARD and OUTPUT.
-  - That prefix includes `198.82.0.1`, the address used for `acm.org`.
+- The proposed fix would be to remove or modify the firewall block for `198.82.0.0/24`, or add an approved exception for `198.82.0.1/acm.org`. However, that requires administrator approval because it is a security-boundary policy change.
 
 4. Coordination with other agents
 
-- Coordinated with Uni, my only directly connected neighbor and local Knowledge Plane contact.
+- I coordinated with Uni, the directly connected Knowledge Plane contact.
 
-- Received from Uni:
-  - Route advertisement for `128.173.0.1/32`.
-  - Confirmation that default/upstream Internet traffic should go via `10.0.6.2`.
-  - KP diagnosis identifying Uni firewall DROP rules for `198.82.0.0/24`.
-  - Later request to verify reachability to AS1, EveLink, AS2, and ACM.
+- I sent Uni a technical report containing:
+  - The owner’s complaint.
+  - The laptop’s stable source address.
+  - The default route.
+  - DNS resolution result.
+  - HTTPS timeout result.
+  - ICMP packet loss result.
 
-- Sent to Uni:
-  - My route advertisement for `128.173.10.1/32`.
-  - A KP request with objective failure observations for `acm.org`.
-  - Verification results showing 0% loss to AS1, EveLink, and AS2, but 100% loss to ACM.
+- Uni replied with the Knowledge Plane diagnosis:
+  - Routing and forwarding at Uni were up.
+  - Upstream AS1 was reachable from Uni.
+  - Firewall DROP rules at Uni matched destination `198.82.0.0/24`.
+  - The issue had been escalated to administrators.
+  - No autonomous firewall change was applied.
 
-- No direct coordination occurred with non-adjacent agents. All Knowledge Plane interaction was through Uni, as required.
+- I then informed the owner that the problem was a university firewall block and that administrators had already been notified.
