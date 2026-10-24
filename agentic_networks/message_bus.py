@@ -5,8 +5,11 @@ from typing import Optional
 class MessageBus:
     """Thread-safe per-node inbox. One shared instance passed to all agents."""
 
-    def __init__(self, node_names: list[str]):
-        self._queues: dict[str, queue.Queue] = {name: queue.Queue() for name in node_names}
+    def __init__(self, node_names: list[str], external: "list[str] | tuple[str, ...]" = ()):
+        # External inboxes belong to parties outside the network (e.g. the laptop's owner in the
+        # KP scenarios). Nobody drains them, so they never count as messages in flight.
+        self._queues: dict[str, queue.Queue] = {name: queue.Queue() for name in [*node_names, *external]}
+        self._external = set(external)
 
     def send(self, to: str, sender: str, message: str):
         if to not in self._queues:
@@ -34,4 +37,4 @@ class MessageBus:
 
     def in_flight(self) -> bool:
         """True if any message has been sent but not yet taken from its recipient's inbox."""
-        return any(not q.empty() for q in self._queues.values())
+        return any(not q.empty() for name, q in self._queues.items() if name not in self._external)

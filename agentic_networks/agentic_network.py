@@ -3,7 +3,7 @@ import threading
 import time
 
 from tqdm import tqdm
-from typing import Callable
+from typing import Callable, Iterable
 from mininet.node import Host
 
 from .network_agent import AGENT_TOOLS_DEFINITIONS, IDLE_DESCRIPTION_OBSERVING, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
@@ -142,10 +142,17 @@ class AgenticNetwork:
         post_reactors: list[Reactor] = [],
         extra_tools: list[dict] | None = None,
         context_fns: "dict[str, Callable[[], str]] | None" = None,
+        start_waiting: Iterable[str] = (),
+        external_contacts: "dict[str, list[str]] | None" = None,
     ):
         self.logger = logging.getLogger("main")
         self.network = network
-        self.message_bus = MessageBus(list(network.hosts.keys()))
+        # external_contacts maps an agent to parties outside the network it may message
+        # (e.g. {"User": ["human"]}: only the laptop agent can talk to its owner).
+        external_contacts = external_contacts or {}
+        self.message_bus = MessageBus(
+            list(network.hosts.keys()), external=sorted({c for cs in external_contacts.values() for c in cs})
+        )
         self.reactors: list[Reactor] = reactors
         self.post_reactors: list[Reactor] = post_reactors
         self.agents: list[NetworkAgent] = [
@@ -166,6 +173,14 @@ class AgenticNetwork:
             )
             for name, host in network.hosts.items()
         ]
+
+        for agent in self.agents:
+            agent.add_contacts(external_contacts.get(agent.node_name, []))
+
+        # Agents that start idle: they take no turn until a message reaches them.
+        start_waiting = set(start_waiting)
+        for agent in self.agents:
+            agent.waiting = agent.node_name in start_waiting
 
         self._stopped: set[str] = set()
 

@@ -588,6 +588,11 @@ def main():
             vllm_host=args.vllm_host,
             vllm_port=args.vllm_port,
             window_size=args.window_size,
+            # The Knowledge Plane is query-driven: only User has something to act on (the
+            # owner's complaint); every other agent sleeps until a message reaches it.
+            start_waiting=[name for name in network.hosts if name != "User"],
+            # The laptop agent answers its owner, who complained to it as "human".
+            external_contacts={"User": ["human"]},
         )
 
         anet.send_message(

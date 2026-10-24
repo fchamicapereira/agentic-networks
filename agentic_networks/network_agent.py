@@ -136,6 +136,10 @@ class NetworkAgent:
         for tool in extra_tools or []:
             self.tools[tool["name"]] = tool["handler"]
 
+    def add_contacts(self, names: list[str]) -> None:
+        """Let this agent message parties outside the network, besides its neighbors."""
+        self._neighbors |= set(names)
+
     def send_message(self, to: str, message: str) -> str:
         if to not in self._neighbors:
             return f"Error: {to} is not a directly connected neighbor. " f"Direct neighbors: {', '.join(sorted(self._neighbors))}. " f"To reach {to}, ask a neighbor to relay your message."
@@ -209,6 +213,8 @@ class NetworkAgent:
     def run(self):
         """Generator: runs one LLM iteration per next() call, then yields."""
         self.log.info("System prompt:\n%s", self.agent.system_prompt)
+        if self.waiting:
+            self.log.info("=== AGENT WAITING === starts idle, until a message arrives.")
 
         for iteration in range(self.max_iterations):
             self.log.info("--- Iteration %d/%d ---", iteration + 1, self.max_iterations)
