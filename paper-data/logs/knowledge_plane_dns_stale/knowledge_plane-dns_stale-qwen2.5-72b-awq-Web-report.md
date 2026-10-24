@@ -1,0 +1,1 @@
+I observed the loopback address (198.82.0.1) and advertised it to ACM. I received ACM's stable node address (198.82.0.254) and added a route to it. I then verified connectivity to ACM using a ping. I decided to perform these actions to ensure stable and reliable end-to-end communication, as the loopback address is globally reachable and essential for routing.

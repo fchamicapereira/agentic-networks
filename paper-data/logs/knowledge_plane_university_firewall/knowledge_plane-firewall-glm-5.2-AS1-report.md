@@ -1,0 +1,5 @@
+**Observed:** I'm a central transit ISP with three neighbors: Uni (customer, eth0), AS2 (peer, eth1), and EveLink (customer, eth2). ACM sits behind AS2. Uni later advertised a campus user at 128.173.10.1 and reported a deliberate local firewall blocking 198.82.0.0/24. All link networks use /30 subnets; my loopback is 4.2.2.1.
+
+**Decided:** Installed specific /32 host routes for each neighbor loopback and infrastructure prefix, sourced all traffic from 4.2.2.1, propagated all learned prefixes to every neighbor via manual messaging, and left Uni's firewall untouched.
+
+**Why:** Sourcing from loopback ensures return traffic from non-adjacent nodes succeeds; installing only advertised /32s avoids accepting overly broad or unauthorized routes; full route exchange fulfills my transit role and maximizes connectivity; and the firewall change requires human approval per policy, so I won't override it autonomously. All pings and DNS resolution confirmed 0% loss end-to-end.

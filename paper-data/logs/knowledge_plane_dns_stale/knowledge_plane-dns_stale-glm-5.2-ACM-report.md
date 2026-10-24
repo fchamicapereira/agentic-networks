@@ -1,0 +1,5 @@
+I discovered my topology: ACM-eth0 connects to AS2 (upstream), ACM-eth1 connects to Web (internal HTTP host), and my loopback is 198.82.0.254/32. All neighbors and remote nodes were reachable with 0% packet loss, and the ACM Digital Library at 198.82.0.1 returned HTTP 200 throughout.
+
+When AS2 reported upstream DNS failures, I independently verified the issue: my local dnsmasq forwards external queries to 4.2.2.1 (AS1), and all upstream resolvers (AS1, EveLink, Uni) return REFUSED with EDE 23 for external domains. The Web node has no DNS or alternate services. I confirmed AS2's hypothesis that AS1 lacks a default route.
+
+I decided not to modify any routing or DNS configuration. All my routes were already correct and my service was healthy. The DNS failure is upstream in AS1's domain—outside my administrative boundary—so per policy I reported findings to AS2 and left the fix to the responsible party.

@@ -1,0 +1,1 @@
+I monitored for new information from AS1 but received none, so I remained idle to avoid complicating the situation. This approach ensured I didn't take unnecessary actions and maintained a stable state for diagnosing the network issue. The lack of response from AS1 suggests the issue is still under investigation.

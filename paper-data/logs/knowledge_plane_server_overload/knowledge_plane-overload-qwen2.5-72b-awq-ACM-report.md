@@ -1,0 +1,1 @@
+I observed the ACM Digital Library service returning a 503 Service Unavailable error. I decided to notify Web, follow up, and escalate the issue to higher-level support due to the persistent nature of the error. This was done to ensure the issue was addressed and to keep the requester informed of the ongoing efforts.

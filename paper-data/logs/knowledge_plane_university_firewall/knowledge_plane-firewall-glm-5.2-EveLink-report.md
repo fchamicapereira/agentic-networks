@@ -1,0 +1,5 @@
+I observed that my node EveLink has a single upstream connection to AS1 (10.0.5.1/30) and a loopback at 91.214.0.1/32. AS1 advertised 7 prefixes total across two batches: its own loopback, Uni (two addresses), AS2, and ACM (three prefixes). All destinations were reachable with 0% packet loss, with latency increasing linearly from ~20ms (AS1) to ~90ms (ACM).
+
+I decided to install a default route via AS1 with `src 91.214.0.1`, plus specific /32 routes for each advertised prefix, and to source all pings from my loopback. I installed the second-batch prefix (128.173.10.1) promptly upon receipt.
+
+The default route with loopback source ensures all egress traffic uses an address remote nodes can route back to, since link addresses aren't advertised network-wide. Specific routes provide explicit precedence and table clarity. I trusted the additional prefix from AS1 because it's my sole transit provider and a single /32 is consistent with a campus user address. I verified after every installation to confirm fixes directly rather than assume they work.

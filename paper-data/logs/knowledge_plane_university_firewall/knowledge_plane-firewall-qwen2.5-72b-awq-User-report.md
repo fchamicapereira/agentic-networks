@@ -1,0 +1,1 @@
+I observed that the traceroute to acm.org failed after the first hop (Uni). I decided to report this issue to Uni, who then informed me that a firewall rule was blocking traffic to 198.82.0.0/24, which includes acm.org. I reported this back to the user, explaining the firewall rule and the ongoing efforts to resolve the issue.

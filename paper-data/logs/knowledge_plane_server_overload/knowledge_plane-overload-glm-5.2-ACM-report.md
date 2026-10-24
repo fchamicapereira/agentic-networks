@@ -1,0 +1,5 @@
+I observed the ACM Digital Library returning 3/3 HTTP 200 OK responses, confirming service recovery after the Slowloris DDoS attack from 10.0.5.2 was mitigated upstream by AS1 and AS2. Web (the internal host running the service at 198.82.0.1) recommended keeping SLOW_HOLD_SECONDS at 1 second instead of reverting to 90, to avoid re-exposing the server to Slowloris.
+
+I decided to report done with success=true and leave SLOW_HOLD_SECONDS at 1 second pending admin review, rather than autonomously reverting it.
+
+I needed to independently verify the 200 OKs firsthand per the KP principle of basing conclusions on direct testing. The SLOW_HOLD_SECONDS parameter is a security enforcement setting requiring admin approval, so I deferred that decision. With all parties confirming mitigation and Web monitoring for recurrence, there was no further autonomous action for me to take.

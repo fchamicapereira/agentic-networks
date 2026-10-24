@@ -1,0 +1,1 @@
+I observed that traffic to `200.7.0.0/24` dropped from ~500 Mbps to ~102 Mbps on day 12.0. I decided to re-route the traffic from `Expensive` to `Cheap` to minimize costs, executing the necessary IP route commands. I maintained this configuration for the remainder of the experiment because the traffic volume remained low, ensuring cost efficiency.

@@ -1,0 +1,5 @@
+Observed my local topology: loopback 198.82.0.254/32, eth0 to AS2 (10.0.3.2/30), eth1 to Web (10.0.4.1/30), with a default route via AS2 and a route to 198.82.0.1 via Web. All services healthy — HTTP 200, 0% ping loss to both neighbors. AS2 already had routes to my prefixes; Web runs HTTP/HTTPS/DNS on 198.82.0.1.
+
+Decided to add an explicit /32 route to AS2's loopback (154.54.1.1), advertise my loopback and web service prefix (198.82.0.254/32, 198.82.0.1/32) to AS2 for upstream propagation, and exchange loopback info with Web. Deliberately did not advertise link-scoped prefixes (10.0.3.0/30, 10.0.4.0/30).
+
+Rationale: local audit before neighbor communication avoids unnecessary cross-domain queries; loopback-sourced pings give accurate diagnostics since link addresses aren't routable remotely; only service-relevant prefixes should be advertised network-wide. No faults found — work focused on explicit route installation, end-to-end verification, and establishing coordination channels with both neighbors.

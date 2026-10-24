@@ -1,0 +1,1 @@
+I checked the loopback interface to verify the Celer Bridge frontend IP, advertised the 44.192.0.0/16 prefix to Tier1, manually added the route, and verified both local and global reachability. I then reported completion, confirming all goals were achieved. This ensured the Celer Bridge frontend was operational and the prefix was globally reachable.

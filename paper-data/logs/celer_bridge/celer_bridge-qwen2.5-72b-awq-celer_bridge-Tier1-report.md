@@ -1,0 +1,1 @@
+I observed that my firewall rules did not block ICMP traffic and performed a UDP traceroute to confirm that the issue was specific to ICMP. I decided to inform TransitAS of these findings and suggest they investigate their network and intermediate networks. This was done to rule out local issues and provide evidence that the problem lies elsewhere.
