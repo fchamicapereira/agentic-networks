@@ -170,6 +170,18 @@ export function redact(text) {
   return text ? String(text).replace(KEY_RE, "[redacted key]") : "";
 }
 
+// Agent text is untrusted and often Markdown: render it, then sanitize the HTML before it reaches
+// the page. Without the vendored libraries it falls back to plain text.
+export function setMarkdown(el, text) {
+  const t = redact(text);
+  if (window.marked && window.DOMPurify) {
+    el.innerHTML = window.DOMPurify.sanitize(window.marked.parse(t, { breaks: true }));
+    el.classList.add("md");
+  } else {
+    el.textContent = t;
+  }
+}
+
 export function fmtTime(s) {
   s = Math.max(0, Math.floor(s));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;

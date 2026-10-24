@@ -60,7 +60,7 @@ cross-agent report.
 | `message` | `id`, `from`, `to`, `text`, `reason` | A knowledge-plane message is sent. `node` = `from`. `from` is `"human"` for the owner's complaint. |
 | `delivered` | `id` | The recipient (`node`) took the message from its inbox, at the start of its next iteration. The viewer animates the message along the edge between `message` and `delivered`. |
 | `idle` | `reason` | The agent passed its turn. |
-| `state` | `state`, `summary`?, `reason`? | `"dormant"` (called `report_done`; `summary` is its message) or `"active"` (woken by a message). |
+| `state` | `state`, `summary`?, `reason`? | `"dormant"` (asleep until a message arrives: it idled, or, in runs from before `idle` replaced it, called `report_done`, whose message is `summary`) or `"active"` (woken by a message). |
 | `warning` | `text` | Harness warnings, e.g. a failed command halting a turn, or a truncated response. |
 | `usage` | `in`, `out`, `cache_read`, `cache_write`, `usd` | Tokens and cost of one LLM request. Live runs only. |
 | `routes` | `table` | A snapshot of `ip route show`, emitted when it changes. Live runs only. |

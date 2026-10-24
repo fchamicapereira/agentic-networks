@@ -2,7 +2,7 @@
 // projector, held on screen for a reading time that depends on its length (real seconds,
 // independent of the playback speed). The app pauses the run clock while a message is up.
 
-import { redact } from "./state.js";
+import { redact, setMarkdown } from "./state.js";
 
 const WORDS_PER_S = 3.5; // ~210 words per minute: a comfortable pace for reading off a screen
 const MIN_S = 5, MAX_S = 40;
@@ -39,7 +39,7 @@ export class Spotlight {
     // The sender's stated reason for the message: from "Actions" up, like commands' reasons.
     this.reason.textContent = level >= 2 && m.reason ? redact(m.reason) : "";
     this.reason.hidden = !this.reason.textContent;
-    this.text.textContent = redact(m.text);
+    setMarkdown(this.text, m.text);
     this.text.scrollTop = 0;
     this.progress(0);
   }

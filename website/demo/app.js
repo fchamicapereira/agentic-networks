@@ -94,10 +94,11 @@ async function load() {
   ui.spot.hidden = !run.messages.length; // billing: no messages, the chart takes the space
 
   ui.title.textContent = run.start.title;
-  // Every recording is a run from the paper; link it to the frozen paper data.
+  // Runs unchanged since the paper link to the frozen paper data; reruns say so, and link to
+  // the paper's version of the same experiment.
   const paperLink = document.createElement("a");
   paperLink.href = "../paper-data/";
-  paperLink.textContent = `paper run, ${entry.paper}`;
+  paperLink.textContent = entry.paper ? `paper run, ${entry.paper}` : `rerun of the paper's ${entry.paper_section}`;
   ui.sub.replaceChildren(
     `${labels[run.start.model] || run.start.model} · `, paperLink,
     ` · ${fmtTime(run.duration)} long · ${entry.messages} messages · ${entry.commands} commands`);

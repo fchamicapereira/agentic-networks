@@ -208,7 +208,7 @@ export class Graph {
       n.status.classList.toggle("cmd", !!cmd);
       n.status.textContent = cmd
         ? "$ " + (cmd.length > CMD_CHARS ? cmd.slice(0, CMD_CHARS - 1) + "…" : cmd)
-        : n.isPseudo ? "" : state === "dormant" ? "done · asleep" : state === "thinking" ? "thinking…" : state === "exec" ? "running a command" : "";
+        : n.isPseudo ? "" : state === "dormant" ? "idle" : state === "thinking" ? "thinking…" : state === "exec" ? "running a command" : "";
       n.tip.textContent = cmd ? `${id}: $ ${cmd}` : n.isPseudo ? "" : `${id} (${state})`;
     }
 

@@ -2,9 +2,10 @@
 """logs_to_events.py — Convert experiment logs into demo event recordings.
 
 `convert_run` turns one run (a directory of per-agent text logs) into the event stream
-described in demo/EVENTS.md. `write_recordings` does that for every run of the frozen paper
-snapshot (paper-data/runs.json: 5 scenarios x 4 models), reading the logs and topologies from
-the snapshot itself, and writes one JSONL file per run plus an index.json for the replay picker.
+described in demo/EVENTS.md. `write_recordings` does that for every run listed in the frozen
+paper snapshot (paper-data/runs.json: 5 scenarios x 4 models), and writes one JSONL file per run
+plus an index.json for the replay picker. Each run is read from logs/, where it may since have
+been rerun; a run whose files still match the snapshot is marked as the paper's run.
 
 Standard library only (like tools/build_website.py), so the Pages build can run it.
 
@@ -44,7 +45,7 @@ def parse_node(path: Path, node: str) -> list[dict]:
 
     Message sends get a provisional id; receives carry `_recv` for correlation later.
 
-    The harness logs an iteration marker for every agent every step, but a dormant agent only
+    The harness logs an iteration marker for every agent every step, but a dormant (waiting) agent only
     calls the model when that step delivers it a message. A dormant agent's marker therefore
     becomes a `turn` only if a receive follows it; otherwise the node would look busy.
     """
@@ -97,11 +98,14 @@ def parse_node(path: Path, node: str) -> list[dict]:
         elif msg.startswith("Idle"):
             emit(ts, "idle", reason=pending_reason)
             pending_reason = ""
-        elif "AGENT TERMINATED" in msg:
+        elif "AGENT TERMINATED" in msg:  # report_done, in runs before it was removed
             emit(ts, "state", state="dormant", summary=msg.split("===")[-1].strip(), reason=pending_reason)
             pending_reason = ""
             dormant = True
-        elif "AGENT REACTIVATED" in msg:
+        elif "AGENT WAITING" in msg:  # idle: asleep until a message arrives
+            emit(ts, "state", state="dormant")
+            dormant = True
+        elif "AGENT REACTIVATED" in msg or "AGENT WOKEN" in msg:
             emit(ts, "state", state="active")
             dormant = False
         elif msg.startswith("Command timed out") and last_exec is not None:
@@ -132,6 +136,7 @@ def correlate_messages(events: list[dict]) -> None:
 
     A receive with no matching send (the owner's complaint, injected by the harness as
     sender "human") becomes a synthetic `message` from that sender just before delivery.
+    A message to a party with no log of its own (the owner) is delivered on sending.
     """
     sends = [e for e in events if e["type"] == "message"]
     for i, ev in enumerate(sorted(sends, key=lambda e: e["t"])):
@@ -154,6 +159,9 @@ def correlate_messages(events: list[dict]) -> None:
         rcv["id"] = match["id"]
         del rcv["from"], rcv["text"]
     events.extend(extra)
+    logged = {e["node"] for e in events if e["type"] == "prompt"}  # every agent logs its prompt
+    events.extend({"t": s["t"] + 0.001, "ts": s["ts"], "type": "delivered", "node": s["to"], "id": s["id"]}
+                  for s in sends if s["to"] not in logged)
 
 
 def billing_metrics(data_path: Path, turns: list[float]) -> list[dict]:
@@ -225,15 +233,34 @@ def convert_run(run_dir: Path, stem: str, topology: dict, scenario: str, title: 
     return out, summary
 
 
-def write_recordings(output: Path, paper_dir: Path = PAPER_DATA, verbose: bool = False) -> int:
-    """Write every run of the paper snapshot plus index.json into `output`; return the count."""
+def _is_paper_run(run: dict, logs_root: Path, paper_dir: Path) -> bool:
+    """True if every file the snapshot holds for this run is unchanged under `logs_root`."""
+    for rel in run["files"]:
+        current = logs_root / rel
+        if not current.exists() or current.read_bytes() != (paper_dir / rel).read_bytes():
+            return False
+    return True
+
+
+def write_recordings(output: Path, paper_dir: Path = PAPER_DATA, logs_root: Path = REPO_ROOT,
+                     verbose: bool = False) -> int:
+    """Write every run listed in the paper snapshot plus index.json into `output`; return the count.
+
+    Runs are read from `logs_root` (the repository, so logs/...), falling back to the snapshot
+    when a run's logs are missing there. Index entries carry `paper` (the paper section) only for
+    runs identical to the snapshot; any other run is a rerun with the current harness.
+    """
     meta = json.loads((paper_dir / "runs.json").read_text())
     output.mkdir(parents=True, exist_ok=True)
     index = []
     for sc in meta["scenarios"]:
         topology = load_topology(paper_dir / "inputs" / "topologies" / f"{sc['topology']}.csv")
         for run in sc["runs"]:
-            result = convert_run(paper_dir / sc["logs_dir"], run["stem"], topology, sc["id"], sc["title"],
+            run_dir = logs_root / sc["logs_dir"]
+            if not (run_dir / f"{run['stem']}-{sc['nodes'][0]}.log").exists():
+                run_dir = paper_dir / sc["logs_dir"]
+            paper = run_dir.is_relative_to(paper_dir) or _is_paper_run(run, logs_root, paper_dir)
+            result = convert_run(run_dir, run["stem"], topology, sc["id"], sc["title"],
                                  run["model"], run["model_label"])
             if result is None:
                 continue
@@ -242,10 +269,11 @@ def write_recordings(output: Path, paper_dir: Path = PAPER_DATA, verbose: bool =
             with open(output / name, "w") as f:
                 for ev in events:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-            index.append({**summary, "paper": sc["paper"], "file": name})
+            index.append({**summary, "paper": sc["paper"] if paper else None, "paper_section": sc["paper"],
+                          "file": name})
             if verbose:
                 print(f"{name:<55} {summary['duration_s']:>5}s  {summary['messages']:>3} msgs  "
-                      f"{summary['commands']:>4} cmds  {summary['end_reason']}")
+                      f"{summary['commands']:>4} cmds  {summary['end_reason']:<14} {'paper' if paper else 'rerun'}")
     (output / "index.json").write_text(json.dumps({"v": FORMAT_VERSION, "runs": index}, indent=2) + "\n")
     return len(index)
 
@@ -254,8 +282,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-o", "--output", type=Path, required=True, metavar="DIR")
     parser.add_argument("--paper-dir", type=Path, default=PAPER_DATA, metavar="DIR")
+    parser.add_argument("--logs-root", type=Path, default=REPO_ROOT, metavar="DIR",
+                        help="directory holding logs/ (default: the repository)")
     args = parser.parse_args()
-    write_recordings(args.output, args.paper_dir, verbose=True)
+    write_recordings(args.output, args.paper_dir, args.logs_root, verbose=True)
     return 0
 
 

@@ -1,8 +1,15 @@
 // Agent panel: one agent's stream of actions. Append-only while playing; rebuilt from scratch
-// after a seek, a node switch, or a detail-level change. Agent text is untrusted: it only
-// ever goes into textContent.
+// after a seek, a node switch, or a detail-level change. Agent text is untrusted: it goes into
+// textContent, or through setMarkdown, which sanitizes it.
 
-import { fmtTime, redact } from "./state.js";
+import { fmtTime, redact, setMarkdown } from "./state.js";
+
+function md(cls, text) {
+  const e = document.createElement("div");
+  e.className = cls;
+  setMarkdown(e, text);
+  return e;
+}
 
 function h(tag, cls, text) {
   const e = document.createElement(tag);
@@ -78,7 +85,7 @@ export class AgentPanel {
     const state = world.stateOf(id);
     const title = h("div", "panel-title", id);
     const meta = h("div", "panel-meta");
-    meta.append(h("span", `chip state-${state}`, { thinking: "thinking", exec: "running a command", dormant: "done · asleep", acting: "acting", waiting: "waiting" }[state]));
+    meta.append(h("span", `chip state-${state}`, { thinking: "thinking", exec: "running a command", dormant: "idle", acting: "acting", waiting: "waiting" }[state]));
     if (n.iter) meta.append(h("span", "muted", `iteration ${n.iter}/${n.of}`));
     const model = this.run.models[id];
     if (model) meta.append(h("span", "muted", this.labels[model] || model));
@@ -105,9 +112,9 @@ export class AgentPanel {
       }
       case "message": {
         const head = h("div", "msg-head");
-        head.append(time, h("span", "", `✉ to ${e.to}`));
+        head.append(time, h("span", "", `✉ to ${e.to === "human" ? "the laptop owner" : e.to}`));
         if (e.reason) li.append(h("div", "reason", e.reason));
-        li.append(head, h("div", "msg-text", e.text));
+        li.append(head, md("msg-text", e.text));
         return li;
       }
       case "delivered": {
@@ -115,15 +122,15 @@ export class AgentPanel {
         if (!m) return null;
         const head = h("div", "msg-head");
         head.append(time, h("span", "", `✉ from ${m.from === "human" ? "the laptop owner" : m.from}`));
-        li.append(head, h("div", "msg-text", m.text));
+        li.append(head, md("msg-text", m.text));
         return li;
       }
       case "state":
-        li.append(time, h("span", "", e.state === "dormant" ? `Reported done: ${e.summary || ""}` : "Woken up by a message"));
+        li.append(time, h("span", "", e.state === "dormant" ? (e.summary ? `Reported done: ${e.summary}` : "Idle until a message arrives") : "Woken up by a message"));
         return li;
       case "assistant":
       case "thinking":
-        li.append(time, h("div", "prose", e.text));
+        li.append(time, md("prose", e.text));
         return li;
       case "idle":
         li.append(time, h("span", "", "Passed the turn" + (e.reason ? ` — ${e.reason}` : "")));
