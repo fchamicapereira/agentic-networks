@@ -140,6 +140,10 @@ def _classify(host: str, level: str, ts_sec: int, seq: int, epoch: int, msg: str
         return mk("status", title="Agent terminated", body=msg.split("===")[-1].strip())
     if "AGENT REACTIVATED" in msg:
         return mk("status", title="Agent reactivated", body=msg.split("===")[-1].strip())
+    if "AGENT WAITING" in msg:
+        return mk("status", title="Agent waiting", body=msg.split("===")[-1].strip())
+    if "AGENT WOKEN" in msg:
+        return mk("status", title="Agent woken", body=msg.split("===")[-1].strip())
     if level in ("WARNING", "ERROR", "CRITICAL"):
         return mk("warning", title=level.title(), body=msg.strip())
     return mk("log", body=msg.strip())

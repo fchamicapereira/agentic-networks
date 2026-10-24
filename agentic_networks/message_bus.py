@@ -31,3 +31,7 @@ class MessageBus:
             except queue.Empty:
                 break
         return msgs
+
+    def in_flight(self) -> bool:
+        """True if any message has been sent but not yet taken from its recipient's inbox."""
+        return any(not q.empty() for q in self._queues.values())

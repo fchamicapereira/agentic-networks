@@ -6,7 +6,7 @@ from tqdm import tqdm
 from typing import Callable
 from mininet.node import Host
 
-from .network_agent import AGENT_TOOLS_DEFINITIONS, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
+from .network_agent import AGENT_TOOLS_DEFINITIONS, IDLE_DESCRIPTION_OBSERVING, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
 from .message_bus import MessageBus
 from .network import Network
 from .agent_claude import AgentClaude
@@ -84,7 +84,10 @@ def _create_network_agent(
         for t in (extra_tools or [])
     ]
 
-    tool_defs = AGENT_TOOLS_DEFINITIONS + extra_defs
+    base_defs = AGENT_TOOLS_DEFINITIONS
+    if context_fn:
+        base_defs = [{**d, "description": IDLE_DESCRIPTION_OBSERVING} if d["name"] == "idle" else d for d in base_defs]
+    tool_defs = base_defs + extra_defs
 
     if model_key in CLAUDE_MODELS:
         llm_agent = AgentClaude(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
@@ -259,7 +262,7 @@ class AgenticNetwork:
                 try:
                     iteration = next(gen)
                     bar.n = iteration
-                    bar.set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
+                    bar.set_description(f"✓ {agent.node_name}" if agent.waiting else f"  {agent.node_name}")
                     bar.refresh()
                     still_active.append((agent, gen))
                 except StopIteration as e:
@@ -273,10 +276,10 @@ class AgenticNetwork:
             for reactor in self.post_reactors:
                 reactor(self, global_iter)
 
-            if active and all(agent.is_done for agent, _ in active):
-                self.logger.info("All agents have terminated. Stopping experiment early.")
+            if active and all(agent.waiting for agent, _ in active) and not self.message_bus.in_flight():
+                self.logger.info("All agents are idle and no messages are in flight. Stopping experiment.")
                 for agent, gen in active:
-                    results[agent.node_name] = agent._final_report
+                    results[agent.node_name] = agent.result()
                     bars[agent.node_name].set_description(f"✓ {agent.node_name}")
                     bars[agent.node_name].refresh()
                     gen.close()
@@ -377,7 +380,7 @@ class AgenticNetwork:
                 status, iteration, value = step_results[agent.node_name]
                 if status == "continue":
                     bar.n = iteration
-                    bar.set_description(f"✓ {agent.node_name}" if agent.is_done else f"  {agent.node_name}")
+                    bar.set_description(f"✓ {agent.node_name}" if agent.waiting else f"  {agent.node_name}")
                     bar.refresh()
                     still_active.append((agent, gen))
                 elif status == "done":
@@ -400,10 +403,10 @@ class AgenticNetwork:
 
             active = still_active
 
-            if active and all(agent.is_done for agent, _ in active):
-                self.logger.info("All agents have terminated. Stopping experiment early.")
+            if active and all(agent.waiting for agent, _ in active) and not self.message_bus.in_flight():
+                self.logger.info("All agents are idle and no messages are in flight. Stopping experiment.")
                 for agent, gen in active:
-                    results[agent.node_name] = agent._final_report
+                    results[agent.node_name] = agent.result()
                     bars[agent.node_name].set_description(f"✓ {agent.node_name}")
                     bars[agent.node_name].refresh()
                     gen.close()

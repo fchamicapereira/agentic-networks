@@ -31,12 +31,26 @@ Route management:
 Using tools:
 - You may issue multiple tools at once. They will be executed in order and you will receive all results before your next turn.
 - Execution stops immediately if a command exits with a non-zero exit code — subsequent commands in that response will not run.
-- 'report_done' must be called alone — never alongside other tools. If combined with other tools it will be ignored and you will be warned.
+- 'idle' must be called alone — never alongside other tools. If combined with other tools it will be ignored and you will be warned.
 - Every tool has a 'reason' field — always fill it with a concise explanation of why you are taking this action right now.
 {initial_prompt}
 """
 
 _REASON_FIELD = {"type": "string", "description": "Concise explanation of why you are taking this action right now"}
+
+# Agents never decide that the experiment is over: they idle until something arrives, and the
+# run ends once every agent is idle with no message in flight (see AgenticNetwork.run).
+IDLE_DESCRIPTION = (
+    "Wait until a message arrives — use this when you have nothing to do right now. "
+    "You will not get another turn until a message from a neighbor arrives."
+)
+# For agents that receive a fresh observation every iteration (context_fn), the observation
+# wakes them too, so idling just passes the turn.
+IDLE_DESCRIPTION_OBSERVING = (
+    "Wait until a message or a new observation arrives — use this when you have nothing to do "
+    "right now. A fresh observation is provided automatically at the start of every iteration, "
+    "and any messages from neighbors are delivered to you automatically."
+)
 
 AGENT_TOOLS_DEFINITIONS = [
     {
@@ -57,19 +71,6 @@ AGENT_TOOLS_DEFINITIONS = [
         },
     },
     {
-        "name": "report_done",
-        "description": "Signal that you want to terminate and are satisfied with the current state of the entire network.",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "description": "Summary of what was configured and connectivity verified"},
-                "success": {"type": "boolean", "description": "True if full connectivity was achieved"},
-                "reason": _REASON_FIELD,
-            },
-            "required": ["message", "success", "reason"],
-        },
-    },
-    {
         "name": "send_message",
         "description": "Send a natural language message to another node's agent. The message will be injected into the recipient's context on its next iteration.",
         "schema": {
@@ -84,13 +85,7 @@ AGENT_TOOLS_DEFINITIONS = [
     },
     {
         "name": "idle",
-        "description": (
-            "Take no action this iteration — use this when you are satisfied with the current "
-            "state and have nothing to change right now. This does NOT advance simulated time, "
-            "pause execution, or fetch new data: a fresh observation is provided automatically at "
-            "the start of every iteration regardless, and any messages from neighbors are delivered "
-            "to you automatically. Call this simply to pass the turn."
-        ),
+        "description": IDLE_DESCRIPTION,
         "schema": {
             "type": "object",
             "properties": {"reason": _REASON_FIELD},
@@ -125,8 +120,9 @@ class NetworkAgent:
         self.context_fn = context_fn
         self.max_iterations = max_iterations
         self.log = logging.getLogger(f"agent.{node_name}")
-        self.is_done = False
-        self._final_report = AgentResult(success=False, message="Max iterations reached without completion")
+        # True while the agent has idled and no message has arrived since. A waiting agent takes
+        # no turns (and costs no model calls) until a message arrives.
+        self.waiting = False
 
         self.mininet_host = MininetHost(node_name, host)
         self.bus = bus
@@ -136,7 +132,6 @@ class NetworkAgent:
             "exec": self.mininet_host.exec,
             "send_message": self.send_message,
             "idle": self.idle,
-            "report_done": lambda **kwargs: f"Acknowledged: {kwargs.get('message', '')}",
         }
         for tool in extra_tools or []:
             self.tools[tool["name"]] = tool["handler"]
@@ -149,8 +144,11 @@ class NetworkAgent:
         return f"Message sent to {to}."
 
     def idle(self) -> str:
-        self.log.info("Idle — passing turn, no action taken.")
-        return "Idle: no action taken this iteration. A fresh observation will arrive next iteration."
+        if self.context_fn:
+            self.log.info("Idle — passing turn, no action taken.")
+            return "Idle: no action taken this iteration. A fresh observation will arrive next iteration."
+        self.log.info("Idle — waiting for a message.")
+        return "Waiting: you will get your next turn when a message arrives."
 
     def _drain_inbox(self, block: bool = False, timeout: Optional[float] = None) -> list[tuple[str, str]]:
         msgs = self.bus.drain(self.node_name, block=block, timeout=timeout)
@@ -181,36 +179,20 @@ class NetworkAgent:
             self.log.error("Error executing tool %s: %s", name, exc)
             return f"Error in {name}: {exc}", False
 
-    def _run_tool_blocks(
-        self,
-        tool_blocks: list[ToolUseBlock],
-        allow_report_done: bool = True,
-    ) -> Optional[AgentResult]:
-        report_done_blocks = [b for b in tool_blocks if b.tool_name == "report_done"]
-        if report_done_blocks and not allow_report_done:
-            warning = "You have already signaled completion. 'report_done' has been ignored."
+    def _run_tool_blocks(self, tool_blocks: list[ToolUseBlock]) -> bool:
+        """Execute the turn's tool calls. Returns True if the agent idled (called idle alone)."""
+        idle_blocks = [b for b in tool_blocks if b.tool_name == "idle"]
+        if idle_blocks and len(tool_blocks) > 1:
+            warning = "'idle' was called alongside other tools and has been ignored. " "'idle' must be the only tool call in a response. Please call it alone when you have nothing to do."
             self.log.warning(warning)
-            for b in report_done_blocks:
+            for b in idle_blocks:
                 self.agent.store_tool_result(b, warning)
-            tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
-        elif report_done_blocks and len(tool_blocks) > 1:
-            warning = (
-                "'report_done' was called alongside other tools and has been ignored. " "'report_done' must be the only tool call in a response. Please call it alone when you are ready to finish."
-            )
-            self.log.warning(warning)
-            for b in report_done_blocks:
-                self.agent.store_tool_result(b, warning)
-            tool_blocks = [b for b in tool_blocks if b.tool_name != "report_done"]
+            tool_blocks = [b for b in tool_blocks if b.tool_name != "idle"]
+            idle_blocks = []
 
         for block in tool_blocks:
             result, should_stop = self._execute_tool(block.tool_name, block.input)
             self.agent.store_tool_result(block, result)
-
-            if block.tool_name == "report_done":
-                return AgentResult(
-                    success=block.input.get("success", False),
-                    message=block.input.get("message", ""),
-                )
 
             if should_stop:
                 stop_warning = "Execution halted: the previous command exited with a non-zero exit code. " "The remaining tools in this response were not executed. Please investigate the error above."
@@ -219,7 +201,7 @@ class NetworkAgent:
                     self.agent.store_tool_result(skipped, f"Not executed — halted due to previous command failure. {stop_warning}")
                 break
 
-        return None
+        return bool(idle_blocks)
 
     def request_report(self) -> str:
         return self.agent.request_report()
@@ -233,14 +215,15 @@ class NetworkAgent:
 
             msgs = self._drain_inbox()
 
-            # A dormant (terminated) agent stays asleep only while no new messages
-            # are waiting. An incoming message reactivates it (is_done -> False below),
-            # and it then keeps getting turns until it calls report_done again — so it
-            # can run a multi-step response (e.g. investigate locally, then reply)
-            # instead of being limited to a single turn per message.
-            if self.is_done and not msgs:
-                yield iteration + 1
-                continue
+            # A waiting agent sleeps until a message arrives. Once woken it keeps getting turns
+            # until it idles again, so it can run a multi-step response (e.g. investigate
+            # locally, then reply) instead of being limited to a single turn per message.
+            if self.waiting:
+                if not msgs:
+                    yield iteration + 1
+                    continue
+                self.waiting = False
+                self.log.info("=== AGENT WOKEN === responding to an incoming message.")
 
             context = self.context_fn() if self.context_fn else ""
             user_message = f"{context}\n\nState the next action." if context else "State the next action."
@@ -262,17 +245,20 @@ class NetworkAgent:
                 break
 
             tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
-            agent_result = self._run_tool_blocks(tool_blocks)
-
-            if agent_result is not None:
-                self.is_done = True
-                self._final_report = agent_result
-                self.log.info("=== AGENT TERMINATED === %s", agent_result.message)
-            elif self.is_done and tool_blocks:
-                self.is_done = False
-                self.log.info("=== AGENT REACTIVATED === responding to an incoming message.")
+            # An agent with an observation feed never waits: every iteration brings a fresh
+            # observation, so for it idle only passes the turn.
+            if self._run_tool_blocks(tool_blocks) and not self.context_fn:
+                self.waiting = True
+                self.log.info("=== AGENT WAITING === nothing to do until a message arrives.")
 
             yield iteration + 1
 
-        self.log.info("Agent run complete. Final report: %s", self._final_report)
-        return self._final_report
+        result = self.result()
+        self.log.info("Agent run complete. Final report: %s", result)
+        return result
+
+    def result(self) -> AgentResult:
+        """Outcome at the end of the run: whether the agent was idle, with nothing left to do."""
+        if self.waiting:
+            return AgentResult(success=True, message="Idle: nothing left to do")
+        return AgentResult(success=False, message="Still active when the iteration budget ran out")

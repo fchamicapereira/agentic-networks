@@ -489,7 +489,7 @@ class AgentVLLM(Agent):
                         "role": "user",
                         "content": (
                             "Warning: your last response contained no tool call. "
-                            "You MUST issue a tool call for every action, including report_done. "
+                            "You MUST issue a tool call for every action, including idle. "
                             "Plain text descriptions of actions are ignored — only tool calls are executed."
                         ),
                     }
