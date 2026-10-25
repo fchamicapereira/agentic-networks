@@ -1,0 +1,5 @@
+I observed HTTP 503 from acm.org (198.82.0.1) on both ports 80 and 443. Response headers showed `Server: acm-dl/2.3`, indicating the 503 originated from ACM's own application, not a proxy. Local firewall was clean and traceroute completed in 4 hops with no loss, ruling out network issues from my vantage point.
+
+I decided to escalate upstream per KP protocol, even though local evidence strongly pointed to an origin-side application problem. AS1 independently reproduced the 503 and relayed through AS2 to ACM, who confirmed worker pool exhaustion from bulk export requests. ACM increased worker capacity.
+
+I independently verified HTTP 200 from my gateway on both HTTP and HTTPS before notifying the user. No routing changes were needed throughout. The key decision was examining response headers early — the `Server` header was the critical clue — and waiting for ACM's confirmation rather than reporting my hypothesis as definitive.

@@ -1,0 +1,5 @@
+I observed HTTP/HTTPS 503 from the web server at 198.82.0.1, but confirmed my own node was healthy — routing, firewall, and ARP all normal. After engaging the Web agent, the root cause was identified as application-level worker pool exhaustion: only 3 workers were configured, and 5 concurrent long-running export requests from a single client IP consumed all slots.
+
+I approved increasing MAX_WORKERS from 3 to 10 as an immediate, reversible stopgap. I deliberately withheld approval for rate-limiting or blocking the abusive client IP, as that constitutes access control enforcement requiring admin sign-off per policy. I noted separate worker pools for exports as a future architectural improvement.
+
+After Web applied the fix, I independently verified HTTP and HTTPS both returned 200, then reported restoration to AS2 for relay to AS1/Uni — without disclosing the abusive client's identity.

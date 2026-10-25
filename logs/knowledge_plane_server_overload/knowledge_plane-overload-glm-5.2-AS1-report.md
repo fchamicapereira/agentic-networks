@@ -1,0 +1,5 @@
+I observed a 503 Service Unavailable from 198.82.0.1 (ACM's acm-dl/2.3 server) when reproducing Uni's complaint. My local investigation confirmed clean iptables, healthy interfaces, and a fully functional 3-hop path (AS1 → AS2 → ACM) with no packet loss, ruling out any network-layer issue on my side.
+
+I decided to escalate through AS2 rather than directly to ACM, since AS2 is my directly connected peer toward the destination and I can only message adjacent neighbors. I asked AS2 to investigate locally and relay to the ACM domain.
+
+After AS2 confirmed ACM had diagnosed worker pool exhaustion from bulk export requests and applied a fix, I independently verified recovery via curl (HTTP 200) before reporting final resolution to Uni. No routing changes were needed at any point — the problem was purely application-level.
