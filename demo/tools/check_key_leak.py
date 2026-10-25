@@ -12,7 +12,7 @@ Run it with FAKE keys only — the point is to see whether they show up:
     export OPENAI_API_KEY=sk-LEAKTEST-$RANDOM TOGETHER_API_KEY=LEAKTEST-$RANDOM
     tools/run_in_docker.sh demo/tools/check_key_leak.py
 
-Exits 1 if any key leaks in any mode, 0 otherwise.
+Exits 1 if any key leaks, 0 otherwise.
 """
 
 import os
@@ -46,19 +46,17 @@ def main() -> int:
         return 2
 
     leaked_any = False
-    for isolate in (False, True):
-        network = Network(load_topology(TOPOLOGIES_DIR / "pair.csv"))
-        network.start(isolate_hosts=isolate)
-        try:
-            host = MininetHost("A", network.hosts["A"])
-            print(f"\n=== isolate_hosts={isolate} ===")
-            for probe in PROBES:
-                output, _ = host.exec(probe, timeout=20)
-                found = sorted(var for var, value in keys.items() if value in output)
-                leaked_any |= bool(found)
-                print(f"  {'LEAK ' + ','.join(found) if found else 'ok':<40} {probe}")
-        finally:
-            network.stop()
+    network = Network(load_topology(TOPOLOGIES_DIR / "pair.csv"))
+    network.start()
+    try:
+        host = MininetHost("A", network.hosts["A"])
+        for probe in PROBES:
+            output, _ = host.exec(probe, timeout=20)
+            found = sorted(var for var, value in keys.items() if value in output)
+            leaked_any |= bool(found)
+            print(f"  {'LEAK ' + ','.join(found) if found else 'ok':<40} {probe}")
+    finally:
+        network.stop()
 
     print("\nRESULT:", "keys are readable from agent commands" if leaked_any else "no key leaked")
     return 1 if leaked_any else 0

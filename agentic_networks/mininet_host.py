@@ -3,7 +3,7 @@ import os
 import signal
 import subprocess
 
-from .network import HOST_ENV, NetworkHost
+from .network import NetworkHost
 
 # Hard cap on how long a single agent command may run. Routing/diagnostic commands in these
 # experiments finish in seconds; a longer-running command is almost always pathological —
@@ -35,25 +35,14 @@ class MininetHost:
         self.log.info("Executing command: %s", command)
         # start_new_session so the command (and any children it backgrounds) gets its own
         # process group, letting _terminate kill the whole tree on timeout.
-        if self.host.anchor_pid is not None:
-            # Host isolation is enabled: run inside the host's private PID+mount
-            # namespace via nsenter so `ps`/`/proc` show only this host's processes
-            # (mnexec's -a cannot enter a PID namespace). ns_popen builds the argv.
-            proc = self.host.ns_popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        else:
-            proc = self.host.popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=HOST_ENV,
-            )
+        # Run inside the host's private PID+mount namespace via nsenter, so `ps`/`/proc`
+        # show only this host's processes (mnexec's -a cannot enter a PID namespace).
+        proc = self.host.ns_popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         try:
             stdout, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:

@@ -664,10 +664,10 @@ def main():
 
     logger.info("Building Mininet network from %s...", TOPOLOGY)
     network = Network(load_topology(str(TOPOLOGY)))
-    # isolate_hosts=True: each host runs in a private PID+mount namespace so an
-    # agent's `ps`/`/proc` cannot read other orgs' processes (e.g. EveLink's load
-    # client) or the orchestrator's command line out of a shared process table.
-    network.start(isolate_hosts=True)
+    # Each host runs in a private PID+mount namespace (see Network.start), so an agent's
+    # `ps`/`/proc` cannot read other orgs' processes (e.g. EveLink's load client) or the
+    # orchestrator's command line out of a shared process table.
+    network.start()
 
     try:
         setup_routing(network, logger)
