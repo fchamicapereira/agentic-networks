@@ -24,6 +24,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple routing experiment")
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
+    parser.add_argument("--agent-model", action="append", default=[], metavar="NODE=MODEL",
+                        help="Run NODE on MODEL instead of --model (repeatable), e.g. a fixed attacker across runs")
     parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     parser.add_argument("--max-iterations", "-i", type=int, default=50, metavar="N")
@@ -44,6 +46,16 @@ def parse_args():
     prompt_group.add_argument("--prompts-dir", metavar="DIR",
                               help="Directory of per-node prompt files ({node}.txt)")
     return parser.parse_args()
+
+
+def parse_agent_models(specs: list[str]) -> dict[str, str]:
+    agent_models = {}
+    for spec in specs:
+        node, sep, model = spec.partition("=")
+        if not sep or model not in MODELS:
+            raise SystemExit(f"--agent-model expects NODE=MODEL with MODEL one of {sorted(MODELS)}, got {spec!r}")
+        agent_models[node] = model
+    return agent_models
 
 
 def load_prompts(args) -> tuple[str | dict[str, str], str]:
@@ -82,6 +94,7 @@ def run(seed_stable: bool = False):
                        already converged (agents focus on the scenario, not bring-up).
     """
     args = parse_args()
+    agent_models = parse_agent_models(args.agent_model)
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +117,8 @@ def run(seed_stable: bool = False):
     setup_node_logs(network.hosts, log_dir, run_stem)
     logger.info("Writing per-node logs to %s/", log_dir)
     logger.info("Using model: %s (%s)", args.model, MODELS[args.model])
+    for node, model in agent_models.items():
+        logger.info("  except %s: %s (%s)", node, model, MODELS[model])
 
     try:
         anet = AgenticNetwork(
@@ -115,6 +130,7 @@ def run(seed_stable: bool = False):
             vllm_host=args.vllm_host,
             vllm_port=args.vllm_port,
             window_size=args.window_size,
+            agent_models=agent_models,
         )
         results = anet.run(concurrent=not args.sequential)
 

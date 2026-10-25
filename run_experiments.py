@@ -34,6 +34,9 @@ def experiment_to_args(
         if isinstance(value, bool):
             if value:
                 args.append(cli_flag)
+        elif isinstance(value, list):
+            for item in value:
+                args.extend([cli_flag, str(item)])
         else:
             args.extend([cli_flag, str(value)])
     return args

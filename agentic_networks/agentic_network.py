@@ -124,6 +124,9 @@ class AgenticNetwork:
 
     ``initial_prompts`` may be a single string (shared by all agents) or a
     dict mapping node names to individual prompt strings.
+
+    ``agent_models`` optionally runs some nodes on a model other than
+    ``model_key`` ({node: model_key}), e.g. a fixed attacker across runs.
     """
 
     REACTOR_POLL_INTERVAL_S = 0.5
@@ -144,6 +147,7 @@ class AgenticNetwork:
         context_fns: "dict[str, Callable[[], str]] | None" = None,
         start_waiting: Iterable[str] = (),
         external_contacts: "dict[str, list[str]] | None" = None,
+        agent_models: "dict[str, str] | None" = None,
     ):
         self.logger = logging.getLogger("main")
         self.network = network
@@ -153,6 +157,10 @@ class AgenticNetwork:
         self.message_bus = MessageBus(
             list(network.hosts.keys()), external=sorted({c for cs in external_contacts.values() for c in cs})
         )
+        agent_models = agent_models or {}
+        unknown = set(agent_models) - set(network.hosts)
+        if unknown:
+            raise ValueError(f"agent_models names unknown nodes: {sorted(unknown)}")
         self.reactors: list[Reactor] = reactors
         self.post_reactors: list[Reactor] = post_reactors
         self.agents: list[NetworkAgent] = [
@@ -161,7 +169,7 @@ class AgenticNetwork:
                 host=host,
                 bus=self.message_bus,
                 initial_prompt=(initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts),
-                model_key=model_key,
+                model_key=agent_models.get(name, model_key),
                 max_iterations=max_iterations,
                 max_tokens=max_tokens,
                 vllm_host=vllm_host,
