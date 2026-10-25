@@ -2,6 +2,7 @@
 
 import argparse
 import ipaddress
+import shutil
 import subprocess
 import time
 
@@ -25,28 +26,47 @@ TOPOLOGY = paths.TOPOLOGIES_DIR / "knowledge_plane.csv"
 PROMPTS_DIR = paths.PROMPTS_DIR / "knowledge_plane"
 
 WEBSERVER_IP = "198.82.0.1"
-# Where the testbed resolvers point every name other than acm.org: any address outside the
-# topology will do, since AS2 answers for all of them (see _answer_for_the_internet).
-INTERNET_IP = "104.18.32.7"
+ACM_BLOCK = "198.82.0.0/24"
+# ACM's server LAN, on which Web's former address 198.82.0.99 no longer answers (dns_stale).
+ACM_LAN_IFACE = "lan0"
+# The upstream the testbed resolvers forward names they don't hold to. Like any outside
+# address, AS2 answers for it, with the stand-in Internet's DNS (assets/kp_internet_dns.py).
+INTERNET_DNS = "8.8.8.8"
+INTERNET_DNS_PID_FILE = "/tmp/kp-internet-dns.pid"  # the orchestrator's /tmp, not a host's
 WEBSERVER_MAX_WORKERS = 3  # must match MAX_WORKERS in assets/kp_webserver.py
 
-# AS1/AS2 serve acm.org from a dnsmasq addn-hosts file rather than an inline --address flag.
-# This is deliberate: (1) a hosts-style override is where a real operator's (stale) record
-# actually lives and it is discoverable on disk (grep /etc), unlike a value buried in the
-# process argv; and (2) dnsmasq re-reads addn-hosts on SIGHUP, so both the dns_stale fault and
-# its fix are an edit-the-file-then-reload operation. Combined with launching the resolver in
-# the host's isolation namespace (ns_cmd), the owning agent can see the resolver process, read
-# its --addn-hosts path, edit the record, and reload it — the realistic diagnose→fix loop.
-# (hosts_file, pid_file) per authoritative resolver.
-ACM_RESOLVERS = {
-    "AS1": ("/etc/dnsmasq-acm-as1.hosts", "/tmp/dnsmasq-p1.pid"),
-    "AS2": ("/etc/dnsmasq-acm-as2.hosts", "/tmp/dnsmasq-p2.pid"),
-}
+# AS1 and AS2 each run a recursive resolver that forwards every name upstream to INTERNET_DNS,
+# which answers acm.org with its real address. Each resolver's configuration is private to its
+# own host: /etc/dnsmasq.d is a separate tmpfs in AS1's and in AS2's mount namespace, so another
+# organisation cannot read (or compare against) it. Both use the same paths, as two unrelated
+# operators' boxes would.
+RESOLVERS = ("AS1", "AS2")
+RESOLVER_PID_FILE = "/tmp/dnsmasq.pid"  # /tmp is private per host too
+# Each node's local stub forwards to its provider's resolver: AS2's side of the network
+# (AS2 and its customer ACM, with Web behind ACM) uses AS2's, everyone else uses AS1's.
+RESOLVER_FOR = {"AS2": "AS2", "ACM": "AS2", "Web": "AS2"}  # default: AS1
+
+# dns_stale: AS1's resolver also serves a forgotten pin of acm.org from a dnsmasq addn-hosts
+# file. A hosts-style override is where a real operator's stale record lives, it is
+# discoverable on disk (grep /etc) rather than buried in the process argv, and dnsmasq re-reads
+# it on SIGHUP, so the fix is an honest edit-the-file-then-reload. The file reads as what it is:
+# a temporary pin from ACM's migration, dated and last touched long ago, that nobody removed.
+# Only AS1 has one; a pin both ISPs shared would read as policy.
+ACM_PIN_FILE = "/etc/dnsmasq.d/acm.org.hosts"
+ACM_PIN_DATE = "2025-11-14 16:02"
+ACM_PIN = (
+    "# Pin acm.org to the DL frontend during ACM's migration (2025-11). Temporary.\n"
+    "{ip} acm.org www.acm.org\n"
+)
 
 
-def _write_acm_hosts(path: str, ip: str) -> None:
-    """Write the acm.org A record served by an AS1/AS2 resolver, in hosts-file format."""
-    Path(path).write_text(f"{ip} acm.org www.acm.org\n")
+def _resolver_cmd(network: Network, res: str, extra: str = "") -> str:
+    """The command line of RESOLVERS' dnsmasq, run inside the host's isolation namespace."""
+    return (
+        f"dnsmasq --no-resolv --no-hosts --keep-in-foreground --server={INTERNET_DNS}{extra}"
+        f" --listen-address={_lo(network, res)} --bind-interfaces --port=53"
+        f" --pid-file={RESOLVER_PID_FILE} &"
+    )
 
 FAULTS = ["bgp_hijack", "dns_stale", "firewall", "overload"]
 
@@ -64,7 +84,8 @@ FAULT_DESCRIPTIONS = {
         "block but no longer hosts the service — it routes to ACM (the block owner) and is "
         "rejected as unreachable (ICMP host-unreachable), so the user's HTTP requests fail with "
         "'no route to host'. DNS resolution itself works and the rest of the path is healthy; the "
-        "real service at 198.82.0.1 is operational. The record is simply out of date."
+        "real service at 198.82.0.1 is operational. The record is simply out of date: a temporary "
+        "pin from ACM's migration that was never removed."
     ),
     "firewall": (
         "Uni has an iptables FORWARD rule that drops all packets destined for "
@@ -119,6 +140,21 @@ def parse_args():
     return parser.parse_args()
 
 
+def _attach_server_lan(acm, logger) -> None:
+    """Give ACM the rest of its block as a server LAN, with no hosts on it besides Web's link.
+
+    An address in the block that nothing holds (dns_stale's 198.82.0.99) then fails the way an
+    absent host does: ACM's ARP for it goes unanswered and the kernel itself replies with ICMP
+    host-unreachable, with no special route on ACM to give the absence away. The far end of the
+    veth stays in the orchestrator's namespace, up and unaddressed, so it answers no ARP.
+    """
+    logger.info("Attaching ACM's server LAN (%s on %s)...", ACM_BLOCK, ACM_LAN_IFACE)
+    subprocess.run(["ip", "link", "add", "acm-lan-far", "type", "veth", "peer", "name", ACM_LAN_IFACE, "netns", str(acm.pid)], check=True)
+    subprocess.run(["ip", "link", "set", "acm-lan-far", "up"], check=True)
+    gateway = ipaddress.ip_network(ACM_BLOCK).broadcast_address - 1  # .254, ACM's router address
+    acm.cmd(f"ip addr add {gateway}/{ipaddress.ip_network(ACM_BLOCK).prefixlen} dev {ACM_LAN_IFACE} && ip link set {ACM_LAN_IFACE} up")
+
+
 def setup_routing(network: Network, logger) -> None:
     """Populate routing tables with static routes. No BGP/FRR used."""
     hosts = network.hosts
@@ -158,10 +194,9 @@ def setup_routing(network: Network, logger) -> None:
     add(p1, "10.0.5.0/30", "10.0.5.2", src=_lo(network, "AS1"))  # so EveLink link subnet is reachable
     add(p1, "default", "10.0.2.2", src=_lo(network, "AS1"))
 
-    # AS2 → customer prefixes (ACM+Web) via 10.0.3.2; everything behind AS1 via 10.0.2.1
-    # (Web's loopback is 198.82.0.1, the acm.org service address.)
-    add(p2, f"{_lo(network, 'ACM')}/32", "10.0.3.2", src=_lo(network, "AS2"))
-    add(p2, f"{_lo(network, 'Web')}/32", "10.0.3.2", src=_lo(network, "AS2"))
+    # AS2 → its customer ACM's block (ACM's router and Web) via 10.0.3.2; everything behind AS1
+    # via 10.0.2.1. (Web's loopback is 198.82.0.1, the acm.org service address.)
+    add(p2, ACM_BLOCK, "10.0.3.2", src=_lo(network, "AS2"))
     add(p2, "10.0.4.0/30", "10.0.3.2", src=_lo(network, "AS2"))  # so ACM–Web link subnet is reachable
     add(p2, f"{_lo(network, 'AS1')}/32", "10.0.2.1", src=_lo(network, "AS2"))
     add(p2, f"{_lo(network, 'Uni')}/32", "10.0.2.1", src=_lo(network, "AS2"))
@@ -173,6 +208,7 @@ def setup_routing(network: Network, logger) -> None:
     # ACM → Web via direct link; default via AS2
     add(acm, f"{_lo(network, 'Web')}/32", "10.0.4.2", src=_lo(network, "ACM"))
     add(acm, "default", "10.0.3.1", src=_lo(network, "ACM"))
+    _attach_server_lan(acm, logger)
 
     # Web → default via ACM
     add(ws, "default", "10.0.4.1", src=_lo(network, "Web"))
@@ -207,6 +243,11 @@ def _answer_for_the_internet(host, logger) -> None:
     KP then chases instead of the real fault. Local routes for the complement of the testbed's
     address space make `host` reply as any outside address, without touching routing inside the
     testbed. They must go in the local table: the kernel ignores local routes elsewhere.
+
+    `host` also answers DNS sent to any of those addresses (e.g. dig @8.8.8.8, and the testbed
+    resolvers' forwarded queries), with assets/kp_internet_dns.py. That runs in `host`'s network
+    namespace but not in its isolation namespace, so `host`'s agent does not see it as one of its
+    own processes.
     """
     outside = [ipaddress.ip_network("0.0.0.0/0")]
     for block in map(ipaddress.ip_network, TESTBED_SPACE + _NOT_INTERNET):
@@ -214,9 +255,11 @@ def _answer_for_the_internet(host, logger) -> None:
     for net in outside:
         host.cmd(f"ip route add local {net} dev lo table local")
     logger.info("%s answers for addresses outside the testbed (%d local routes).", host.name, len(outside))
+    pid = host.cmd(f"python3 {paths.ASSETS_DIR}/kp_internet_dns.py {' '.join(TESTBED_SPACE)} >/dev/null 2>&1 & echo $!")
+    Path(INTERNET_DNS_PID_FILE).write_text(pid.strip().split()[-1] + "\n")
 
 
-def start_services(network: Network, logger) -> None:
+def start_services(network: Network, fault: str, logger) -> None:
     """Start dnsmasq resolvers and the HTTP server.
 
     Web's loopback is 198.82.0.1 (the acm.org service address), assigned to lo at
@@ -224,31 +267,34 @@ def start_services(network: Network, logger) -> None:
     """
     webserver = network.hosts["Web"]
 
-    # AS1/AS2 authoritative resolvers: acm.org is served from a dnsmasq addn-hosts file (see
-    # ACM_RESOLVERS) and launched inside the host's isolation namespace via ns_cmd, so the host's
-    # own agent can inspect (ps/ss -p), read the --addn-hosts override, and reload it, while other
-    # orgs cannot. Reaped when the anchor is torn down in network.stop().
-    # There is no upstream to recurse to, so every other name resolves to INTERNET_IP, an address
-    # outside the topology that AS2 answers for (see _answer_for_the_internet). Without this dnsmasq
-    # answers REFUSED ("Not Ready"), which reads as a broken resolver. acm.org is unaffected:
-    # --local=/acm.org/ is more specific, so acm.org names come only from the hosts file.
-    for res, (hosts_file, pid_file) in ACM_RESOLVERS.items():
+    # AS1/AS2 recursive resolvers (see RESOLVERS), forwarding every name to INTERNET_DNS as a
+    # small ISP's resolver would; the stand-in Internet answers (see _answer_for_the_internet).
+    # Launched inside the host's isolation namespace via ns_cmd, so the host's own agent can
+    # inspect (ps/ss -p) and reload its resolver while other orgs cannot. Reaped when the anchor
+    # is torn down in network.stop().
+    for res in RESOLVERS:
         host = network.hosts[res]
-        _write_acm_hosts(hosts_file, WEBSERVER_IP)
-        logger.info("Starting dnsmasq on %s (%s), acm.org from %s...", res, _lo(network, res), hosts_file)
+        # Keep the directory looking stock: carry its README, dates and all, onto the private tmpfs.
         host.ns_cmd(
-            f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
-            f" --local=/acm.org/ --address=/#/{INTERNET_IP} --addn-hosts={hosts_file}"
-            f" --listen-address={_lo(network, res)} --bind-interfaces --port=53"
-            f" --pid-file={pid_file} &"
+            "cp -p /etc/dnsmasq.d/README /tmp/.dnsmasq-readme 2>/dev/null;"
+            " mount -t tmpfs -o mode=755 tmpfs /etc/dnsmasq.d &&"
+            " mv /tmp/.dnsmasq-readme /etc/dnsmasq.d/README 2>/dev/null; true"
         )
+        logger.info("Starting dnsmasq on %s (%s), forwarding to %s...", res, _lo(network, res), INTERNET_DNS)
+        extra = ""
+        if fault == "dns_stale" and res == "AS1":
+            # The pin AS1 has served since ACM's migration. It still points at the right address
+            # for the baseline check; inject_fault turns it into the stale record it is.
+            host.ns_write(ACM_PIN_FILE, ACM_PIN.format(ip=WEBSERVER_IP))
+            extra = f" --addn-hosts={ACM_PIN_FILE}"
+        host.ns_cmd(_resolver_cmd(network, res, extra))
 
     # Per-namespace DNS via the 127.0.0.1 trick:
     # Each network namespace has its own loopback, so 127.0.0.1 is independent in
     # each namespace. We run a dnsmasq stub on 127.0.0.1:53 in the main namespace
     # (forwards to real DNS for Anthropic API calls) and one in EVERY agent node's
-    # namespace (forwards to AS1's testbed resolver). All are reached via the same
-    # resolv.conf entry "nameserver 127.0.0.1". Every node an agent operates from
+    # namespace (forwards to its provider's testbed resolver, see RESOLVER_FOR). All are
+    # reached via the same resolv.conf entry "nameserver 127.0.0.1". Every node an agent operates from
     # needs its own stub: a node whose resolv.conf says "nameserver 127.0.0.1" but
     # has no local listener fails name lookups with "connection refused to
     # 127.0.0.1#53", which confounds diagnosis (e.g. the Uni gateway misreading a
@@ -275,7 +321,6 @@ def start_services(network: Network, logger) -> None:
         shell=True,
     )
 
-    testbed_resolver = _lo(network, "AS1")
     # AS1/AS2 already run an authoritative resolver on their own loopback:53, so
     # the stub there only takes 127.0.0.1. Every other node also listens on its
     # loopback address, so a direct "nslookup acm.org <node-address>" is answered
@@ -283,7 +328,7 @@ def start_services(network: Network, logger) -> None:
     auth_resolver_nodes = {"AS1", "AS2"}
     for name in network.hosts:
         node = network.hosts[name]
-        pid = f"/tmp/dnsmasq-stub-{name}.pid"
+        testbed_resolver = _lo(network, RESOLVER_FOR.get(name, "AS1"))
         listen = "--listen-address=127.0.0.1"
         if name not in auth_resolver_nodes:
             listen += f" --listen-address={_lo(network, name)}"
@@ -293,16 +338,19 @@ def start_services(network: Network, logger) -> None:
         node.ns_cmd(
             f"dnsmasq --no-resolv --no-hosts --keep-in-foreground"
             f" --server={testbed_resolver} {listen} --bind-interfaces"
-            f" --pid-file={pid} &"
+            f" --pid-file=/tmp/dnsmasq-stub.pid &"
         )
 
     Path("/etc/resolv.conf").write_text("nameserver 127.0.0.1\n")
 
     # Mint this run's TLS chain into a temporary directory. Nothing is checked into the
     # repository, so the CA installed below is trusted only by this container and only for
-    # as long as it lives. The directory is on the container's root filesystem, which the
-    # hosts' private mount namespaces share, so Web can read it.
+    # as long as it lives. Only the server's certificate and key go to Web, into its private
+    # /tmp; the minting directory (with the CA key) is removed once the CA is installed.
     certs = testbed_certs.generate(hostname="acm.org", ip=WEBSERVER_IP, logger=logger)
+    web_cert, web_key = "/tmp/acm-tls/server.crt", "/tmp/acm-tls/server.key"
+    webserver.ns_write(web_cert, certs.server_cert.read_bytes())
+    webserver.ns_write(web_key, certs.server_key.read_bytes(), mode=0o600)
 
     logger.info("Installing testbed CA into system trust store...")
     subprocess.run(
@@ -310,6 +358,7 @@ def start_services(network: Network, logger) -> None:
         check=True,
     )
     subprocess.run(["update-ca-certificates", "--fresh"], check=True, capture_output=True)
+    shutil.rmtree(certs.directory, ignore_errors=True)
 
     logger.info("Starting HTTP server on Web (%s:80)...", WEBSERVER_IP)
     # Run the web server inside Web's isolation namespace so Web's own agent can
@@ -317,7 +366,7 @@ def start_services(network: Network, logger) -> None:
     # anchor is torn down in network.stop().
     webserver.ns_cmd(
         f"python3 {paths.ASSETS_DIR}/kp_webserver.py"
-        f" --cert {certs.server_cert} --key {certs.server_key} >/dev/null 2>&1 &"
+        f" --cert {web_cert} --key {web_key} >/dev/null 2>&1 &"
     )
     time.sleep(1)
 
@@ -329,9 +378,10 @@ def stop_services(network: Network, logger) -> None:
         # load client all run inside their hosts' isolation namespaces (see start_services /
         # inject_fault) and are reaped when those anchors are torn down in network.stop() —
         # nothing to kill here. (Their pid-files hold in-namespace PIDs, so a root-namespace
-        # `kill $(cat pidfile)` would target the wrong process.) Only the main-namespace stub,
-        # started as a plain root subprocess, must be killed explicitly.
+        # `kill $(cat pidfile)` would target the wrong process.) Only the main-namespace stub and
+        # the stand-in Internet's DNS, started outside the anchors, must be killed explicitly.
         subprocess.run("kill $(cat /tmp/dnsmasq-main.pid 2>/dev/null) 2>/dev/null || true", shell=True)
+        subprocess.run(f"kill $(cat {INTERNET_DNS_PID_FILE} 2>/dev/null) 2>/dev/null || true", shell=True)
         if Path("/tmp/orig-resolv.conf").exists():
             Path("/etc/resolv.conf").write_text(Path("/tmp/orig-resolv.conf").read_text())
         Path("/usr/local/share/ca-certificates/testbed-ca.crt").unlink(missing_ok=True)
@@ -445,27 +495,23 @@ def inject_fault(network: Network, fault: str, logger) -> None:
 
     elif fault == "dns_stale":
         as1 = network.hosts["AS1"]
-        as2 = network.hosts["AS2"]
-        acm = network.hosts["ACM"]
         # A stale record: an address inside ACM's own 198.82.0.0/24 content block that
         # no longer hosts a server. Using an in-block IP (not RFC1918) forces the
         # diagnosis to come from cross-checking the live service at 198.82.0.1 rather
-        # than from the address class. Route it to ACM (the block owner) and have ACM
-        # reject it with ICMP host-unreachable — the textbook behaviour of a subnet
-        # gateway for an absent host — so the failure surfaces as "no route to host"
-        # near the destination instead of looping in the core.
+        # than from the address class. It routes to ACM with the rest of the block, and
+        # ACM's server LAN has no host there, so ACM answers with ICMP host-unreachable,
+        # the textbook behaviour of a subnet gateway for an absent host (see
+        # _attach_server_lan); no route of its own gives it away.
         stale_ip = "198.82.0.99"
-        as2.cmd(f"ip route add {stale_ip}/32 via 10.0.3.2")  # AS2 -> ACM, like .1/.254
-        acm.cmd(f"ip route add unreachable {stale_ip}/32")   # ACM: no such host here
-        # Drift AS1's resolver to the stale record the way an operator's override goes stale:
-        # rewrite its acm.org addn-hosts file to the dead address and SIGHUP dnsmasq to reload
-        # it (dnsmasq re-reads addn-hosts, not inline config, on HUP). The record now lives in a
-        # file the AS1 agent can grep/edit, and the resolver runs in AS1's anchor so the agent
-        # can reload it too — making the fix an honest edit-file-then-reload, not process
-        # archaeology. The HUP is issued inside AS1's anchor so the pid-file PID resolves.
-        as1_hosts, as1_pid = ACM_RESOLVERS["AS1"]
-        _write_acm_hosts(as1_hosts, stale_ip)
-        as1.ns_cmd(f"kill -HUP $(cat {as1_pid} 2>/dev/null) 2>/dev/null")
+        # AS1's resolver has served a pin of acm.org since ACM's migration (see ACM_PIN and
+        # start_services): point it at the old address, date the file and its directory back to
+        # then, and SIGHUP dnsmasq to reload it (dnsmasq re-reads addn-hosts on HUP). The record
+        # lives in a file the AS1 agent can grep/edit, and the resolver runs in AS1's anchor so
+        # the agent can reload it too, making the fix an honest edit-file-then-reload. The HUP is
+        # issued inside AS1's anchor so the pid-file PID resolves.
+        as1.ns_write(ACM_PIN_FILE, ACM_PIN.format(ip=stale_ip))
+        as1.ns_cmd(f"touch -d '{ACM_PIN_DATE}' {ACM_PIN_FILE} {Path(ACM_PIN_FILE).parent}")
+        as1.ns_cmd(f"kill -HUP $(cat {RESOLVER_PID_FILE} 2>/dev/null) 2>/dev/null")
         time.sleep(0.5)
         dns_check = network.hosts["User"].cmd(f"dig +short -b {_lo(network, 'User')} @{_lo(network, 'AS1')} acm.org 2>&1").strip()
         logger.info("DNS stale: AS1 now returns %r for acm.org (routed to ACM, unreachable)", dns_check)
@@ -564,6 +610,13 @@ def dns_stale_probe(network: Network, logger) -> None:
         print(f"\n===== [Uni gateway, src {ulo}] {label} =====")
         print(f"$ {cmd}")
         print(univ.cmd(cmd).rstrip())
+
+    # What AS1's agent sees of its own resolver when it audits it.
+    as1 = network.hosts["AS1"]
+    for cmd in (f"ls -la --time-style=long-iso {Path(ACM_PIN_FILE).parent}", f"cat {ACM_PIN_FILE}",
+                "ps -ef | grep [d]nsmasq", f"dig +short @{INTERNET_DNS} acm.org"):
+        print(f"\n===== [AS1] {cmd} =====")
+        print(as1.ns_cmd(cmd).rstrip())
     print("\n===== end dns_stale probe =====")
 
 
@@ -595,7 +648,7 @@ def main():
 
     try:
         setup_routing(network, logger)
-        start_services(network, logger)
+        start_services(network, args.fault, logger)
 
         phase1_check(network, logger)
         inject_fault(network, args.fault, logger)
