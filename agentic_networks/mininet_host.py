@@ -3,7 +3,7 @@ import os
 import signal
 import subprocess
 
-from .network import NetworkHost
+from .network import HOST_ENV, NetworkHost
 
 # Hard cap on how long a single agent command may run. Routing/diagnostic commands in these
 # experiments finish in seconds; a longer-running command is almost always pathological —
@@ -52,6 +52,7 @@ class MininetHost:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env=HOST_ENV,
             )
         try:
             stdout, _ = proc.communicate(timeout=timeout)

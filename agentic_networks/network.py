@@ -1,6 +1,7 @@
 import csv
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -13,6 +14,28 @@ from prettytable import PrettyTable
 from mininet.net import Mininet
 from mininet.link import TCLink
 from mininet.node import Host
+
+from . import paths
+
+# The orchestrator's own files: the repository checkout and, when running from a virtualenv,
+# the directory holding it (in the Docker image, /app: a copy of the repository plus the
+# environment). Isolated hosts stand for other organisations' machines, so these are hidden
+# from them: an agent must not find the experiment's code, prompts or results on its disk.
+_HIDDEN_FROM_HOSTS = sorted(
+    {str(paths.PROJECT_ROOT)}
+    | ({str(Path(sys.prefix).parent)} if sys.prefix != sys.base_prefix and Path(sys.prefix).parent != Path("/") else set())
+)
+
+# The environment of every process run on a host: agents' commands and the services and loads
+# started there. Hosts must not inherit the orchestrator's environment, which holds the model
+# providers' API keys and the experiment's own command line (SUDO_COMMAND); an agent reads it
+# with `env` or from /proc/<pid>/environ.
+HOST_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": "/root",
+    "LANG": "C.UTF-8",
+    "TERM": "dumb",
+}
 
 
 @dataclass
@@ -72,7 +95,8 @@ class NetworkHost(Host):
     # then run commands inside it. Per-host anchors are siblings, so a host sees
     # only its own processes, while the network-level view (`ss`) is unchanged.
     # Each host also gets a private /tmp, so hosts cannot read each other's scratch
-    # files (pid files and the like, which would e.g. name every node in the network).
+    # files (pid files and the like, which would e.g. name every node in the network),
+    # and the orchestrator's files are hidden (see _HIDDEN_FROM_HOSTS). Commands start in /.
     #
     # mnexec's `-a` cannot re-enter a PID namespace, so isolated execution goes
     # through `nsenter` rather than host.popen. This is opt-in (Network.start
@@ -83,9 +107,10 @@ class NetworkHost(Host):
         # A long-lived `sleep` is the namespace's init; killing it later tears the
         # namespace down along with everything running in it. --fork makes the
         # sleep (not unshare) the process placed in the new PID namespace.
+        hide = "".join(f" && mount -t tmpfs -o mode=755 tmpfs {d}" for d in _HIDDEN_FROM_HOSTS)
         outer = int(self.cmd(
             "unshare --pid --mount --fork --mount-proc "
-            "sh -c 'mount -t tmpfs -o mode=1777 tmpfs /tmp && exec sleep infinity' "
+            f"sh -c 'mount -t tmpfs -o mode=1777 tmpfs /tmp{hide} && exec sleep infinity' "
             ">/dev/null 2>&1 & echo $!"
         ).strip().split()[-1])
         inner = outer
@@ -98,8 +123,8 @@ class NetworkHost(Host):
                 inner = int(children[0])
                 break
             time.sleep(0.05)
-        # The init execs sleep only once the private /tmp is mounted; wait for it, so nothing
-        # runs in the namespace before /tmp is private.
+        # The init execs sleep only once the private mounts are in place; wait for it, so
+        # nothing runs in the namespace before /tmp is private and the hidden paths are hidden.
         for _ in range(100):
             try:
                 if open(f"/proc/{inner}/comm").read().strip() == "sleep":
@@ -108,7 +133,7 @@ class NetworkHost(Host):
                 pass
             time.sleep(0.05)
         else:
-            raise RuntimeError(f"{self.name}: isolation namespace did not come up (private /tmp)")
+            raise RuntimeError(f"{self.name}: isolation namespace did not come up (private mounts)")
         self._anchor_outer = outer
         self.anchor_pid = inner
 
@@ -123,8 +148,9 @@ class NetworkHost(Host):
 
     def _nsenter_argv(self, command: str) -> list[str]:
         assert self.anchor_pid is not None
-        return ["nsenter", "--target", str(self.anchor_pid),
-                "--net", "--mount", "--pid", "--", "bash", "-c", command]
+        return ["env", "-i", *(f"{k}={v}" for k, v in HOST_ENV.items()),
+                "nsenter", "--target", str(self.anchor_pid),
+                "--net", "--mount", "--pid", "--wd=/", "--", "bash", "-c", command]
 
     def ns_cmd(self, command: str) -> str:
         # Blocking command inside the host's isolation namespace (like host.cmd,
