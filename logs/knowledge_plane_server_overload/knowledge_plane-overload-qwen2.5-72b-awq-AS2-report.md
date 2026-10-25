@@ -1,1 +1,0 @@
-I determined my stable node address as 154.54.1.1 and advertised it to AS1 and ACM. I received their stable node addresses and configured routes to them, verifying the routing table and connectivity through pings. The route to ACM's address already existed. I reported the completion of the configuration and confirmed that the network is functioning correctly.

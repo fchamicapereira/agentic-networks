@@ -1,55 +1,47 @@
-# AS1 Experiment Report
+# Experiment Report — AS1
 
-## 1. Actions Taken
+## 1. Actions taken
 
-### Initial discovery
-- `ip addr show lo` / `ip route show` / `ip addr show` to inventory my local state.
-- Found loopback 4.2.2.1/32; three physical links (Uni 10.0.1.0/30, AS2 10.0.2.0/30, EveLink 10.0.5.0/30); a pre-existing default route via AS2 (10.0.2.2) and seed /32s for Uni (128.173.0.1) and EveLink (91.214.0.1).
+1. Received a KP WHY from Uni: ping from 128.173.0.1 to 198.82.0.99 failing with ICMP "Destination Host Unreachable" from 198.82.0.254. Uni had already done a clean local audit.
+2. Relayed the WHY to AS2 (my peer, path to ACM / 198.82.0.0/24), asking them to forward it to the destination operator.
+3. Received CANNOT from ACM (via AS2): 198.82.0.254 is healthy, ACM probed .99 directly on-segment — no ARP response, address unassigned. The correct ACM endpoint is 198.82.0.1.
+4. Relayed that diagnosis back to Uni and offered to investigate my recursive resolver if a DNS name was involved.
+5. Received a follow-up WHY from Uni: `dig +short acm.org @4.2.2.1` returns 198.82.0.99. Uni asked me to investigate 4.2.2.1.
+6. Verified 4.2.2.1 is my own loopback:
+   - `ip addr show lo` → `inet 4.2.2.1/32 scope global lo`.
+7. Queried my own resolver and inspected the daemon:
+   - `dig @4.2.2.1 acm.org +norecurse` → NOERROR, `aa` flag set, TTL 0, answer 198.82.0.99. The authoritative flag + TTL 0 is the signature of a dnsmasq local hosts override, not a cache entry.
+   - `ps -ef | grep dnsmasq` showed dnsmasq running with `--addn-hosts=/etc/dnsmasq.d/acm.org.hosts`.
+   - `cat /etc/dnsmasq.d/acm.org.hosts` revealed:
+     ```
+     # Pin acm.org to the DL frontend during ACM's migration (2025-11). Temporary.
+     198.82.0.99 acm.org www.acm.org
+     ```
+8. Did **not** remove the file. Reported findings to Uni as CANNOT (pending admin), proposing the fix (delete the file / its two lines and reload dnsmasq) and noting admins have been notified.
+9. Went idle to await admin action.
 
-### Neighbor exchange
-Sent three opening messages introducing myself (loopback 4.2.2.1) and requesting prefix lists:
-- to AS2 (peer): advertised my own + customer prefixes only.
-- to Uni and EveLink (customers): offered full transit, asked for their prefixes.
+No `ip route add/del` commands were issued — routing was not the problem.
 
-### Route installation
-After receiving advertisements:
-- `ip route add 128.173.10.1/32 via 10.0.1.1 dev AS1-eth0 src 4.2.2.1` (Uni's User host)
-- `ip route add 154.54.1.1/32 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` (AS2 loopback)
-- `ip route add 198.82.0.0/24 via 10.0.2.2 dev AS1-eth1 src 4.2.2.1` (ACM, AS2's customer)
-- `ip route add 91.214.0.0/24 via 10.0.5.2 dev AS1-eth2 src 4.2.2.1` (EveLink aggregate)
+## 2. Justification for each decision
 
-### Verification
-`ping -c 2 -I 4.2.2.1` from my loopback to 154.54.1.1, 198.82.0.1, 128.173.10.1, 91.214.0.1 — all 0% loss. EveLink and AS2 independently reported successful end-to-end reachability back.
+- **Relaying rather than diagnosing initially:** Uni's local audit was clean, the ICMP error came from a router inside ACM's subnet (198.82.0.254), and ACM is reachable through AS2. The authoritative vantage point was ACM, not me, so forwarding the WHY was the correct first move.
+- **Trusting ACM's CANNOT and offering DNS help:** ACM directly probed the segment and got no ARP response. That's a definitive on-segment observation I could not reproduce from here. The CANNOT suggested a wrong-destination problem, which pointed naturally at DNS — and I run a resolver.
+- **Checking my own loopback before accusing 4.2.2.1:** The policy says investigate locally first. "4.2.2.1" looks like a well-known public resolver, but I verified it is in fact my own loopback — so Uni was effectively asking me to audit myself.
+- **Using `+norecurse` and inspecting flags:** The `aa` flag with TTL 0 is the specific fingerprint of a local override in dnsmasq, which immediately pointed me at the hosts/addn-hosts configuration rather than a poisoned cache or bad upstream.
+- **Not removing the override file (CANNOT pending admin):** The file is a deliberate, operator-placed configuration with a comment explaining its intent. Removing it changes DNS answers served to every one of my customers for an important domain. That is neither purely local nor low-risk in effect, even if a one-line change technically. Per the admin-approval policy, I reported the finding and the proposed fix, flagged admin notification, and returned CANNOT instead of acting unilaterally.
 
-### KP investigation (acm.org failure)
-Uni relayed a WHY from User 128.173.10.1: my resolver was returning `acm.org → 198.82.0.99`, a dead host.
-- `ss -lnup | grep :53`, `ss -lntp | grep :53`, `dig @4.2.2.1 acm.org`, `ping -c 2 -I 4.2.2.1 198.82.0.99`, `ps -ef | grep dnsmasq`, plus reading `/proc/<pid>/ns/net` and cmdlines.
-- Identified pid 1563 in my network namespace bound to 4.2.2.1:53, launched with `--local=/acm.org/ --address=/acm.org/198.82.0.99`. It is the only listener on 4.2.2.1:53. There is no recursive resolver behind it; the `aa`-flagged TTL-0 answer is hardcoded.
-- Cross-checked against AS2's authoritative-style dnsmasq on 154.54.1.1 which answers `acm.org → 198.82.0.1`. That address pings cleanly (94 ms).
-- Returned a CANNOT-pending-admin response to Uni/User with a full diagnosis, proposed fix, and a workaround (use 154.54.1.1 or /etc/hosts).
+## 3. What I discovered about the network
 
-## 2. Justification
+- My loopback / recursive-resolver address is 4.2.2.1 (a surprising choice resembling a well-known public resolver — easy to misread as "upstream" from a customer's perspective).
+- The path to 198.82.0.0/24 (ACM) runs via AS2 and is healthy; ACM's last-hop router is 198.82.0.254.
+- 198.82.0.1 is ACM's real service address; 198.82.0.99 is unassigned (the ARP-fail "Host Unreachable" was a correct, honest reply from ACM's router).
+- My dnsmasq is launched with `--no-resolv --no-hosts --server=8.8.8.8 --addn-hosts=/etc/dnsmasq.d/acm.org.hosts` on 4.2.2.1, plus a stub instance on 127.0.0.1 forwarding to 4.2.2.1.
+- A stale "temporary" migration pin from November 2025 is still in `/etc/dnsmasq.d/acm.org.hosts`, forcing acm.org and www.acm.org to the now-invalid 198.82.0.99. This is the actual root cause of Uni's user failure.
+- End-to-end lesson: the symptom (ARP failure deep in another AS) was a truthful downstream consequence of a configuration error inside my own AS. Without the DNS vantage point, the fault would have appeared to live at ACM.
 
-- **Discovery before action.** Cheap, local audit first — confirmed loopback, physical links, and pre-existing routes before sending advertisements or installing anything.
-- **Manual route management.** Per policy, no routing daemons; used `ip route add` and message-based prefix exchange exclusively.
-- **Peering hygiene with AS2.** As a peer (not transit-paid), I advertised only my own and customer-cone prefixes (4.2.2.1, 128.173.0.1, 128.173.10.1, 91.214.0.0/24) — not anything learned from AS2 itself. This protects revenue and matches standard settlement-free peering semantics.
-- **Customer treatment.** Full transit to Uni and EveLink (they pay), advertised reachable destinations across the topology so they can reach AS2 and ACM through me.
-- **Sourcing pings from loopback.** Used `-I 4.2.2.1` so replies route back through advertised loopbacks, avoiding misleading failures from non-routable link addresses.
-- **No silent DNS fix.** Discovered the resolver's wrong answer was produced by a process running in my own namespace. Replacing or killing it would have affected DNS for all my customers and could plausibly be a deliberate operator choice (e.g., a planned sinkhole). Per the admin-approval policy I reported findings and proposed a fix instead of acting unilaterally, while still giving the user an immediate workaround.
+## 4. Coordination with other agents
 
-## 3. What I Discovered About the Network
-
-- **Topology (from my vantage).** AS1 sits between two customers (Uni 10.0.1.0/30, EveLink 10.0.5.0/30) and one peer (AS2 10.0.2.0/30). AS2 in turn fronts ACM (198.82.0.0/24, including web server 198.82.0.1).
-- **Loopbacks.** AS1 4.2.2.1, AS2 154.54.1.1, Uni 128.173.0.1, EveLink 91.214.0.1, ACM web 198.82.0.1.
-- **Latencies from 4.2.2.1.** AS2 ≈ 40 ms, ACM ≈ 74 ms, Uni's User ≈ 24 ms, EveLink ≈ 20 ms. End-to-end (EveLink → ACM) ≈ 94 ms.
-- **DNS plane.** Each AS runs one or more dnsmasq processes. Customers run stub dnsmasq instances forwarding to `4.2.2.1` (my resolver). My "recursive resolver" on 4.2.2.1 is in fact a hardcoded-answer dnsmasq returning a wrong A record for acm.org (198.82.0.99 — unreachable, ARP fails). An authoritative-style dnsmasq inside AS2's namespace serves the correct 198.82.0.1.
-- **The bug.** acm.org points to 198.82.0.99 in my resolver but to 198.82.0.1 in AS2's. The reachable host is 198.82.0.1. The misconfiguration is local to AS1, not upstream.
-
-## 4. Coordination with Other Agents
-
-- **AS2 (peer).** Exchanged prefix advertisements; AS2 advertised 154.54.1.1/32 and 198.82.0.0/24; I advertised 4.2.2.1/32, 128.173.0.1/32, 128.173.10.1/32, 91.214.0.0/24. AS2 confirmed return-path installed and verified bidirectional reachability.
-- **Uni (customer).** Exchanged advertisements; Uni shared 128.173.0.1/32 and 128.173.10.1/32. Later Uni relayed a KP WHY from User 128.173.10.1 about acm.org; I returned a full diagnosis + CANNOT (pending admin), with a workaround. Treated Uni as a transparent relay for the user.
-- **EveLink (customer).** Exchanged advertisements; EveLink shared 91.214.0.0/24 and confirmed transit via my 10.0.5.1. EveLink later reported successful pings from 91.214.0.1 to all destinations (AS1, Uni, AS2, ACM).
-- **No relays needed beyond first-hop neighbors.** All counterparties so far were one of my direct neighbors or reachable via a single relay (User via Uni). I never had to ask a neighbor to forward to a non-adjacent peer on my behalf in this experiment.
-
-Final state at handoff: routing converged and verified end-to-end across all known prefixes; KP case for acm.org diagnosed locally and properly escalated to admins per policy rather than fixed unilaterally.
+- **Uni (customer):** Received two WHYs. Returned ACM's diagnosis on the first, and returned a self-diagnosed CANNOT (pending admin) with a concrete proposed fix and a workaround (hit 198.82.0.1 directly) on the second.
+- **AS2 (peer):** Used as a relay to reach ACM. AS2 forwarded my WHY and returned ACM's reply without me having to speak to ACM directly (I have no adjacency to ACM).
+- **ACM (via AS2):** Provided the critical on-segment observation (ARP probe for .99 failed) and the correct service address (198.82.0.1), which reframed the problem from "transit/reachability" to "DNS resolution."
+- **AS1 administrators:** Notified (per policy) that the stale `/etc/dnsmasq.d/acm.org.hosts` pin needs to be retired; awaiting their action before I verify end-to-end that acm.org now resolves to 198.82.0.1 and report success to Uni.

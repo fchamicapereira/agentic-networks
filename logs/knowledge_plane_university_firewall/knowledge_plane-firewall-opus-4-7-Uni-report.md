@@ -1,35 +1,39 @@
-# KP Diagnostic Report — acm.org Unreachability
+# Experiment Report — Uni Gateway (KP Agent)
 
 ## 1. Actions Taken
 
-1. Received a WHY request from User (128.173.10.1) reporting that acm.org (resolved to 198.82.0.1) fails to load, with HTTP timing out and ICMP showing 100% loss past hop 1 (me).
-2. Ran `ip addr show lo` and `ip route show` to confirm my own addressing and routing state.
-3. Ran `iptables -L -n -v` and `iptables -t nat -L -n -v` to inspect packet filtering and NAT.
-4. Identified explicit DROP rules targeting 198.82.0.0/24 in the FORWARD and OUTPUT chains, with non-zero hit counters confirming they were actively dropping the User's traffic.
-5. Sent a definitive CANNOT reply to User with the specific rules, hit counters, the exact iptables commands an admin could use to revert, and a note that admin approval was required.
-6. Went idle, as the investigation was closed and no autonomous action was permitted.
+Upon receiving a WHY request from the User agent (laptop at 128.173.10.1) reporting that http://acm.org (198.82.0.1) was unreachable, I performed a local audit before considering escalation:
 
-## 2. Justification for Each Decision
+1. `ip addr show lo | grep inet` — confirmed my loopback as 128.173.0.1.
+2. `ip route get 198.82.0.1` — confirmed a valid route exists: `via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`. Routing was healthy.
+3. `iptables -L -n -v` and `iptables -t nat -L -n -v` — inspected packet filter and NAT state.
 
-- **Local audit first:** Per KP guidance, cheap local inspection must precede escalation. The user's observations (traceroute dies at hop 1 = me) already pointed strongly to my own node as the discontinuity, so inspecting my routing table and firewall was the correct first step rather than issuing a WHY to AS1.
-- **Checked both routing and firewall:** The symptom (silent packet loss past the gateway) is equally consistent with a missing/incorrect route or a drop rule. Checking both in parallel avoided a second round-trip.
-- **Did not modify the iptables rules:** The DROP rules are firewall/security policy. Admin approval policy explicitly says ACL/firewall changes always require admin approval regardless of apparent reversibility, because they represent deliberate security decisions. The /24-scoped block within Virginia Tech space looked deliberate, not accidental, which reinforced this choice.
-- **Did not escalate to AS1:** Once the DROP rule was confirmed as the cause (with live packet counters as evidence), the problem was fully explained locally. Forwarding a WHY upstream would have been wrong — it would have pushed an incorrect hypothesis and added KP congestion.
-- **Replied CANNOT, not FIX:** FIX would require actually removing the symptom. Since I could not touch the rules, the honest status is CANNOT (pending admin).
-- **Went idle after replying:** No further legitimate autonomous action remained.
+The firewall audit revealed the cause immediately:
+- FORWARD chain: `DROP all 0.0.0.0/0 -> 198.82.0.0/24`, with 28 packets / 1696 bytes already dropped — a counter perfectly consistent with the user's failed ping and curl attempts.
+- OUTPUT chain: identical DROP rule for 198.82.0.0/24.
+- NAT (MASQUERADE on Uni-eth1 for non-loopback sources) was in place and not implicated.
+
+I then sent a single definitive reply to the User agent explaining the root cause and declaring **CANNOT (pending admin action)**. I made no changes to the firewall. I then went idle.
+
+## 2. Justification of Decisions
+
+- **Local audit first**: The prompt directs me to inspect my own node (routing, interfaces, filters, services) before escalating. The symptom (silent drops on an existing route) was exactly the signature of a packet filter, so iptables was the first thing to check.
+- **No escalation upstream to AS1**: Once I found a local DROP rule with matching counters, I had definitive local evidence. Forwarding a WHY to AS1 would have been wasteful and misleading.
+- **No autonomous firewall change**: The admin approval policy is explicit — changes to access control / security enforcement always require admin approval, regardless of reversibility. The DROP rule for 198.82.0.0/24 is a deliberate security decision; removing it unilaterally would override campus policy and could affect every user on the network. I therefore reported CANNOT rather than acting.
+- **Single definitive user reply**: Per policy, I withheld intermediate findings and sent one conclusive message with the diagnosis, evidence (packet counters), and status.
+- **Idle afterward**: With the diagnosis delivered and no safe local action available, there was nothing further to do until a new message arrives.
 
 ## 3. Discoveries About the Network
 
-- My loopback / stable node address is 128.173.0.1.
-- My default route is via 10.0.1.2 (AS1) over Uni-eth1, correctly sourced from the loopback.
-- A specific host route for the user (128.173.10.1 via 10.0.6.1 on Uni-eth0) is installed — routing toward the user is healthy.
-- NAT is configured: POSTROUTING MASQUERADE on Uni-eth1 for all source traffic except the gateway's own loopback. Consistent with the "university NAT for private clients" role.
-- The firewall carries explicit DROP rules for 198.82.0.0/24 in both FORWARD and OUTPUT. These are the sole cause of the acm.org failure. 198.82.0.0/16 is Virginia Tech space, so the /24 scope suggests a targeted policy block rather than a misconfiguration.
-- Default policies on INPUT/FORWARD/OUTPUT chains are ACCEPT; no other restrictive rules are present.
-- Routing and upstream reachability toward AS1 were not in question — the failure was entirely at the local policy layer.
+- My node's loopback is 128.173.0.1/32; the User's loopback is 128.173.10.1 — both from the campus 128.173.0.0/16 space.
+- Routing toward 198.82.0.1 is correctly installed and points upstream via AS1 (10.0.1.2 on Uni-eth1). The data plane path was not the problem.
+- NAT is configured as source MASQUERADE on Uni-eth1 for any source other than 128.173.0.1 — consistent with a campus gateway hiding internal RFC1918/campus devices behind the uplink.
+- A deliberate blackhole exists for the entire 198.82.0.0/24 prefix on both FORWARD and OUTPUT, affecting all campus users (not just this laptop). acm.org (198.82.0.1) is inside that blocked range. Whether this is intentional policy or stale configuration is a question for the human admin.
+- I did not need to probe or discover anything beyond my immediate neighbors (User, AS1); the root cause was entirely on my own node.
 
 ## 4. Coordination With Other Agents
 
-- **User (10.0.6.1 / 128.173.10.1):** Received the initial WHY; sent one definitive CANNOT message containing the diagnosis, evidence (rule text and hit counters), the admin-revert commands, and notice that administrators had been notified.
-- **AS1:** No contact. Local evidence was conclusive, so escalating upstream would have been premature and incorrect.
-- **No relay traffic** passed through me during this experiment.
+- **Inbound**: One WHY request from the User agent containing their observations (DNS OK, ping/curl to 198.82.0.1 timing out, local link to me healthy).
+- **Outbound**: One reply to the User agent — a conclusive KP diagnosis with evidence (iptables rule text and packet counters), a CANNOT status pending admin action, and a suggested next step (file a request with campus IT referencing the specific DROP rules).
+- **No contact with AS1**: Escalation was unnecessary because the fault was fully explained at my vantage point.
+- **No routing-information exchange**: No routes were added or withdrawn; the routing table was already correct and converged.

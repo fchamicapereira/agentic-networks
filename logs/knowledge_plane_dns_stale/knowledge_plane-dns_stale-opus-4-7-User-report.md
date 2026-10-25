@@ -1,60 +1,47 @@
-# Experiment Report: acm.org Unreachability Investigation
+# Experiment Report: acm.org Load Failure Investigation
 
 ## 1. Actions Taken
 
-**Step 1 — Local state inspection.**
-Ran `ip addr show lo` and `ip route show`. Confirmed my loopback is 128.173.10.1/32 and my only route is a default via 10.0.6.2 (Uni). No local misconfiguration to rule in or out yet.
+**Step 1 — Established baseline.**
+- `ip addr show lo` → confirmed stable loopback address 128.173.10.1.
+- `getent hosts acm.org` → DNS resolved acm.org to 198.82.0.99.
 
-**Step 2 — Reproduce the failure.**
-Ran `curl -v --max-time 10 http://acm.org`. It resolved to 198.82.0.99 and failed with "No route to host". Two notable facts: (a) DNS resolved (so the resolver is reachable), and (b) the resolved address looked suspicious — 198.82.0.0/16 is not ACM's known address space.
+**Step 2 — Reproduced the failure.**
+- `ping -c 3 -I 128.173.10.1 198.82.0.99` → 100% loss. Replies came back as ICMP "Destination Host Unreachable" from 198.82.0.254.
 
-**Step 3 — Isolate DNS vs. transport.**
-- `getent hosts acm.org` and `host acm.org` both confirmed 198.82.0.99.
-- `ping -I 128.173.10.1 198.82.0.99` returned ICMP "Destination Host Unreachable" from 198.82.0.254 — meaning traffic reached that subnet's gateway, but the final host didn't exist there.
-- `ping -I 128.173.10.1 10.0.6.2` succeeded with 0% loss — my link to Uni is healthy.
-All pings were sourced from the loopback per the operating instructions, since the link IP isn't globally routable.
+**Step 3 — Sanity-checked local path.**
+- `ip route show` → confirmed default route via 10.0.6.2 (Uni) was intact.
+- `ping -c 2 -I 128.173.10.1 10.0.6.2` → neighbor Uni reachable, ~4 ms, 0% loss. Ruled out local/link failure.
 
-**Step 4 — Confirm loopback to Uni.**
-Replied to Uni's address-verification message confirming 128.173.10.1/32 via 10.0.6.1. No route changes were necessary — Uni already had the correct entry.
+**Step 4 — Reported objective findings to the KP** via send_message to Uni, including: the owner's complaint, the resolved IP, the ICMP unreachable from the destination's last-hop router, and my interpretation that the fault lay at or near the destination rather than in transit.
 
-**Step 5 — Escalate to the KP via Uni.**
-Sent Uni a structured report containing: the user's complaint, the resolved IP, the ICMP-unreachable evidence, the confirmation that my own link was healthy, and two hypotheses (bad DNS answer vs. dead host). I deliberately did not paraphrase the user's vague complaint — I gave the KP my own technical observations.
+**Step 5 — Validated workaround.**
+- After KP identified the real address as 198.82.0.1: `ping -c 2 -I 128.173.10.1 198.82.0.1` → 0% loss, ~98 ms. Confirmed the workaround was viable before offering it.
 
-**Step 6 — Verify the KP's interim workaround.**
-The KP suggested 198.82.0.1 as the real ACM server. I ran `curl --resolve acm.org:80:198.82.0.1 http://acm.org/` and got HTTP 200 with a real page body (2152 bytes). This independently corroborated the KP's diagnosis before I trusted it.
+**Step 6 — Reported to the owner** in plain language: explained the stale DNS override, confirmed the campus/transit network was healthy, noted admins had already been notified, and offered a local hosts override as a stopgap.
 
-**Step 7 — Apply local workaround.**
-Appended `198.82.0.1 acm.org www.acm.org` to `/etc/hosts` and verified with `getent hosts`. This bypasses the broken upstream DNS answer only for this laptop — I did not touch the campus resolver, as that is an admin-controlled shared service.
+**Step 7 — Idled** awaiting either the owner's reply or KP's follow-up confirming the pin was cleared.
 
-**Step 8 — Report to owner and close.**
-Translated the KP diagnosis into plain language for the non-technical owner, told them no action was needed on their part, and called `report_done`.
+## 2. Justifications
 
-## 2. Justification for Each Decision
-
-- **Reproducing first, not relaying the complaint:** Per role guidance, the owner's description is imprecise; the KP needs facts. The reproduction immediately surfaced that DNS was returning a wrong-looking address — a much more actionable lead than "page failed to load".
-- **Sourcing pings from the loopback (128.173.10.1):** The instructions explicitly warn that link-scoped addresses lack return routes; sourcing from loopback eliminates that as a confound and produces trustworthy evidence.
-- **Distinguishing DNS failure from transport failure before escalating:** The ICMP-unreachable from 198.82.0.254 (not from anywhere on my own path) told me the network was forwarding correctly; the destination simply didn't exist. That pointed at DNS as the prime suspect, which I conveyed to the KP.
-- **Not modifying campus DNS or routing:** Uni's DNS forwarder and the upstream resolver affect all campus users. Unilateral changes would exceed my authority. /etc/hosts on this one laptop is a strictly local override and is appropriate.
-- **Verifying the workaround before trusting it:** The KP claimed 198.82.0.1 was the real server; I independently confirmed it returns a real HTTP 200 page before recommending it to the owner.
-- **Plain-language report to owner:** They explicitly are not technical. I summarized cause, blame (not their laptop, not the campus), action (already escalated, nothing for them to do), and remedy (temporary fix already applied; reload the page).
+- **Sourcing pings from loopback (128.173.10.1):** Per operating guidance, link-scoped addresses like 10.0.6.1 are not routable network-wide; sourcing from them produces misleading failures. Loopback is the only globally reachable address.
+- **Resolving DNS before pinging:** Needed to know what IP the browser actually used, since "page failed to load" could be DNS, routing, or server-side.
+- **Pinging neighbor after destination failed:** Separated local/link health from upstream/destination health — essential before accusing the wider network.
+- **Reading the ICMP source (198.82.0.254):** This was the key clue — the unreachable came from inside the destination's /24, not from a transit router, pointing to ARP failure at the last hop rather than a routing black hole.
+- **Reporting observations rather than paraphrasing the owner:** Per role instructions, the KP needs technical data, not a user complaint restatement.
+- **Verifying the workaround (198.82.0.1) before offering it:** Avoid giving the owner advice I hadn't tested.
+- **Not altering DNS unilaterally:** Deferred to KP's choice to let AS1 clean up their stale pin, consistent with KP's reasoning that masking it would hide the upstream bug.
 
 ## 3. Network Discoveries
 
-- **Topology around me:** User (me, lo=128.173.10.1) ↔ Uni (lo=128.173.0.1, link 10.0.6.2). Uni is my default gateway and my sole path to the rest of the network.
-- **Campus DNS architecture:** Uni runs a stub DNS forwarder that relays to upstream resolver 4.2.2.1 in AS1. There is no caching/recursing layer at the campus.
-- **Misconfiguration at AS1:** The resolver at 4.2.2.1 is actually a dnsmasq instance launched with `--address=/acm.org/198.82.0.99` — a hardcoded static override (TTL 0, `aa` flag set), not a real recursive resolver. It returns a stale/wrong A record for acm.org.
-- **Ground truth:** A second resolver in AS2 (154.54.1.1) returns acm.org → 198.82.0.1, which is the live ACM web server (confirmed via curl HTTP 200). So 198.82.0.99 isn't a deliberate sinkhole, just wrong.
-- **Routing was never the problem:** Forwarding worked correctly all the way to 198.82.0.0/24's gateway, which is what allowed the ICMP-unreachable message to come back at all.
+- My node (User) has loopback 128.173.10.1/32 and a single physical link to Uni (10.0.6.0/30).
+- Default routing via Uni is functional; packets to 198.82.0.0/24 are successfully forwarded end-to-end across the KP chain Uni → AS1 → AS2 → ACM.
+- The real acm.org address is **198.82.0.1**; 198.82.0.99 is unassigned in that /24.
+- **Root cause (from KP):** The upstream recursive resolver 4.2.2.1 (operated by AS1) has a stale manual override in `/etc/dnsmasq.d/acm.org.hosts` pinning acm.org to 198.82.0.99 — leftover from an ACM Nov-2025 migration maintenance window that was never retired. The campus forwarder (Uni) relays to that resolver, so every campus user sees the bad answer.
+- No routing or forwarding fault exists anywhere on the path.
 
-## 4. Coordination With Other Agents
+## 4. Agent Coordination
 
-- **Uni (gateway / local KP contact):** Single peer throughout. Exchange consisted of (i) confirming my loopback so Uni had a return route, (ii) submitting the KP investigation request with my observations, (iii) one follow-up nudge when the KP response was slow, (iv) sharing my independent verification of the 198.82.0.1 workaround.
-- **AS1 and AS2:** I had no direct contact with them. The KP, working through Uni, queried AS1's resolver, inspected its dnsmasq configuration, cross-checked AS2's resolver, and escalated a WHY to AS1's administrators. The KP returned a DIAGNOSIS + CANNOT (pending admin action at AS1) — which I accepted, because the root cause is outside both my and Uni's administrative scope.
-- **Route management:** No `ip route add/del` was needed at any point. The only configuration change I made was a single line appended to `/etc/hosts` on this laptop — strictly a name-resolution workaround, not a routing change.
-
-## Final State
-
-- Root cause identified and escalated to AS1 admins by the KP.
-- Local /etc/hosts override (`198.82.0.1 acm.org www.acm.org`) lets the owner load acm.org immediately.
-- Owner informed; no action required from them.
-- When AS1 fixes their resolver and Uni notifies me, the /etc/hosts override should be removed so the laptop returns to normal DNS-driven resolution.
+- **With Uni (my local KP contact):** Sent one structured diagnostic report describing the owner's complaint, my test methodology (DNS lookup, loopback-sourced pings, neighbor sanity check), and my interpretation (destination-side ARP failure). The KP conducted an end-to-end investigation across Uni → AS1 → AS2 → ACM, identified the stale DNS pin at AS1, notified AS1's administrators, and returned a CANNOT verdict (pending upstream admin action) with the correct IP and a workaround.
+- **With the human owner:** Delivered a non-technical explanation, confirmed admin escalation was already in motion (so the owner need not contact anyone), and offered a local hosts override as an optional stopgap.
+- **No routing changes were made** on my node. No `ip route add/del` was needed; the problem was DNS, not routing.

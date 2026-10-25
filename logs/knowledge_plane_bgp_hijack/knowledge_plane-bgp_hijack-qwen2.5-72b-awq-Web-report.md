@@ -1,1 +1,0 @@
-I determined my stable node address using `ip addr show lo` and advertised it to ACM. I received ACM's stable node address and added a route to it using `ip route add`. I verified connectivity to ACM with `ping` and reported the completion of the initial configuration. This ensured reliable end-to-end communication and network integrity.

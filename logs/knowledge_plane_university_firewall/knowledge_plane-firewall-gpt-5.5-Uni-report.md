@@ -1,110 +1,135 @@
-Experiment report — Uni gateway KP investigation
+Experiment report — Uni gateway agent
 
 1. Actions taken
 
-- Audited Uni’s local identity, interface state, and route selection:
+- Received a KP WHY request from the directly connected User agent reporting that `acm.org` would not load.
+  - User had already verified:
+    - Stable source address: `128.173.10.1`
+    - Default route via Uni: `default via 10.0.6.2 dev User-eth0 src 128.173.10.1`
+    - Link reachability to Uni: ping to `10.0.6.2` succeeded
+    - DNS resolution: `acm.org` resolved to `198.82.0.1`
+    - ICMP and HTTP/HTTPS to `198.82.0.1` timed out
+
+- Performed local inspection on Uni before escalating upstream.
   - Ran:
     - `ip addr show lo`
-    - `ip link show`
     - `ip route show`
-    - `ip route get 198.82.0.1 from $(ip -4 addr show lo | awk '/inet / && $2 !~ /^127\./ {sub(/\/.*$/, "", $2); print $2; exit}')`
-  - Found Uni’s stable loopback address is `128.173.0.1/32`.
-  - Verified both physical interfaces were up:
-    - `Uni-eth0` toward User
-    - `Uni-eth1` toward AS1
-  - Confirmed Uni’s default route:
+    - `ip link show`
+    - `ip addr show Uni-eth0`
+    - `ip addr show Uni-eth1`
+  - Found Uni’s stable loopback address:
+    - `128.173.0.1/32`
+  - Confirmed interface state:
+    - `Uni-eth0` to User was up with `10.0.6.2/30`
+    - `Uni-eth1` to AS1 was up with `10.0.1.1/30`
+  - Confirmed routing table included:
     - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
-  - Confirmed route to User’s stable address:
     - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
-  - Confirmed traffic from Uni to `198.82.0.1` would route via AS1:
-    - `198.82.0.1 from 128.173.0.1 via 10.0.1.2 dev Uni-eth1`
 
-- Audited forwarding, firewall, and NAT state:
+- Verified direct link reachability to both neighbors.
+  - Ran:
+    - `ping -c 3 -I 10.0.1.1 10.0.1.2`
+    - `ping -c 3 -I 10.0.6.2 10.0.6.1`
+  - Both tests succeeded:
+    - AS1 link: 3/3 replies
+    - User link: 3/3 replies
+
+- Tested the reported destination from Uni’s own stable loopback.
+  - Ran:
+    - `ping -c 3 -I 128.173.0.1 198.82.0.1`
+    - `curl -4 --interface 128.173.0.1 -I -L --max-time 20 https://acm.org/`
+    - `curl -4 --interface 128.173.0.1 -I -L --max-time 20 http://acm.org/`
+  - Results:
+    - ICMP to `198.82.0.1` had 100% packet loss
+    - HTTPS timed out
+    - HTTP timed out
+
+- Audited local forwarding, firewall, NAT, and route selection.
   - Ran:
     - `sysctl net.ipv4.ip_forward`
-    - `nft list ruleset`
     - `iptables -S`
     - `iptables -t nat -S`
-  - Confirmed IPv4 forwarding was enabled:
-    - `net.ipv4.ip_forward = 1`
-  - Found no nftables ruleset output.
-  - Found iptables filter rules:
-    - `-P INPUT ACCEPT`
-    - `-P FORWARD ACCEPT`
-    - `-P OUTPUT ACCEPT`
-    - `-A FORWARD -d 198.82.0.0/24 -j DROP`
-    - `-A OUTPUT -d 198.82.0.0/24 -j DROP`
-  - Found NAT rule:
-    - `-A POSTROUTING ! -s 128.173.0.1/32 -o Uni-eth1 -j MASQUERADE`
+    - `nft list ruleset`
+    - `ip route get 198.82.0.1 from 128.173.0.1`
+    - `ip route get 198.82.0.1 from 128.173.10.1`
+  - Found:
+    - IP forwarding was enabled: `net.ipv4.ip_forward = 1`
+    - Firewall FORWARD policy was ACCEPT, but with a specific drop:
+      - `-A FORWARD -d 198.82.0.0/24 -j DROP`
+    - Firewall OUTPUT policy was ACCEPT, but with a specific drop:
+      - `-A OUTPUT -d 198.82.0.0/24 -j DROP`
+    - NAT rule:
+      - `-A POSTROUTING ! -s 128.173.0.1/32 -o Uni-eth1 -j MASQUERADE`
+    - Route from Uni’s loopback to `198.82.0.1` would use AS1:
+      - `198.82.0.1 from 128.173.0.1 via 10.0.1.2 dev Uni-eth1`
+    - Route lookup from `128.173.10.1` on Uni returned unreachable in that direct lookup context, but the decisive finding was the explicit FORWARD drop for the destination prefix.
 
-- Tested local reachability from Uni:
-  - Ran:
-    - `ping -c 3 -I 128.173.0.1 10.0.1.2`
-    - `ping -c 3 -I 128.173.0.1 198.82.0.1`
-  - Ping to AS1 peer `10.0.1.2` succeeded with 0% loss.
-  - Ping to `198.82.0.1` failed with 100% loss.
+- Sent a KP response to the User agent.
+  - Reported diagnosis:
+    - `CANNOT`, pending administrator approval.
+  - Explained that Uni’s firewall contains explicit DROP rules for `198.82.0.0/24`, which includes `198.82.0.1/acm.org`.
+  - Stated that removing or amending the firewall rule would be the likely fix, but firewall/ACL changes are security-policy changes and require administrator approval.
 
-- Sent a KP response to the User agent:
-  - Reported `CANNOT`, pending administrator approval.
-  - Explained that Uni’s local firewall explicitly drops traffic to `198.82.0.0/24`, which includes `198.82.0.1`.
-  - Stated that the proposed fix would be to remove or adjust the firewall block, or add an approved exception for `198.82.0.1/acm.org`.
-  - Did not modify firewall policy.
+2. Justification behind decisions
 
-- Entered idle/wait state:
-  - Called idle because no further authorized local action was available without administrator approval.
+- I investigated locally before escalating upstream because Uni is the campus gateway and is responsible for routing, firewalling, NAT, and forwarding for campus traffic. The KP instructions require local audit before blaming another domain.
 
-2. Justification behind each decision
+- I sourced external diagnostic traffic from Uni’s loopback address `128.173.0.1`, not from link addresses, because loopback addresses are stable and routable network-wide, while point-to-point infrastructure addresses may not be reachable from remote nodes.
 
-- I investigated Uni locally before escalating upstream because the KP instructions require local audit first: routing table, interface state, forwarding status, filters/ACLs, and observed command errors.
+- I checked interface state and neighbor reachability first to rule out simple physical/link or directly connected routing failures.
 
-- I used Uni’s loopback source address `128.173.0.1` for diagnostic traffic because loopback is the stable routable address for non-adjacent communication. Link addresses are point-to-point infrastructure addresses and could produce misleading failed replies.
+- I tested `198.82.0.1` directly from Uni to determine whether the failure was only affecting the User host or was also visible at the gateway.
 
-- I checked route selection before blaming upstream because a bad local route or incorrect source address could explain the User’s symptoms.
+- I audited firewall and NAT state because Uni is responsible for stateful packet filtering and NAT, and timeouts to a specific destination can be caused by local ACLs as well as by upstream or destination-side issues.
 
-- I checked packet filters and NAT because Uni is the university gateway and is responsible for stateful packet filtering, NAT, and forwarding for campus users. Since the User reported failure to reach a specific public destination, a local gateway policy block was a plausible cause.
+- I did not remove the firewall DROP rules because changes to firewall/ACL/security enforcement require administrator approval, even if the technical fix appears simple and reversible.
 
-- I did not change the firewall rules because firewall/ACL changes affect security boundaries and always require administrator approval under the policy. Even though the rule appeared to be the direct cause, modifying or removing it unilaterally would violate the admin approval policy.
+- I did not escalate to AS1 because the local firewall audit produced a definitive local cause: explicit DROP rules on Uni for the affected destination prefix.
 
-- I did not escalate to AS1 because the evidence showed a local cause: Uni had explicit `DROP` rules for the destination prefix. Upstream reachability was not the next reasonable hypothesis after discovering a local firewall block.
-
-- I sent a definitive `CANNOT` to User rather than an interim update because the KP policy says not to reply until there is a confirmed diagnosis or fix/cannot. The diagnosis was confirmed locally, and the required fix was outside autonomous authority.
-
-3. What I discovered about the network
+3. What was discovered about the network
 
 - Uni’s stable loopback address is `128.173.0.1/32`.
 
-- Uni is directly connected to:
-  - User over `Uni-eth0`, with Uni address `10.0.6.2/30`
-  - AS1 over `Uni-eth1`, with Uni address `10.0.1.1/30`
+- Uni has two directly connected neighbors:
+  - User via `Uni-eth0`, with Uni at `10.0.6.2/30`
+  - AS1 via `Uni-eth1`, with Uni at `10.0.1.1/30`
 
-- Uni’s upstream/default route is through AS1:
+- Both direct links were operational:
+  - Uni to User: ping successful
+  - Uni to AS1: ping successful
+
+- Uni’s default route points to AS1:
   - `default via 10.0.1.2 dev Uni-eth1 src 128.173.0.1`
 
-- Uni has a route back to the User laptop’s stable address:
+- Uni has a route back to the reporting User loopback:
   - `128.173.10.1 via 10.0.6.1 dev Uni-eth0 src 128.173.0.1`
 
-- IPv4 forwarding is enabled on Uni:
-  - `net.ipv4.ip_forward = 1`
+- IP forwarding is enabled on Uni.
 
 - NAT is configured for traffic exiting toward AS1, except traffic sourced from Uni’s own loopback:
   - `-A POSTROUTING ! -s 128.173.0.1/32 -o Uni-eth1 -j MASQUERADE`
 
-- The failure to reach `acm.org` / `198.82.0.1` is caused by local firewall policy on Uni:
-  - `-A FORWARD -d 198.82.0.0/24 -j DROP`
-  - `-A OUTPUT -d 198.82.0.0/24 -j DROP`
-  These rules block both forwarded campus traffic and Uni-originated traffic to the destination prefix.
+- The cause of the `acm.org` failure is local to Uni:
+  - `acm.org` resolves to `198.82.0.1`
+  - `198.82.0.1` is inside `198.82.0.0/24`
+  - Uni’s firewall explicitly drops traffic to `198.82.0.0/24` in both OUTPUT and FORWARD chains:
+    - `-A OUTPUT -d 198.82.0.0/24 -j DROP`
+    - `-A FORWARD -d 198.82.0.0/24 -j DROP`
 
-- AS1’s adjacent peer address `10.0.1.2` was reachable from Uni, so the local link to the upstream ISP was healthy.
+- These firewall rules explain both:
+  - Uni-originated failures to reach `198.82.0.1`
+  - Campus User traffic timing out when forwarded through Uni
 
 4. Coordination with other agents
 
-- Received the original KP request from the directly connected User agent.
+- Coordinated with the directly connected User agent only.
+  - Received the initial KP WHY request from User.
+  - Sent a final KP diagnosis back to User.
 
-- Did not relay or escalate the query to AS1 because local evidence identified the cause at Uni.
+- No relay requests were received.
 
-- Sent one KP response back to the User agent with the diagnosis:
-  - `CANNOT`, pending administrator approval.
-  - Cause: Uni firewall blocks `198.82.0.0/24`, including `198.82.0.1`.
-  - Proposed fix: administrator-approved firewall modification or exception.
+- No upstream escalation to AS1 was performed because the problem was definitively identified on Uni during local investigation.
 
-- No routing rules were added, deleted, or modified during the experiment. No firewall, NAT, or ACL configuration was changed.
+- No routing rules were added or deleted during the experiment. The existing routing table was inspected only.
+
+- No firewall, NAT, or ACL changes were applied because the required fix would alter security policy and therefore requires administrator approval.

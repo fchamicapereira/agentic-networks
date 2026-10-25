@@ -1,53 +1,42 @@
-# Experiment Report: acm.org Unreachability Investigation
+# Experiment Report: Investigating acm.org Load Failure
 
 ## 1. Actions Taken
 
-**Initial reconnaissance:**
-- `ip addr show lo` — identified my stable loopback address as 128.173.10.1.
-- `ip route show` — confirmed a single default route via 10.0.6.2 (Uni), sourced from the loopback.
+**Local diagnostics:**
+- `ip addr show lo` — to find my stable loopback address (128.173.10.1/32) for sourcing diagnostic traffic.
+- `getent hosts acm.org` — to test DNS resolution. Returned 198.82.0.1.
+- `ping -c 3 -W 2 -I 128.173.10.1 198.82.0.1` — to test L3 reachability to acm.org from loopback. Got 100% packet loss.
+- `ping -c 2 -W 2 10.0.6.2` — to confirm my link to Uni was healthy. Got 0% loss, ~4 ms RTT.
+- `curl --interface 128.173.10.1 --max-time 5 http://198.82.0.1/` — to test TCP/HTTP directly to the IP. Got exit 28 (timeout), HTTP code 000.
 
-**Reproducing the failure:**
-- `getent hosts acm.org` and `nslookup acm.org` — confirmed DNS resolved acm.org to 198.82.0.1.
-- `curl -v --max-time 10 http://acm.org` — connection timed out after 10 s.
+**Coordination:**
+- Sent a structured diagnostic report to Uni (the local KP contact) summarizing all four observations and asking the KP to investigate the path to 198.82.0.1.
+- Received the KP's diagnosis and relayed it to the human in plain language.
 
-**Isolating the fault:**
-- `ping -c 3 -I 128.173.10.1 198.82.0.1` — 100% packet loss.
-- `ping -c 2 -I 128.173.10.1 10.0.6.2` — 0% loss; local link to Uni healthy.
-- `traceroute -n -s 128.173.10.1 198.82.0.1` — only hop 1 (128.173.0.1 = Uni) responded; all further hops returned `* * *`.
-
-**Engaging the Knowledge Plane:**
-- Sent a structured problem report to Uni containing the owner's complaint plus my technical observations.
-- Received the KP's diagnosis (CANNOT — administrative firewall drop).
-
-**Reporting back:**
-- Sent a plain-language summary to the human owner explaining the block, that admins had already been notified, and suggesting VPN/off-campus workarounds.
-
-No `ip route` changes were made during this experiment — routing was healthy and the fault was not routing-related.
+**No routing changes** were made. No `ip route add/del` commands were issued.
 
 ## 2. Justification for Each Decision
 
-- **Checking lo and routes first:** I needed to know my sourcing address (the only one routable back to me from remote nodes) and verify basic configuration before testing reachability.
-- **DNS before HTTP:** HTTP failure could have multiple causes; resolving the name first distinguished a name-service problem from a connectivity problem.
-- **Sourcing pings/traceroute from 128.173.10.1 (lo):** Instructed by my operating rules — remote nodes don't have routes back to the point-to-point link IP (10.0.6.1), so sourcing from lo avoids false negatives.
-- **Pinging Uni (10.0.6.2) after acm.org failed:** To separate "my link is down" from "something further out is down."
-- **Traceroute to localize the drop:** It showed exactly where the path became silent — immediately past Uni — which is diagnostic evidence beyond "it doesn't work."
-- **Reporting observations (not the user's words) to KP:** Per my role, the KP needs objective technical data, not a user paraphrase. I included the owner's complaint for context but led with my own measurements.
-- **Not modifying routes or firewall rules:** The problem was not local, and firewall policy is the gateway's administrative concern.
-- **Translating KP's response for the user:** The owner is non-technical; I conveyed cause, scope, that escalation already happened, and practical workarounds.
+- **Sourced from loopback (128.173.10.1), not the link address (10.0.6.1):** Per the operating constraints, link-scoped addresses aren't routable from remote nodes, so replies could fail even on a healthy path. Loopback is the only address a remote peer can route back to.
+- **Checked DNS first:** User-facing "page failed to load" errors are often DNS-related; ruling it out quickly narrows the problem space.
+- **Pinged the resolved IP before trying HTTP:** ICMP isolates L3 reachability from any application-layer problem (TLS, HTTP, server-side).
+- **Pinged 10.0.6.2 (Uni) after the failure:** To distinguish between "my local link is broken" (which would be my own problem) and "something further out is dropping traffic" (which the KP must investigate).
+- **Tried HTTP to the raw IP in addition to ICMP:** To rule out an ICMP-specific filter; the timeout on TCP SYN confirmed a true drop, not just ICMP filtering.
+- **Did not paraphrase the user to the KP:** Per role instructions, I reported my own objective technical observations (commands, exit codes, loss percentages) along with the user's original complaint for context.
+- **Did not attempt workarounds (e.g., installing routes):** The symptoms pointed upstream, not to a routing misconfiguration on my end. Adding routes blindly would have been noise.
 
 ## 3. Discoveries About the Network
 
-- My node (User, 128.173.10.1/32 on lo) is single-homed to Uni via a /30 point-to-point link (10.0.6.0/30), with Uni as default gateway.
-- Uni (10.0.6.2 / 128.173.0.1) is reachable and forwards traffic normally for other destinations.
-- The address 128.173.0.0/16 and 198.82.0.0/16 both belong to Virginia Tech space; acm.org (198.82.0.1) is in a /24 within VT space.
-- The university gateway has explicit iptables DROP rules on both FORWARD and OUTPUT chains targeting 198.82.0.0/24, with active hit counters (111 pkts / 6672 bytes). This is a deliberate administrative block, not a routing failure or outage.
-- DNS from this node works and uses a local resolver at 127.0.0.1.
+- My node (User) has loopback 128.173.10.1/32 and a single point-to-point link to Uni (10.0.6.0/30).
+- The link to Uni is healthy (sub-5 ms RTT, no loss).
+- DNS resolution works through the campus network — acm.org → 198.82.0.1.
+- The campus gateway (Uni) has deliberate iptables DROP rules in both FORWARD and OUTPUT chains for the entire 198.82.0.0/24 prefix. The KP showed 28 packets / 1696 bytes already matched — consistent with my failed probes.
+- The drop is silent (no ICMP unreachable, no TCP RST), which is why the browser appeared to just hang.
+- This is a policy block, not a fault — likely intentional campus access control.
 
-## 4. Coordination with Other Agents
+## 4. Coordination With Other Agents
 
-Only one agent coordination occurred, with my sole neighbor **Uni** (my local Knowledge Plane contact):
+- **Uni (local KP contact):** Sent one diagnostic request containing my four observations (DNS OK, ping to acm.org 100% loss, HTTP timeout, local link healthy) and asked for a path investigation. Received a complete diagnosis: the root cause was a firewall DROP rule on Uni's own gateway for 198.82.0.0/24, with packet-counter evidence. The KP reported it had already escalated to campus administrators (status: CANNOT pending admin action) and declined to remove the rule unilaterally — a reasonable stance since it may be a deliberate security policy.
+- **Human (laptop owner):** Reported the findings in non-technical language, explained the block is a campus policy, and clarified that admins have already been notified so no action is required on their part. Suggested using an off-campus network as the only available workaround.
 
-- **Outbound message to Uni:** A diagnostic request containing the user's complaint, my test methodology, and my raw observations (DNS result, curl timeout, ping loss, traceroute silence past hop 1, routing table state).
-- **Inbound message from Uni:** The KP's authoritative diagnosis — specific iptables rules found on the gateway, confirmation that routing/path were healthy, note on VT address-space ownership, and a CANNOT resolution with the statement that administrators had already been notified.
-
-No routing exchange, prefix advertisement, or relay-for-another-agent interactions were required. The problem was entirely diagnosed through observation + KP consultation.
+No other agents were contacted; the diagnosis was conclusive at the first hop.

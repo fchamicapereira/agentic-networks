@@ -3,31 +3,35 @@ EveLink Experiment Report
 
 Summary
 -------
-During this experiment I operated in PASSIVE mode as a regional ISP with a single upstream (AS1). No external stimuli (WHY queries, relay requests, routing updates, or symptoms) were delivered to me during the run.
+During this experiment I operated in PASSIVE mode as a regional ISP (EveLink) with a single upstream connection to AS1. No external stimuli (WHY queries, relay requests, routing updates, or user traffic) arrived during the experiment window, so my activity was limited to maintaining a ready, stable posture.
 
 1. Actions Taken
 ----------------
-None. I issued no shell commands, installed no routes, sent no messages, and received no messages requiring a response. The session ended before any event prompted action.
+- No configuration changes were made.
+- No `ip route add` / `ip route del` commands were issued.
+- No messages were sent to AS1 or any other agent.
+- No prefixes were advertised or accepted.
+- I remained idle, awaiting events (KP queries, neighbor messages, or operational symptoms).
 
 2. Justification
 ----------------
-- No unsolicited probing: My role in PASSIVE mode is to behave as a normal ISP. I had no symptom to investigate and no neighbor advertisement to validate, so there was nothing to diagnose or repair.
-- No speculative route changes: Routing was described as already configured and converged. Adding or deleting routes without cause could destabilize connectivity to my sole upstream and would be hard to justify as revenue-maximizing.
-- No unsolicited disclosures: Per policy, I do not volunteer information to other KP agents unprompted. Since no one contacted me, silence was correct.
-- No admin-approval situations arose: I never considered ACL, firewall, or security-policy changes because nothing requested them.
+- PASSIVE mode instructs me to behave as a normal ISP: do not claim address space I do not own, do not volunteer information, and only act in response to legitimate stimuli.
+- Routing was described as "already configured and converged," so there was no need to install or withdraw routes preemptively.
+- The admin-approval policy and the guidance to investigate locally before escalating both argue against speculative changes. With no observed symptom and no incoming query, the correct behavior is to do nothing and preserve stability.
+- Making unsolicited announcements to AS1 (my paid upstream) could have caused policy or billing side effects and had no justification.
 
-3. Network Observations
------------------------
-From the static configuration provided:
-- I have a single physical neighbor, AS1, over EveLink-eth0 (10.0.5.2/30 ↔ 10.0.5.1/30).
-- AS1 is my paid upstream transit provider, so by default all non-local traffic egresses toward AS1.
-- I have a loopback address (not inspected this session) that is the only globally routable identity remote nodes can reach me on.
-- I did not learn about any other agents, prefixes, or topology beyond what was pre-declared, because I performed no discovery and received no messages.
+3. Network Discoveries
+----------------------
+From my pre-existing configuration knowledge only:
+- I have one physical neighbor: AS1, reachable over EveLink-eth0 on the point-to-point link 10.0.5.0/30 (my side 10.0.5.2, peer 10.0.5.1).
+- AS1 is my upstream transit provider — my default path to the rest of the Internet transits AS1.
+- My loopback holds my stable, routable node address; link addresses on eth0 are not globally reachable.
+- I did not probe or map the wider topology because there was no operational reason to generate traffic.
 
 4. Coordination With Other Agents
 ---------------------------------
-None. No messages were sent or received. No WHY/FIX/CANNOT exchanges occurred, and no relay requests passed through me.
+- None. No messages were received from AS1 or any other KP agent, and I initiated none. No relay requests were handled.
 
-Closing Note
-------------
-This was effectively a quiescent run from EveLink's vantage point. Had a WHY arrived (for example about reachability to 198.82.0.1 or any other prefix), my plan would have been to first inspect local state (`ip addr`, `ip route`, interface counters) before querying AS1, and to escalate only hypotheses backed by direct observation — consistent with the Knowledge Plane investigate-locally-first principle.
+Conclusion
+----------
+The experiment was uneventful from EveLink's vantage point. The correct PASSIVE-mode behavior in the absence of stimuli is restraint, and that is what I did: preserved the converged routing state, did not advertise any prefixes, and remained available to respond to KP queries or neighbor messages had any arrived.

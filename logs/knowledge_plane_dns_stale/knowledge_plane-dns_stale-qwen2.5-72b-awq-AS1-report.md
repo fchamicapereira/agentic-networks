@@ -1,3 +1,1 @@
-1. **Observed:** Initial network state and lack of response from AS2.
-2. **Decided:** Sent a follow-up message to AS2 to encourage a timely response.
-3. **Why:** To ensure AS2 was aware of the ongoing issue and to prompt action.
+I checked the routing table to understand traffic forwarding and identified the default route. I verified connectivity to AS2 using a ping command to ensure the link was operational before forwarding the WHY request. The request was sent to AS2 because the traceroute failure occurred within their network. After waiting for a response, I performed a traceroute from AS1 to ACM to gather more information. I informed Uni of the findings, suggesting they check their local configuration or contact ACM directly. I then waited for further messages or updates to allow for any new information. These actions were taken to diagnose the network issue and guide Uni towards a resolution.
