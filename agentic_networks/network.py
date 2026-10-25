@@ -303,6 +303,10 @@ class Network:
         for node, ifaces in self.ifaces_per_host.items():
             host = self.hosts[node]
             host.cmd("ip link set lo up")
+            # No ICMP error rate limit: with the kernel default (one per second per destination,
+            # small burst), back-to-back traceroutes to two addresses on the same host drop each
+            # other's replies, and the second trace shows phantom extra hops.
+            host.cmd("sysctl -qw net.ipv4.icmp_ratelimit=0")
             host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo 2>/dev/null || true")
             for addr in self.addresses_per_host.get(node, []):
                 host.cmd(f"ip addr add {addr} dev lo 2>/dev/null || true")
