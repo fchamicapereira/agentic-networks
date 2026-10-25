@@ -35,6 +35,8 @@ def load_topology(path: Path) -> dict:
         for row in csv.reader(line for line in f if line.strip() and not line.startswith("#")):
             if row[0] == "node":
                 nodes.append({"id": row[1], "address": row[2]})
+            elif row[0] in ("prefix", "address"):
+                continue
             else:
                 links.append({"a": row[0], "b": row[1], "rel": row[5], "delay_ms": int(row[2])})
     return {"nodes": nodes, "links": links}

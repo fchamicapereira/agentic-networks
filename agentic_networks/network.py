@@ -1,10 +1,11 @@
 import csv
+import ipaddress
 import subprocess
 import sys
 import time
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 from pathlib import Path
 from prettytable import PrettyTable
@@ -61,6 +62,12 @@ class Topology:
     # fall back to an auto-assigned 10.255.x.x/32 address in Network.
     links: list["Link"]
     loopbacks: dict[str, str]
+    # Optional per-node address block {node: "x.x.0.0/nn"} from `prefix` rows: the prefix the
+    # node originates, which contains its loopback (see Network.seed_stable_routes).
+    prefixes: dict[str, str] = field(default_factory=dict)
+    # Optional further addresses a node answers on {node: ["x.x.x.x/32", ...]} from `address`
+    # rows, e.g. other services it hosts; each must lie within the node's prefix.
+    addresses: dict[str, list[str]] = field(default_factory=dict)
 
 
 class NetworkHost(Host):
@@ -178,9 +185,13 @@ class Network:
         if isinstance(topology, Topology):
             links = topology.links
             explicit_loopbacks = topology.loopbacks
+            self.prefix_per_host = dict(topology.prefixes)
+            self.addresses_per_host = {node: list(a) for node, a in topology.addresses.items()}
         else:
             links = topology
             explicit_loopbacks = {}
+            self.prefix_per_host = {}
+            self.addresses_per_host = {}
 
         self.links = links
         self.net: Mininet | None = None
@@ -211,6 +222,15 @@ class Network:
             node: explicit_loopbacks.get(node, f"10.255.{i}.1/32")
             for i, node in enumerate(sorted(self.ifaces_per_host.keys()), 1)
         }
+        for node, prefix in self.prefix_per_host.items():
+            loopback = ipaddress.ip_interface(self.loopback_per_host[node]).ip
+            if loopback not in ipaddress.ip_network(prefix):
+                raise ValueError(f"{node}: loopback {loopback} is outside its prefix {prefix}")
+        for node, addrs in self.addresses_per_host.items():
+            prefix = self.prefix_per_host.get(node)
+            for addr in addrs:
+                if prefix is None or ipaddress.ip_interface(addr).ip not in ipaddress.ip_network(prefix):
+                    raise ValueError(f"{node}: address {addr} needs a prefix row that contains it")
 
     def _discover_loopbacks(self) -> dict[str, str]:
         # Return {node: ip} for each host's last non-127 address on lo.
@@ -284,6 +304,8 @@ class Network:
             host = self.hosts[node]
             host.cmd("ip link set lo up")
             host.cmd(f"ip addr add {self.loopback_per_host[node]} dev lo 2>/dev/null || true")
+            for addr in self.addresses_per_host.get(node, []):
+                host.cmd(f"ip addr add {addr} dev lo 2>/dev/null || true")
             for iface in ifaces:
                 host.cmd(f"ip addr add {iface.ip} dev {iface.iface}")
                 host.cmd(f"ip link set {iface.iface} up")
@@ -336,8 +358,11 @@ class Network:
                     queue.append(v)
 
         # For each destination, a node's next hop is its tree-neighbour toward that destination
-        # (its parent in the destination-rooted tree). Install a /32 route to the loopback via that
-        # neighbour's directly-connected interface IP.
+        # (its parent in the destination-rooted tree). Install a route via that neighbour's
+        # directly-connected interface IP: to the prefix the destination originates when the
+        # topology gives one, as a converged BGP table would hold, else to its /32 loopback.
+        # Routing only loopbacks would leave the rest of a node's block unrouted (a false
+        # anomaly from the start) and outrank any more-specific announcement agents make.
         for dst in nodes:
             next_hop: dict[str, str] = {}
             seen2 = {dst}
@@ -349,14 +374,19 @@ class Network:
                         seen2.add(v)
                         next_hop[v] = u
                         queue.append(v)
-            dst_loopback = self.loopback_per_host[dst]
+            dst_route = self.prefix_per_host.get(dst, self.loopback_per_host[dst])
             for node in nodes:
                 if node == dst:
+                    # The originator discards traffic to unused addresses in its own block, as
+                    # a real network does for an aggregate it announces, instead of bouncing it
+                    # back along its default route. Its loopback /32 is more specific.
+                    if dst in self.prefix_per_host:
+                        self.hosts[node].cmd(f"ip route add blackhole {dst_route} 2>/dev/null || true")
                     continue
                 hop = next_hop[node]
                 iface = next(i for i in self.ifaces_per_host[node] if i.peer == hop)
                 via = iface.peer_ip.split("/")[0]
-                self.hosts[node].cmd(f"ip route add {dst_loopback} via {via} dev {iface.iface} 2>/dev/null || true")
+                self.hosts[node].cmd(f"ip route add {dst_route} via {via} dev {iface.iface} 2>/dev/null || true")
 
     def stop(self) -> None:
         # Stop the live Mininet emulation.
@@ -382,10 +412,14 @@ class Network:
 def load_topology(path: str | Path) -> Topology:
     # Two kinds of rows:
     #   node,<name>,<loopback>            — per-node loopback address (advertised node identity)
+    #   prefix,<name>,<cidr>              — the address block a node originates (optional)
+    #   address,<name>,<ip>               — a further address the node answers on (optional)
     #   <h1>,<h2>,<delay_ms>,<ip1>,<ip2>[,<relationship>]  — a point-to-point link
     # `node` rows are optional; nodes without one get an auto-assigned loopback in Network.
     links: list[Link] = []
     loopbacks: dict[str, str] = {}
+    prefixes: dict[str, str] = {}
+    addresses: dict[str, list[str]] = {}
     with open(path, newline="") as f:
         for row in csv.reader(f):
             if not row or row[0].lstrip().startswith("#"):
@@ -397,7 +431,13 @@ def load_topology(path: str | Path) -> Topology:
                     loopback += "/32"
                 loopbacks[name] = loopback
                 continue
+            if cols[0] == "prefix":
+                prefixes[cols[1]] = cols[2]
+                continue
+            if cols[0] == "address":
+                addresses.setdefault(cols[1], []).append(cols[2] if "/" in cols[2] else cols[2] + "/32")
+                continue
             host1, host2, delay_ms, host1_ip, host2_ip = cols[:5]
             relationship = cols[5] if len(cols) > 5 else "peer/peer"
             links.append(Link(host1, host2, int(delay_ms), host1_ip, host2_ip, relationship))
-    return Topology(links=links, loopbacks=loopbacks)
+    return Topology(links=links, loopbacks=loopbacks, prefixes=prefixes, addresses=addresses)
