@@ -71,17 +71,17 @@ def run_experiment(
     existing = find_final_report(exp, model)
     if existing and not force:
         print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
-        print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']} — skipping (final report exists){RESET}")
+        print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']} ({model}) — skipping (final report exists){RESET}")
         print(f"{BOLD}{CYAN}{'='*60}{RESET}")
         print(f"  {existing}")
         return
     cmd = build_command(exp, exp_args_overrides)
     print(f"\n{BOLD}{CYAN}{'='*60}{RESET}")
-    print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']}{RESET}")
+    print(f"{BOLD}{CYAN}  [{index}/{total}] {exp['name']} ({model}){RESET}")
     print(f"{BOLD}{CYAN}{'='*60}{RESET}\n")
     result = subprocess.run(cmd, cwd=SCRIPT_DIR)
     if result.returncode != 0:
-        exit(f"Experiment '{exp['name']}' failed (exit {result.returncode})")
+        exit(f"Experiment '{exp['name']}' with {model} failed (exit {result.returncode})")
 
 
 def load_toml(path: str) -> tuple[Path, list[dict]]:
@@ -102,7 +102,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run experiments from a TOML file")
     parser.add_argument("--experiments-file", default="experiments.toml", metavar="FILE", help="Path to the TOML experiments file (default: experiments.toml)")
     models = sorted(AVAILABLE_MODELS)
-    parser.add_argument("--model", "-m", required=True, choices=models, metavar="MODEL", help=f"Model to use for all experiments. Choices: {{{', '.join(models)}}}")
+    parser.add_argument("--model", "-m", required=True, nargs="+", choices=models, metavar="MODEL", help=f"Models to run every selected experiment with, one after another. Choices: {{{', '.join(models)}}}")
     parser.add_argument("--filter", "-f", nargs="+", metavar="NAME", help="Run only experiments with these exact names")
     parser.add_argument("--list", "-l", action="store_true", help="List available experiment names and exit")
     parser.add_argument("--debug", action="store_true", help="Pass --log-level DEBUG to each experiment")
@@ -129,7 +129,7 @@ def main():
         if not selected:
             exit(f"No experiments found with names: {args.filter}")
 
-    overrides = {"model": args.model}
+    overrides = {}
     if args.debug:
         overrides["log_level"] = "DEBUG"
     if args.vllm_host is not None:
@@ -137,25 +137,28 @@ def main():
     if args.vllm_port is not None:
         overrides["vllm_port"] = args.vllm_port
 
+    # Every selected experiment with every model, each experiment's models back to back.
+    runs = [(exp, {**overrides, "model": model}) for exp in selected for model in args.model]
+
     if args.print_commands:
-        for exp in selected:
-            cmd = build_command(exp, exp_args_overrides=overrides)
-            print(f"# {exp['name']}")
+        for exp, run_overrides in runs:
+            cmd = build_command(exp, exp_args_overrides=run_overrides)
+            print(f"# {exp['name']} ({run_overrides['model']})")
             print(" ".join(cmd))
         return
 
-    print(f"Running {len(selected)} experiment(s) in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
+    print(f"Running {len(runs)} run(s) in Docker via {DOCKER_RUNNER.relative_to(SCRIPT_DIR)}")
 
-    for i, exp in enumerate(selected, 1):
+    for i, (exp, run_overrides) in enumerate(runs, 1):
         run_experiment(
             exp,
             index=i,
-            total=len(selected),
-            exp_args_overrides=overrides,
+            total=len(runs),
+            exp_args_overrides=run_overrides,
             force=args.force,
         )
 
-    print(f"\n{BOLD}{CYAN}All {len(selected)} experiment(s) completed successfully.{RESET}")
+    print(f"\n{BOLD}{CYAN}All {len(runs)} run(s) completed successfully.{RESET}")
 
 
 if __name__ == "__main__":
