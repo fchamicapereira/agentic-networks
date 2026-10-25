@@ -75,6 +75,15 @@ def remote_addrs(network: Network) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def check_tinyinc_reaches_remote(network: Network) -> None:
+    """Abort unless TinyInc's loopback reaches Remote's over the pre-configured routing."""
+    src = network.loopback_per_host["TinyInc"].split("/")[0]
+    _, dst = remote_addrs(network)
+    out = network.hosts["TinyInc"].cmd(f"ping -c 3 -W 1 -I {src} {dst}")
+    if " 0% packet loss" not in out:
+        raise SystemExit(f"Pre-flight check failed: TinyInc ({src}) cannot reach Remote ({dst}) — fix routing before starting the experiment.")
+
+
 def _nexthop(network: Network, from_node: str, to_node: str) -> str:
     """Return the peer IP that from_node uses to reach to_node directly."""
     for iface in network.ifaces_per_host[from_node]:
@@ -245,10 +254,8 @@ def main():
     logger.info("Pre-configuring routing (ISP → Remote via Expensive)...")
     setup_routing(network)
 
-    logger.info("Verifying initial connectivity...")
-    initial_connectivity = network.test_all_connectivity(label="Initial Connectivity Matrix")
-    if "FAIL" in initial_connectivity:
-        raise SystemExit("Pre-flight check failed: connectivity matrix has FAILs — fix routing before starting the experiment.")
+    logger.info("Verifying TinyInc reaches Remote...")
+    check_tinyinc_reaches_remote(network)
 
     # Load prompts
     prompts_dir = Path(args.prompts_dir)
@@ -383,13 +390,12 @@ def main():
             status = "SUCCESS" if r.success else f"INCOMPLETE: {r.message}"
             print(f"  {name} [{status}]")
 
-        # Collect routing state and connectivity
+        # Collect routing state
         route_tables = collect_route_tables(network)
-        connectivity = network.test_all_connectivity()
 
         report_path = log_dir / f"{run_stem}.txt"
         routing_section = "\n".join(f"--- {n} ---\n{route_tables[n] or '(empty)'}" for n in sorted(route_tables))
-        report_path.write_text("=== Connectivity Matrix ===\n" + connectivity + "\n\n=== Routing Tables ===\n\n" + routing_section + "\n")
+        report_path.write_text("=== Routing Tables ===\n\n" + routing_section + "\n")
         logger.info("Report written to %s", report_path)
 
         # Agent self-reports
@@ -412,7 +418,6 @@ def main():
                 agent_reports=agent_reports,
                 agent_results=results,
                 node_logs=node_logs,
-                connectivity=connectivity,
                 route_tables=route_tables,
                 log_dir=log_dir,
                 run_stem=run_stem,

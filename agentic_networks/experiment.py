@@ -138,7 +138,6 @@ def write_final_report(
     agent_reports: dict[str, str],
     agent_results: dict[str, AgentResult],
     node_logs: dict[str, str],
-    connectivity: str,
     route_tables: dict[str, str],
     log_dir: Path,
     run_stem: str,
@@ -155,8 +154,6 @@ def write_final_report(
         + results_section
         + "\n\n=== Agent Logs ===\n\n"
         + logs_section
-        + "\n\n=== Connectivity Matrix ===\n\n"
-        + connectivity
         + "\n\n=== Routing Tables ===\n\n"
         + routing_section
     )
@@ -191,8 +188,6 @@ def write_final_report(
             + results_section
             + "\n\n=== Agent Logs ===\n\n"
             + compressed_logs_section
-            + "\n\n=== Connectivity Matrix ===\n\n"
-            + connectivity
             + "\n\n=== Routing Tables ===\n\n"
             + routing_section
         )

@@ -729,7 +729,6 @@ def main():
         write_timeline_html(log_dir, run_stem, network.hosts, logger)
 
         route_tables = collect_route_tables(network)
-        connectivity = network.test_all_connectivity()
 
         final_report_path = PROMPTS_DIR / "final-report.txt"
         if final_report_path.exists():
@@ -747,7 +746,6 @@ def main():
                 agent_reports=agent_reports,
                 agent_results=results,
                 node_logs=node_logs,
-                connectivity=connectivity,
                 route_tables=route_tables,
                 log_dir=log_dir,
                 run_stem=run_stem,

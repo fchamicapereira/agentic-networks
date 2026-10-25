@@ -4,7 +4,7 @@ regen_final_report.py — Re-run only the final-report generation for finished e
 
 An experiment persists everything the final report is built from: the per-node logs
 ('{run_stem}-{node}.log'), the agent self-reports ('{run_stem}-{node}-report.md') and the
-connectivity matrix plus routing tables ('{run_stem}.txt'). This tool reconstructs that
+routing tables ('{run_stem}.txt'). This tool reconstructs that
 context from disk and re-queries the model with the current 'final-report.txt' prompt,
 overwriting '{run_stem}-final-report.md'. Nothing is re-simulated — no Mininet, no sudo.
 
@@ -64,11 +64,10 @@ def infer_model_key(run_stem: str) -> str | None:
     return max(matches, key=len) if matches else None
 
 
-def parse_sections(summary: Path) -> tuple[str, dict[str, str]]:
-    """Split '{run_stem}.txt' back into the connectivity matrix and per-node routing tables."""
-    text = summary.read_text()
-    conn_part, _, routing_part = text.partition("=== Routing Tables ===")
-    connectivity = conn_part.replace("=== Connectivity Matrix ===", "", 1).strip()
+def parse_route_tables(summary: Path) -> dict[str, str]:
+    """Split '{run_stem}.txt' back into per-node routing tables (anything before them, such as
+    the connectivity matrix older runs recorded, is ignored)."""
+    _, _, routing_part = summary.read_text().partition("=== Routing Tables ===")
 
     route_tables: dict[str, str] = {}
     name = None
@@ -84,7 +83,7 @@ def parse_sections(summary: Path) -> tuple[str, dict[str, str]]:
     if name:
         route_tables[name] = "\n".join(lines).strip()
 
-    return connectivity, route_tables
+    return route_tables
 
 
 def parse_agent_results(log_dir: Path, run_stem: str, nodes: list[str]) -> dict[str, AgentResult]:
@@ -134,7 +133,7 @@ def regen(log_dir: Path, run_stem: str, args, logger) -> None:
         return
 
     summary = log_dir / f"{run_stem}.txt"
-    connectivity, route_tables = parse_sections(summary)
+    route_tables = parse_route_tables(summary)
     node_logs = collect_node_logs(log_dir, run_stem, nodes)
     agent_results = parse_agent_results(log_dir, run_stem, nodes)
     report_model = args.report_model or model_key
@@ -152,7 +151,6 @@ def regen(log_dir: Path, run_stem: str, args, logger) -> None:
         agent_reports=agent_reports,
         agent_results=agent_results,
         node_logs=node_logs,
-        connectivity=connectivity,
         route_tables=route_tables,
         log_dir=log_dir,
         run_stem=run_stem,

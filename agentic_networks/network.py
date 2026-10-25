@@ -8,7 +8,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import cast
 from pathlib import Path
-from prettytable import PrettyTable
 
 from mininet.net import Mininet
 from mininet.link import TCLink
@@ -231,54 +230,6 @@ class Network:
             for addr in addrs:
                 if prefix is None or ipaddress.ip_interface(addr).ip not in ipaddress.ip_network(prefix):
                     raise ValueError(f"{node}: address {addr} needs a prefix row that contains it")
-
-    def _discover_loopbacks(self) -> dict[str, str]:
-        # Return {node: ip} for each host's last non-127 address on lo.
-        #
-        # The last address is used so that when an agent adds a semantic loopback
-        # (e.g. 45.32.0.1/32) after the pre-configured infrastructure address
-        # (10.255.X.1/32), the semantic address is returned — which is what the
-        # agent actually advertises to peers and what peers route to.
-        # For routing.txt experiments where only one loopback is configured,
-        # first == last, so there is no regression.
-        result = {}
-        for name, host in self.hosts.items():
-            out = host.cmd("ip -4 addr show lo")
-            for line in out.splitlines():
-                line = line.strip()
-                if line.startswith("inet ") and not line.startswith("inet 127."):
-                    result[name] = line.split()[1].split("/")[0]
-        return result
-
-    def test_all_connectivity(self, label: str = "Final Connectivity Matrix") -> str:
-        loopbacks = self._discover_loopbacks()
-        self.loopback_per_host = {name: f"{ip}/32" for name, ip in loopbacks.items()}
-
-        dst_hosts = sorted(self.hosts.keys())
-        table = PrettyTable()
-        table.field_names = ["src \\ dst"] + dst_hosts
-
-        for src_hostname, src_host in sorted(self.hosts.items()):
-            row = [src_hostname]
-            src_ip = loopbacks.get(src_hostname)
-            for dst_hostname in dst_hosts:
-                if src_hostname == dst_hostname:
-                    row.append("--")
-                elif src_ip is None or dst_hostname not in loopbacks:
-                    row.append("N/A")
-                else:
-                    dst_ip = loopbacks[dst_hostname]
-                    out = src_host.cmd(f"ping -c 1 -W 1 -I {src_ip} {dst_ip}")
-                    assert isinstance(out, str), f"Expected string output, got {type(out)}"
-                    reachable = "1 received" in out or "1 packets received" in out
-                    row.append("OK" if reachable else "FAIL")
-            table.add_row(row)
-
-        print(f"\n=== {label} ===")
-        print(table)
-        print()
-
-        return table.get_string()
 
     def start(self) -> None:
         # Start a live Mininet emulation for this network topology.

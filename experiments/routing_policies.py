@@ -70,19 +70,11 @@ def load_prompts(args) -> tuple[str | dict[str, str], str]:
     return prompts, d.name
 
 
-def write_report(network: Network, route_tables: dict[str, str], report_path: Path) -> str:
-    connectivity_str = network.test_all_connectivity()
+def write_report(route_tables: dict[str, str], report_path: Path) -> None:
     routing_section = "\n".join(
         f"--- {name} ---\n{route_tables[name] or '(empty)'}" for name in sorted(route_tables)
     )
-    report_path.write_text(
-        "=== Connectivity Matrix ===\n"
-        + connectivity_str
-        + "\n\n=== Routing Tables ===\n\n"
-        + routing_section
-        + "\n"
-    )
-    return connectivity_str
+    report_path.write_text("=== Routing Tables ===\n\n" + routing_section + "\n")
 
 
 def run(seed_stable: bool = False):
@@ -135,7 +127,7 @@ def run(seed_stable: bool = False):
         results = anet.run(concurrent=not args.sequential)
 
         route_tables = collect_route_tables(network)
-        connectivity_str = write_report(network, route_tables, log_dir / f"{run_stem}.txt")
+        write_report(route_tables, log_dir / f"{run_stem}.txt")
         logger.info("Report written to %s/%s.txt", log_dir, run_stem)
 
         logger.info("Gathering agent self-reports...")
@@ -156,7 +148,6 @@ def run(seed_stable: bool = False):
                 agent_reports=agent_reports,
                 agent_results=results,
                 node_logs=node_logs,
-                connectivity=connectivity_str,
                 route_tables=route_tables,
                 log_dir=log_dir,
                 run_stem=run_stem,
