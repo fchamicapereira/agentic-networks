@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""ACM Digital Library front end: serves the portal over HTTP and HTTPS."""
+
 import argparse
 import http.server
 import socketserver
@@ -9,25 +11,16 @@ import time
 BIND_IP = "198.82.0.1"
 PORT_HTTP = 80
 PORT_HTTPS = 443
-# A deliberately small worker pool, and a /slow request that occupies a worker for a long
-# time: together they let the overload fault saturate the server with a handful of
-# connections, which is what makes every other client see 503. Both values are load-bearing
-# for that experiment and must stay in step with CONCURRENCY in kp_web_client.py and
-# WEBSERVER_MAX_WORKERS in experiments/kp_why_fix.py — raising the pool above the client's
-# concurrency silently turns the fault into a no-op, and the server just answers 200.
+# Requests served at once. Each request holds a worker until it completes; when all workers
+# are busy, new requests get 503.
 MAX_WORKERS = 3
-SLOW_HOLD_SECONDS = 90
+# Bulk citation exports are generated synchronously and take this long to build.
+EXPORT_SECONDS = 90
 
-# The TLS material is generated per run (agentic_networks/testbed_certs.py) and passed in,
-# rather than read from a fixed path here: a CA checked into the repository would have a
-# published private key, and this CA is installed into the container's trust store.
-_args = argparse.ArgumentParser(description="Emulated ACM web server for the knowledge-plane testbed")
+_args = argparse.ArgumentParser(description=__doc__)
 _args.add_argument("--cert", required=True, metavar="FILE", help="Server certificate (PEM)")
 _args.add_argument("--key", required=True, metavar="FILE", help="Server private key (PEM)")
 _opts = _args.parse_args()
-
-CERT_FILE = _opts.cert
-KEY_FILE = _opts.key
 
 _sem = threading.Semaphore(MAX_WORKERS)
 
@@ -85,43 +78,55 @@ _OK_BODY = b"""\
 </html>
 """
 
-_OVERLOADED_BODY = b"503 Service Unavailable\n"
+_EXPORT_BODY = b"""\
+@inproceedings{clark2003knowledge,
+  title     = {A Knowledge Plane for the Internet},
+  author    = {Clark, David D. and Partridge, Craig and Ramming, J. Christopher and Wroclawski, John T.},
+  booktitle = {Proceedings of ACM SIGCOMM 2003},
+  year      = {2003},
+  publisher = {ACM}
+}
+"""
+
+_BUSY_BODY = b"503 Service Unavailable\n"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    server_version = "acm-dl/2.3"
 
     def version_string(self):
-        return "nginx/1.18.0"
+        return self.server_version
 
     def do_GET(self):
-        self.close_connection = True
-        if self.path.startswith("/slow"):
-            _sem.acquire()
-            try:
-                time.sleep(SLOW_HOLD_SECONDS)
-                self._ok()
-            finally:
-                _sem.release()
-        else:
-            if not _sem.acquire(blocking=False):
-                self.send_response(503)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(_OVERLOADED_BODY)))
-                self.end_headers()
-                self.wfile.write(_OVERLOADED_BODY)
-                return
-            try:
-                self._ok()
-            finally:
-                _sem.release()
+        self._serve(body=True)
 
-    def _ok(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(_OK_BODY)))
+    def do_HEAD(self):
+        self._serve(body=False)
+
+    def _serve(self, body: bool):
+        self.close_connection = True
+        if self.path.startswith("/dl/export"):
+            # Exports queue for a worker rather than being turned away.
+            with _sem:
+                time.sleep(EXPORT_SECONDS)
+                self._reply(200, "application/x-bibtex", _EXPORT_BODY, body)
+            return
+        if not _sem.acquire(blocking=False):
+            self._reply(503, "text/plain", _BUSY_BODY, body)
+            return
+        try:
+            self._reply(200, "text/html; charset=utf-8", _OK_BODY, body)
+        finally:
+            _sem.release()
+
+    def _reply(self, code: int, content_type: str, payload: bytes, body: bool):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(_OK_BODY)
+        if body:
+            self.wfile.write(payload)
 
     def log_message(self, *_):
         pass
@@ -130,9 +135,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 socketserver.ThreadingTCPServer.allow_reuse_address = True
 
 _ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-_ssl_ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+_ssl_ctx.load_cert_chain(certfile=_opts.cert, keyfile=_opts.key)
 
-_http  = socketserver.ThreadingTCPServer((BIND_IP, PORT_HTTP),  Handler)
+_http = socketserver.ThreadingTCPServer((BIND_IP, PORT_HTTP), Handler)
 _https = socketserver.ThreadingTCPServer((BIND_IP, PORT_HTTPS), Handler)
 _https.socket = _ssl_ctx.wrap_socket(_https.socket, server_side=True, do_handshake_on_connect=False)
 

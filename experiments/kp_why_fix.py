@@ -34,6 +34,16 @@ ACM_LAN_IFACE = "lan0"
 INTERNET_DNS = "8.8.8.8"
 INTERNET_DNS_PID_FILE = "/tmp/kp-internet-dns.pid"  # the orchestrator's /tmp, not a host's
 WEBSERVER_MAX_WORKERS = 3  # must match MAX_WORKERS in assets/kp_webserver.py
+# Web's server (assets/kp_webserver.py) and, in the overload fault, EveLink's mirror job
+# (assets/kp_web_client.py) are installed on their hosts and run from there, as an operator's
+# software would be: the repository itself is hidden from every host (see network.py). Each
+# host's agent can read its own program, so neither file mentions the testbed. The overload
+# couples them: the server's small worker pool (MAX_WORKERS) and slow bulk exports
+# (EXPORT_SECONDS), and the mirror's parallel downloads of exports (PARALLEL, above
+# MAX_WORKERS), together keep every worker busy, so everyone else gets 503. Raising the pool
+# to PARALLEL or above silently turns the fault into a no-op.
+WEB_APP = "/srv/acm-dl/app.py"
+MIRROR_APP = "/opt/dl-mirror/mirror.py"
 
 # AS1 and AS2 each run a recursive resolver that forwards every name upstream to INTERNET_DNS,
 # which answers acm.org with its real address. Each resolver's configuration is private to its
@@ -364,10 +374,8 @@ def start_services(network: Network, fault: str, logger) -> None:
     # Run the web server inside Web's isolation namespace so Web's own agent can
     # see and inspect it (ps/ss -p), while other hosts cannot. Killed when Web's
     # anchor is torn down in network.stop().
-    webserver.ns_cmd(
-        f"python3 {paths.ASSETS_DIR}/kp_webserver.py"
-        f" --cert {web_cert} --key {web_key} >/dev/null 2>&1 &"
-    )
+    webserver.ns_write(WEB_APP, (paths.ASSETS_DIR / "kp_webserver.py").read_text(), mode=0o755)
+    webserver.ns_cmd(f"python3 {WEB_APP} --cert {web_cert} --key {web_key} >/dev/null 2>&1 &")
     time.sleep(1)
 
 
@@ -529,18 +537,15 @@ def inject_fault(network: Network, fault: str, logger) -> None:
 
     elif fault == "overload":
         el = network.hosts["EveLink"]
-        # Single background client (assets/kp_web_client.py) that holds enough
-        # concurrent slow requests open to keep the worker pool saturated. Unlike
-        # a shell `curl` loop, it spawns no child processes and names no target
-        # in its argv, so the victim (Web) can't read EveLink's attack tooling out
-        # of the shared PID namespace — it only observes the connections in `ss`.
-        # Run the load client inside EveLink's isolation namespace: EveLink's own
-        # agent can see it, but the victim (Web) cannot read it out of a shared
-        # process table — it only observes the connections in `ss`. Killed when
+        # EveLink's mirror job (see MIRROR_APP): one process holding several export downloads
+        # open at once, with no child processes and no target in its argv. Run inside
+        # EveLink's isolation namespace: EveLink's own agent can see and read it, while Web
+        # only observes the connections arriving from EveLink's address in `ss`. Killed when
         # EveLink's anchor is torn down in network.stop().
-        el.ns_cmd(f"python3 {paths.ASSETS_DIR}/kp_web_client.py >/dev/null 2>&1 &")
+        el.ns_write(MIRROR_APP, (paths.ASSETS_DIR / "kp_web_client.py").read_text(), mode=0o755)
+        el.ns_cmd(f"python3 {MIRROR_APP} >/dev/null 2>&1 &")
         time.sleep(1)
-        logger.info("Overload: EveLink started background web client holding %d concurrent slow requests; worker slots saturated.", WEBSERVER_MAX_WORKERS + 2)
+        logger.info("Overload: EveLink started its mirror job, %d parallel export downloads; worker slots saturated.", WEBSERVER_MAX_WORKERS + 2)
 
     else:
         raise ValueError(f"Unknown fault: {fault}")
@@ -620,6 +625,24 @@ def dns_stale_probe(network: Network, logger) -> None:
     print("\n===== end dns_stale probe =====")
 
 
+def overload_probe(network: Network, logger) -> None:
+    """Dry-run diagnostic for the overload fault: what Web and EveLink see of their own
+    software, and that the orchestrator's files are hidden from them."""
+    hidden = " ".join(f"{d}/" for d in (str(paths.PROJECT_ROOT), "/app"))
+    views = {
+        "Web": [f"ls -A {hidden} 2>&1", "pwd", "ps -ef", f"head -5 {WEB_APP}",
+                f"curl -sS -I --max-time 5 http://{WEBSERVER_IP}/ 2>&1",
+                "ss -tn state established '( sport = :80 )'", "env",
+                "cat /proc/$(pgrep -of app.py)/environ | tr '\\0' '\\n'"],
+        "EveLink": ["ps -ef", f"head -4 {MIRROR_APP}", "env", "cat /proc/$(pgrep -of mirror.py)/environ | tr '\\0' '\\n'"],
+    }
+    for name, cmds in views.items():
+        for cmd in cmds:
+            print(f"\n===== [{name}] {cmd} =====")
+            print(network.hosts[name].ns_cmd(cmd).rstrip())
+    print("\n===== end overload probe =====")
+
+
 def main():
     if not Path("/.dockerenv").exists():
         print(
@@ -657,6 +680,8 @@ def main():
         if args.dry_run:
             if args.fault == "dns_stale":
                 dns_stale_probe(network, logger)
+            elif args.fault == "overload":
+                overload_probe(network, logger)
             stop_services(network, logger)
             network.stop()
             return
