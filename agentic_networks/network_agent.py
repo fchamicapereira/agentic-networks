@@ -36,6 +36,14 @@ Using tools:
 {initial_prompt}
 """
 
+# Sent after a turn that called no tool. A turn without a tool call does nothing, but it is not
+# always a decision to wait: an agent may lay out a plan in prose first. So it gets one more turn
+# with this reminder, and only a second such turn in a row counts as idling (see run).
+NO_TOOL_REMINDER = (
+    "Your last reply called no tool, so nothing was done. To act, call a tool; "
+    "if there is nothing to do right now, call idle."
+)
+
 _REASON_FIELD = {"type": "string", "description": "Concise explanation of why you are taking this action right now"}
 
 # Agents never decide that the experiment is over: they idle until something arrives, and the
@@ -123,6 +131,8 @@ class NetworkAgent:
         # True while the agent has idled and no message has arrived since. A waiting agent takes
         # no turns (and costs no model calls) until a message arrives.
         self.waiting = False
+        # Consecutive turns that called no tool (see NO_TOOL_REMINDER).
+        self._toolless_turns = 0
 
         self.mininet_host = MininetHost(node_name, host)
         self.bus = bus
@@ -233,6 +243,8 @@ class NetworkAgent:
 
             context = self.context_fn() if self.context_fn else ""
             user_message = f"{context}\n\nState the next action." if context else "State the next action."
+            if self._toolless_turns:
+                user_message = f"{NO_TOOL_REMINDER}\n\n{user_message}"
             response = self.agent.request_action(user_message)
 
             self.log.debug("Raw response from model:\n%s", response.raw)
@@ -251,9 +263,24 @@ class NetworkAgent:
                 break
 
             tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
+            idled = self._run_tool_blocks(tool_blocks)
+            # Two turns in a row without a tool call count as idling; otherwise an agent answering
+            # in prose ("No further action.") takes turns until its budget runs out. A reply cut
+            # off at the token limit is not a decision to idle.
+            if tool_blocks or response.stop_reason == "max_tokens":
+                self._toolless_turns = 0
+            else:
+                self._toolless_turns += 1
+                if self._toolless_turns < 2:
+                    self.log.warning("No tool called this turn; reminding the agent to act or idle.")
+                else:
+                    self.log.warning("No tool called again; treating it as idle.")
+                    idled = True
+            if idled:
+                self._toolless_turns = 0
             # An agent with an observation feed never waits: every iteration brings a fresh
             # observation, so for it idle only passes the turn.
-            if self._run_tool_blocks(tool_blocks) and not self.context_fn:
+            if idled and not self.context_fn:
                 self.waiting = True
                 self.log.info("=== AGENT WAITING === nothing to do until a message arrives.")
 
