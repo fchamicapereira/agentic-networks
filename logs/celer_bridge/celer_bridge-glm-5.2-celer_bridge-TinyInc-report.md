@@ -1,0 +1,5 @@
+Observed a BGP hijack: LegitAS announced 44.192.100.0/24 with spoofed AS-AWS origin, passing RPKI origin validation while diverting traffic through their network. Traceroute to the target matched LegitAS's own prefix path exactly (3 hops, ~50ms), only .100.x IPs responded, and AltDB route objects were fraudulent same-day submissions without verification.
+
+Decided to advertise my /24 prefix, verify reachability, report the hijack evidence to ISP, and avoid local blackholing after upstream mitigation was confirmed. Also verified post-mitigation path changes and AWS's defensive /24 announcement.
+
+Why: RPKI validates only origin AS, not AS_PATH, so the spoofed origin passed validation despite LegitAS injecting the route. Blackholing locally would have broken legitimate access once upstream mitigation was in place. The path comparison and selective IP testing provided definitive evidence of targeted interception rather than legitimate hosting, supporting the case for path validation mechanisms like ASPA.

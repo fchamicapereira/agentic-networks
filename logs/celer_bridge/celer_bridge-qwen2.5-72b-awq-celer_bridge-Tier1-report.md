@@ -1,0 +1,3 @@
+1. **Observed:** Received route advertisements from AWS and TransitAS, installed the route from TransitAS, verified the routing table, tested connectivity, performed a traceroute, and communicated with TransitAS about a routing loop issue.
+2. **Decided:** No action needed for AWS route, installed the TransitAS route, verified the routing table, tested connectivity, performed a traceroute, notified TransitAS of the issue, rechecked my configuration, and waited for a response from TransitAS.
+3. **Why:** Ensured minimal disruption, validated the route's legitimacy, maintained network consistency, verified reachability, diagnosed the issue, facilitated a coordinated resolution, ruled out local issues, and allowed TransitAS to resolve the problem.

@@ -1,0 +1,5 @@
+I discovered that AS-LEGITAS was conducting a forged-origin BGP hijack of my `44.192.100.0/24` prefix, spoofing AS-AWS as the origin AS. This passed RPKI validation because my ROA allows AS-AWS origin with max-length /24, and LegitAS backed their claim with fraudulent AltDB route and as-set objects submitted to an unverified database.
+
+I decided to announce a defensive /24 directly to Tier1, leveraging customer-over-peer routing preference to ensure traffic continued reaching my infrastructure. I coordinated through Tier1 and TransitAS to demand LegitAS withdraw the route, confirmed end-to-end reachability with all parties, and planned to request ARIN tighten my ROA max-length from /24 to /16.
+
+The defensive announcement was necessary because the hijack specifically targeted the Celer Bridge DeFi frontend at `44.192.100.100`, and simply withdrawing or filtering at my edge wouldn't restore global reachability through upstream networks. ROA tightening is the long-term fix to render future forged-origin sub-prefixes RPKI-invalid. LegitAS ultimately stood down, withdrew the route, and committed to removing the fraudulent AltDB objects.

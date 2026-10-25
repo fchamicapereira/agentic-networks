@@ -1,0 +1,5 @@
+I observed a more-specific /24 (44.192.100.0/24) announced by my customer LegitAS using AS-AWS as a forged origin AS. The route passed RPKI origin validation (ROA allows AS-AWS, max-length /24) but was backed only by unverified AltDB IRR objects submitted on the same date. After relaying queries to AWS via Tier1, AWS explicitly confirmed no authorization or business relationship with LegitAS — this was a hijack targeting the Celer Bridge DeFi frontend.
+
+I decided to withdraw the /24 from my routing table, refuse to reinstall it, and prefer the legitimate /16 path through Tier1. I maintained LegitAS's own RIPE-verified prefix (5.62.56.0/24) and all other legitimate routes. I also acted as relay for all coordination messages between ISP, LegitAS, AWS, and Tier1, culminating in LegitAS agreeing to withdraw and AWS confirming mitigation.
+
+The withdrawal was justified because security integrity overrides the normal Gao-Rexford customer-over-peer preference when a customer route is identified as a forged-origin hijack. The response was proportional — only the fraudulent prefix was removed while verified allocations stayed intact.

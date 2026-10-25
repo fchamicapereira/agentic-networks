@@ -1,0 +1,5 @@
+I observed a BGP forged-origin hijack by LegitAS targeting AWS's 44.192.100.0/24, exploiting the ROA max-length /24 and backed by fraudulent AltDB objects. My routing table showed both the /24 and /16 pointing to AWS via my customer link, confirming AWS's defensive announcement was active and preferred.
+
+I decided to maintain Gao-Rexford customer-over-peer preference, reject any peer-sourced /24, and act as an opaque relay for five coordination messages between AWS and parties reachable via TransitAS. I also confirmed AWS's three requested defensive measures and acknowledged TransitAS's withdrawal commitment.
+
+Customer preference naturally ensured AWS's /24 won without explicit manipulation. The peer-sourced route was rejected because RPKI validates origin ASN but doesn't authorize the announcing party to impersonate that ASN — this was a forged-origin hijack, not a legitimate announcement. Relay payloads were forwarded without inspecting content, and I withheld my filtering policies from peers to preserve operational privacy. The incident resolved with LegitAS standing down and AWS planning ROA max-length tightening to /16.

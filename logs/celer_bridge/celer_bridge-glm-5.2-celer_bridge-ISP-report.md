@@ -1,0 +1,5 @@
+I discovered that 44.192.100.100 was taking a different path (2 hops, ~40ms) than other addresses in 44.192.0.0/16 (3 hops, ~54ms), revealing a more-specific /24 route installed in my table. Traceroute confirmed the diverted path matched LegitAS's own prefix 5.62.56.1. LegitAS had spoofed AS-AWS as the origin to pass RPKI validation (the ROA allowed max-length /24) and backed it with fraudulent AltDB route objects.
+
+I deleted the fraudulent 44.192.100.0/24 route to restore legitimate routing via the /16, temporarily removed LegitAS's 5.62.56.0/24 as a precaution, then restored it after TransitAS confirmed it was RIPE-verified and unrelated to the hijack. I coordinated with TransitAS (who withdrew the route upstream), AWS (who confirmed the hijack and announced a defensive /24 via Tier1), and TinyInc (who verified mitigation from their side).
+
+I chose not to blackhole the /24 locally because upstream mitigation had already neutralized the threat and blackholing would break legitimate access to AWS's Celer Bridge. I sourced all diagnostics from my loopback (85.12.64.1) to avoid misleading results from point-to-point interface IPs.
