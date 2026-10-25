@@ -71,6 +71,8 @@ class NetworkHost(Host):
     # namespace per host (sharing the host's network namespace); ns_cmd/ns_popen
     # then run commands inside it. Per-host anchors are siblings, so a host sees
     # only its own processes, while the network-level view (`ss`) is unchanged.
+    # Each host also gets a private /tmp, so hosts cannot read each other's scratch
+    # files (pid files and the like, which would e.g. name every node in the network).
     #
     # mnexec's `-a` cannot re-enter a PID namespace, so isolated execution goes
     # through `nsenter` rather than host.popen. This is opt-in (Network.start
@@ -82,7 +84,8 @@ class NetworkHost(Host):
         # namespace down along with everything running in it. --fork makes the
         # sleep (not unshare) the process placed in the new PID namespace.
         outer = int(self.cmd(
-            "unshare --pid --mount --fork --mount-proc sleep infinity "
+            "unshare --pid --mount --fork --mount-proc "
+            "sh -c 'mount -t tmpfs -o mode=1777 tmpfs /tmp && exec sleep infinity' "
             ">/dev/null 2>&1 & echo $!"
         ).strip().split()[-1])
         inner = outer
@@ -95,6 +98,17 @@ class NetworkHost(Host):
                 inner = int(children[0])
                 break
             time.sleep(0.05)
+        # The init execs sleep only once the private /tmp is mounted; wait for it, so nothing
+        # runs in the namespace before /tmp is private.
+        for _ in range(100):
+            try:
+                if open(f"/proc/{inner}/comm").read().strip() == "sleep":
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"{self.name}: isolation namespace did not come up (private /tmp)")
         self._anchor_outer = outer
         self.anchor_pid = inner
 
@@ -119,6 +133,14 @@ class NetworkHost(Host):
         result = subprocess.run(self._nsenter_argv(command), stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
         return result.stdout
+
+    def ns_write(self, path: str, data: str | bytes, mode: int = 0o644) -> None:
+        # Write a file as seen from inside the host's isolation namespace, e.g. into its
+        # private /tmp or a private mount, where a write from outside would not land.
+        if isinstance(data, str):
+            data = data.encode()
+        subprocess.run(self._nsenter_argv(f'mkdir -p "$(dirname {path})" && cat > {path} && chmod {mode:o} {path}'),
+                       input=data, check=True)
 
     def ns_popen(self, command: str, **kwargs) -> subprocess.Popen:
         # Popen-compatible entry point for agent command execution inside the
