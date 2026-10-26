@@ -149,6 +149,7 @@ def parse_args():
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
     parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
+    parser.add_argument("--no-reports", action="store_true", default=False, help="Skip the agents' self-reports and the final report after the run (they cost model calls)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR / "knowledge_plane"), metavar="DIR")
     parser.add_argument("--max-iterations", "-i", type=int, default=60, metavar="N")
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
@@ -736,8 +737,10 @@ def main():
         results = anet.run(concurrent=not args.sequential)
         print_agent_results(results, network.hosts)
 
-        logger.info("Gathering agent self-reports...")
-        agent_reports = anet.gather_reports()
+        agent_reports = {}
+        if not args.no_reports:
+            logger.info("Gathering agent self-reports...")
+            agent_reports = anet.gather_reports()
         for name, text in agent_reports.items():
             path = log_dir / f"{run_stem}-{name}-report.md"
             path.write_text(text)
@@ -748,7 +751,9 @@ def main():
         route_tables = collect_route_tables(network)
 
         final_report_path = PROMPTS_DIR / "final-report.txt"
-        if final_report_path.exists():
+        if args.no_reports:
+            logger.info("Skipping the reports (--no-reports).")
+        elif final_report_path.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             final_prompt = final_report_path.read_text().format(
                 fault=args.fault,

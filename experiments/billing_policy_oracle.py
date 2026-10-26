@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--log-level", "-l", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--model", "-m", default="sonnet", choices=list(MODELS.keys()))
     parser.add_argument("--report-model", default=None, choices=list(MODELS.keys()), metavar="MODEL", help="Model for final-report generation (default: same as --model)")
+    parser.add_argument("--no-reports", action="store_true", default=False, help="Skip the agents' self-reports and the final report after the run (they cost model calls)")
     parser.add_argument("--log-dir", "-d", default=str(DEFAULT_LOG_DIR), metavar="DIR")
     parser.add_argument("--max-tokens", "-t", type=int, default=16384, metavar="N")
     parser.add_argument("--window-size", "-w", type=int, default=40, metavar="N")
@@ -245,14 +246,18 @@ def main():
         report_path.write_text("=== Routing Tables ===\n\n" + routing_section + "\n")
         logger.info("Report written to %s", report_path)
 
-        logger.info("Gathering agent self-reports...")
-        agent_reports = anet.gather_reports()
+        agent_reports = {}
+        if not args.no_reports:
+            logger.info("Gathering agent self-reports...")
+            agent_reports = anet.gather_reports()
         write_agent_reports(agent_reports, log_dir, run_stem, logger)
         generate_routes_pdf(network, route_tables, log_dir, run_stem, logger, show_delays=False)
         write_timeline_html(log_dir, run_stem, network.hosts, logger)
 
         final_report_file = prompts_dir / "final-report.txt"
-        if final_report_file.exists():
+        if args.no_reports:
+            logger.info("Skipping the reports (--no-reports).")
+        elif final_report_file.exists():
             node_logs = collect_node_logs(log_dir, run_stem, network.hosts)
             write_final_report(
                 model_key=args.report_model or args.model,
