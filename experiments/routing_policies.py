@@ -5,7 +5,8 @@ import argparse
 from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
-from agentic_networks.agentic_network import AgenticNetwork, MODELS
+from agentic_networks.agentic_network import AgenticNetwork, MODELS, describe_run
+from agentic_networks.events import EventLog, NO_EVENTS, load_topology as load_event_topology
 from agentic_networks.experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
@@ -44,6 +45,8 @@ def parse_args():
     prompt_group = parser.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("--prompt", "-p", metavar="FILE",
                               help="Single prompt file given to every agent")
+    parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     prompt_group.add_argument("--prompts-dir", metavar="DIR",
                               help="Directory of per-node prompt files ({node}.txt)")
     return parser.parse_args()
@@ -89,6 +92,14 @@ def run(seed_stable: bool = False):
     args = parse_args()
     agent_models = parse_agent_models(args.agent_model)
 
+    # The scenario is named after its prompts (e.g. celer_bridge), in the demo's event stream too.
+    if args.describe:
+        prompts, prompt_stem = load_prompts(args)
+        describe_run(args.describe, prompt_stem, prompt_stem, Network(load_topology(args.topology)),
+                     args.topology, prompts)
+        chown_to_user(Path(args.describe))
+        return
+
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -113,6 +124,10 @@ def run(seed_stable: bool = False):
     for node, model in agent_models.items():
         logger.info("  except %s: %s (%s)", node, model, MODELS[model])
 
+    events = EventLog(args.events) if args.events else NO_EVENTS
+    events.run_start(prompt_stem, prompt_stem, args.model,
+                     {node: agent_models.get(node, args.model) for node in network.hosts},
+                     load_event_topology(args.topology))
     try:
         anet = AgenticNetwork(
             network=network,
@@ -124,6 +139,7 @@ def run(seed_stable: bool = False):
             vllm_port=args.vllm_port,
             window_size=args.window_size,
             agent_models=agent_models,
+            events=events,
         )
         results = anet.run(concurrent=not args.sequential)
 
@@ -162,8 +178,14 @@ def run(seed_stable: bool = False):
             print("No final-report.txt found in prompts directory, skipping final report generation.")
 
         network.stop()
+    except Exception:
+        events.run_end("error")
+        raise
     finally:
+        events.close()
         chown_to_user(log_dir)
+        if args.events:
+            chown_to_user(Path(args.events))
 
 
 if __name__ == "__main__":

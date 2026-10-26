@@ -3,6 +3,8 @@ import logging
 import subprocess
 import time
 
+from typing import Callable
+
 from .billing_clock import BillingClock
 from .network import Network
 
@@ -32,19 +34,21 @@ class TrafficSampler:
         monitored_prefixes: list[str],
         provider_ifaces: dict[str, str],
         billing_clock: BillingClock,
-
+        on_sample: "Callable[[dict], None] | None" = None,
     ):
         """
         provider_ifaces: maps provider name to the output interface name on billing_node,
                          e.g. {"Expensive": "ISP-eth1", "Cheap": "ISP-eth2"}.
         monitored_prefixes: kept for output-format compatibility; all interface TX
                             bytes are attributed to the first (and typically only) prefix.
+        on_sample: called with each sample as it is taken (e.g. to stream it to the demo).
         """
         self.network = network
         self.billing_node = billing_node
         self.monitored_prefixes = monitored_prefixes
         self.provider_ifaces = provider_ifaces
         self.clock = billing_clock
+        self.on_sample = on_sample
 
         self._samples: list[dict] = []
 
@@ -112,10 +116,13 @@ class TrafficSampler:
             delta = max(0, after.get(iface, 0) - before.get(iface, 0))
             mbps_row[f"via_{provider}"] = round((delta * 8) / (dt * 1_000_000), 3)
 
-        self._samples.append({
+        sample = {
             "elapsed_days": round(elapsed, 3),
             "mbps": {prefix: mbps_row},
-        })
+        }
+        self._samples.append(sample)
+        if self.on_sample:
+            self.on_sample(sample)
         logger.debug("TrafficSampler sample at day %.3f: %s", elapsed, mbps_row)
 
     # ------------------------------------------------------------------

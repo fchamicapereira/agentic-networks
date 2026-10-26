@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
-from agentic_networks.agentic_network import AgenticNetwork, MODELS
+from agentic_networks.agentic_network import AgenticNetwork, MODELS, describe_run
 from agentic_networks import paths, testbed_certs
 from agentic_networks.events import EventLog, NO_EVENTS, load_topology as load_event_topology
 from agentic_networks.experiment import (
@@ -89,6 +89,16 @@ SCENARIOS = {
     "overload": ("kp_server_overload", "Knowledge Plane: overloaded server"),
 }
 
+# The laptop agent answers its owner, who complained to it as "human".
+EXTERNAL_CONTACTS = {"User": ["human"]}
+
+
+def starts_waiting(nodes) -> list[str]:
+    """The Knowledge Plane is query-driven: only User has something to act on (the owner's
+    complaint); every other agent sleeps until a message reaches it."""
+    return [name for name in nodes if name != "User"]
+
+
 FAULT_DESCRIPTIONS = {
     "bgp_hijack": (
         "EveLink (a customer of AS1) has announced 198.82.0.1/32 on its loopback, "
@@ -158,6 +168,7 @@ def parse_args():
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
     parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     return parser.parse_args()
 
 
@@ -668,6 +679,14 @@ def main():
 
     args = parse_args()
 
+    if args.describe:
+        scenario, title = SCENARIOS[args.fault]
+        planned = Network(load_topology(str(TOPOLOGY)))  # constructed, never started
+        describe_run(args.describe, scenario, title, planned, str(TOPOLOGY), load_prompts(args.fault),
+                     starts_waiting(planned.ifaces_per_host), EXTERNAL_CONTACTS)
+        chown_to_user(Path(args.describe))
+        return
+
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -709,7 +728,8 @@ def main():
         events = EventLog(args.events)
         scenario, title = SCENARIOS[args.fault]
         events.run_start(scenario, title, args.model, {name: args.model for name in network.hosts},
-                         load_event_topology(TOPOLOGY))
+                         load_event_topology(TOPOLOGY),
+                         outsiders={c: agent for agent, cs in EXTERNAL_CONTACTS.items() for c in cs})
 
         anet = AgenticNetwork(
             network=network,
@@ -720,11 +740,8 @@ def main():
             vllm_host=args.vllm_host,
             vllm_port=args.vllm_port,
             window_size=args.window_size,
-            # The Knowledge Plane is query-driven: only User has something to act on (the
-            # owner's complaint); every other agent sleeps until a message reaches it.
-            start_waiting=[name for name in network.hosts if name != "User"],
-            # The laptop agent answers its owner, who complained to it as "human".
-            external_contacts={"User": ["human"]},
+            start_waiting=starts_waiting(network.hosts),
+            external_contacts=EXTERNAL_CONTACTS,
             events=events,
         )
 

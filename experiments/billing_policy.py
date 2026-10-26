@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_networks.network import load_topology, Network
-from agentic_networks.agentic_network import AgenticNetwork, MODELS
+from agentic_networks.agentic_network import AgenticNetwork, MODELS, describe_run
+from agentic_networks.events import EventLog, NO_EVENTS, load_topology as load_event_topology
 from agentic_networks.billing_clock import BillingClock
 from agentic_networks.traffic_generator import TrafficGenerator
 from agentic_networks.traffic_sampler import TrafficSampler
@@ -268,6 +269,8 @@ def parse_args():
     parser.add_argument("--window-size", "-w", type=int, default=40, metavar="N")
     parser.add_argument("--topology", required=True, metavar="FILE")
     parser.add_argument("--prompts-dir", required=True, metavar="DIR")
+    parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
@@ -308,12 +311,41 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 
+def load_prompts(prompts_dir: Path, step_hours: float, start_day: int) -> dict[str, str]:
+    """Each node's prompt, with the run's timing filled in."""
+    step_hours_val = int(step_hours) if step_hours == int(step_hours) else step_hours
+    billing_samples_val = round(30 * 24 / step_hours)
+    history_samples_val = round(start_day * 24 / step_hours)
+    template_vars = {
+        "step_hours": str(step_hours_val),
+        "billing_samples": str(billing_samples_val),
+        "start_day": str(start_day),
+        "history_samples": str(history_samples_val),
+    }
+    def _render(text: str) -> str:
+        for key, val in template_vars.items():
+            text = text.replace("{" + key + "}", val)
+        return text
+    prompts = {f.stem: _render(f.read_text()) for f in sorted(prompts_dir.glob("*.txt")) if f.stem != "final-report"}
+    if not prompts:
+        raise SystemExit(f"No prompt files found in {prompts_dir}")
+    return prompts
+
+
 def main():
     args = parse_args()
     if not 0 < args.days <= BILLING_DAYS:
         raise SystemExit(f"--days must be between 1 and {BILLING_DAYS}")
     # The run is the end of the billing cycle, start_day days in (the baseline rode on Cheap until then).
     start_day = BILLING_DAYS - args.days
+    prompts_dir = Path(args.prompts_dir)
+
+    # The scenario is named after its prompts (optimizing_billing_policy), in the demo's event stream too.
+    if args.describe:
+        describe_run(args.describe, prompts_dir.name, prompts_dir.name, Network(load_topology(args.topology)),
+                     args.topology, load_prompts(prompts_dir, args.step_hours, start_day))
+        chown_to_user(Path(args.describe))
+        return
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -331,24 +363,7 @@ def main():
     logger.info("Verifying TinyInc reaches Remote...")
     check_tinyinc_reaches_remote(network)
 
-    # Load prompts
-    prompts_dir = Path(args.prompts_dir)
-    step_hours_val = int(args.step_hours) if args.step_hours == int(args.step_hours) else args.step_hours
-    billing_samples_val = round(30 * 24 / args.step_hours)
-    history_samples_val = round(start_day * 24 / args.step_hours)
-    template_vars = {
-        "step_hours": str(step_hours_val),
-        "billing_samples": str(billing_samples_val),
-        "start_day": str(start_day),
-        "history_samples": str(history_samples_val),
-    }
-    def _render(text: str) -> str:
-        for key, val in template_vars.items():
-            text = text.replace("{" + key + "}", val)
-        return text
-    prompts = {f.stem: _render(f.read_text()) for f in sorted(prompts_dir.glob("*.txt")) if f.stem != "final-report"}
-    if not prompts:
-        raise SystemExit(f"No prompt files found in {prompts_dir}")
+    prompts = load_prompts(prompts_dir, args.step_hours, start_day)
 
     topology_stem = Path(args.topology).stem
     run_stem = f"{prompts_dir.name}-{args.model}-{topology_stem}"
@@ -367,6 +382,14 @@ def main():
 
     remote_prefix, remote_loopback = remote_addrs(network)
 
+    events = EventLog(args.events) if args.events else NO_EVENTS
+    events.run_start(prompts_dir.name, prompts_dir.name, args.model, {node: args.model for node in network.hosts},
+                     load_event_topology(args.topology))
+
+    def emit_sample(sample: dict) -> None:
+        for prefix, values in sample["mbps"].items():
+            events.emit("metric", name="throughput_mbps", prefix=prefix, sim_days=sample["elapsed_days"], values=values)
+
     # Traffic sampler — driven by reactor
     sampler = TrafficSampler(
         network=network,
@@ -374,6 +397,7 @@ def main():
         monitored_prefixes=[remote_prefix],
         provider_ifaces=provider_ifaces,
         billing_clock=clock,
+        on_sample=emit_sample,
     )
 
     # Traffic generator (iperf3)
@@ -458,8 +482,9 @@ def main():
             post_reactors=[],
             extra_tools=extra_tools,
             context_fns={"ISP": sampler.measure_now},
+            events=events,
         )
-        results = anet.run(concurrent=not args.sequential)
+        results = anet.run(concurrent=not args.sequential, end_run=False)
 
         # Capture the final step's routing state (step max_iterations-1)
         clock.set_elapsed(BILLING_DAYS)
@@ -467,6 +492,7 @@ def main():
         final_elapsed_start = (max_iterations - 1) * step_days
         for i in range(samples_per_step):
             sampler.sample(elapsed_override=final_elapsed_start + i * sample_interval_days)
+        events.run_end(anet.end_reason)  # after the last samples, which belong to the run
 
         # Results summary
         print("\n=== Agent Results ===")
@@ -523,8 +549,14 @@ def main():
         sampler.stop()
         network.stop()
 
+    except Exception:
+        events.run_end("error")
+        raise
     finally:
+        events.close()
         chown_to_user(log_dir)
+        if args.events:
+            chown_to_user(Path(args.events))
 
     # Save experiment data and generate throughput plot
     data_path = log_dir / f"{run_stem}-data.json"

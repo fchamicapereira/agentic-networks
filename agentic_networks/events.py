@@ -64,9 +64,12 @@ class EventLog:
             counter = self._ids.setdefault(prefix, itertools.count(1))
             return f"{prefix}{next(counter)}"
 
-    def run_start(self, scenario: str, title: str, model: str, models: dict[str, str], topology: dict) -> None:
+    def run_start(self, scenario: str, title: str, model: str, models: dict[str, str], topology: dict,
+                  outsiders: "dict[str, str] | None" = None) -> None:
+        """`outsiders`: parties outside the network, each with the agent it talks to ({"human": "User"})."""
+        fields = {"outsiders": outsiders} if outsiders else {}
         self.emit("run_start", v=FORMAT_VERSION, source="live", scenario=scenario, title=title,
-                  model=model, models=models, topology=topology)
+                  model=model, models=models, topology=topology, **fields)
 
     def run_end(self, reason: str) -> None:
         """The first call wins: a crash after the agents finished must not end the run twice."""

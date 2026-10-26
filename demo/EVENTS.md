@@ -7,8 +7,13 @@ live run look the same.
 
 Recordings of the paper runs are produced from `logs/` by `demo/tools/logs_to_events.py`.
 A live run writes its own stream as it happens, one line at a time, to the file given with
-`--events FILE` (the Knowledge Plane experiment, `experiments/kp_why_fix.py`, for now).
+`--events FILE` (experiments/kp_why_fix.py, routing_policies.py and billing_policy.py). The demo
+server (`demo/server.py`) starts runs that way and streams the file to the page.
 `demo/tools/test_event_stream.py` checks that a live stream matches the recording of the same run.
+
+`--describe FILE` writes only what a run would start with, and exits without starting the network
+or calling a model: `run_start` (with empty `model` and `models`), every agent's `prompt`, and a
+`state` `dormant` for each agent that starts idle. The demo draws a scenario from it before running it.
 
 ## Common fields
 
@@ -36,9 +41,11 @@ recordings.
   "topology": {
     "nodes": [ { "id": "User", "address": "128.173.10.1/32" }, … ],
     "links": [ { "a": "User", "b": "Uni", "rel": "customer/provider", "delay_ms": 2 }, … ]
-  } }
+  },
+  "outsiders": { "human": "User" } }    // optional: parties outside the network, and the agent each talks to
 ```
-`rel` is the `relationship` column of the topology CSV, read left to right: `customer/provider`
+Recordings have no `outsiders`; the viewer finds them from messages sent by a party that is not
+a node. `rel` is the `relationship` column of the topology CSV, read left to right: `customer/provider`
 means `a` is the customer of `b`. Delays are for the viewer only. Agents are never told them.
 
 **`run_end`**: `{ "t", "type": "run_end", "reason": "all_dormant" | "max_iterations" | "stopped" | "budget" | "error" | "unknown" }`

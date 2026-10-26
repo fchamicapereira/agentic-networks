@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 from mininet.node import Host
 
 from .network_agent import AGENT_TOOLS_DEFINITIONS, IDLE_DESCRIPTION_OBSERVING, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
-from .events import EventLog, NO_EVENTS
+from .events import EventLog, NO_EVENTS, load_topology as load_event_topology
 from .message_bus import MessageBus
 from .network import Network
 from .agent_claude import AgentClaude
@@ -52,6 +52,44 @@ def _inject_reason(schema: dict) -> dict:
     return {**schema, "properties": props, "required": req}
 
 
+def system_prompt_for(node_name: str, ifaces: list, initial_prompt: str) -> str:
+    """A node's system prompt: the harness template, with its connections and its scenario prompt."""
+    connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        node_name=node_name,
+        connections=connections,
+        initial_prompt=initial_prompt,
+    )
+
+
+def describe_run(
+    path: str,
+    scenario: str,
+    title: str,
+    network: Network,
+    topology_file: str,
+    initial_prompts: str | dict[str, str],
+    start_waiting: Iterable[str] = (),
+    external_contacts: "dict[str, list[str]] | None" = None,
+) -> None:
+    """Write what a run would start with, as the demo's event stream (demo/EVENTS.md), and nothing else.
+
+    run_start, each agent's system prompt (as AgenticNetwork builds it), and which agents start
+    idle; the network is not started and no model is called. Experiments' --describe uses this so
+    the demo can show a scenario before running it. `network` only needs to be constructed.
+    """
+    events = EventLog(path)
+    events.run_start(scenario, title, "", {}, load_event_topology(topology_file),
+                     outsiders={c: agent for agent, cs in (external_contacts or {}).items() for c in cs})
+    start_waiting = set(start_waiting)
+    for name, ifaces in network.ifaces_per_host.items():
+        prompt = initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts
+        events.emit("prompt", name, text=system_prompt_for(name, ifaces, prompt).strip())
+        if name in start_waiting:
+            events.emit("state", name, state="dormant")
+    events.close()
+
+
 def _create_network_agent(
     node_name: str,
     host: Host,
@@ -69,13 +107,7 @@ def _create_network_agent(
     events: EventLog = NO_EVENTS,
 ) -> NetworkAgent:
     model = MODELS[model_key]
-
-    connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        node_name=node_name,
-        connections=connections,
-        initial_prompt=initial_prompt,
-    )
+    system_prompt = system_prompt_for(node_name, ifaces, initial_prompt)
 
     extra_defs = [
         {
@@ -269,16 +301,26 @@ class AgenticNetwork:
 
         return reports
 
-    def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
+    def run(self, concurrent: bool = True, end_run: bool = True) -> dict[str, AgentResult]:
+        """Run the agents. `end_run=False` leaves the event stream's run_end to the caller (with
+        `self.end_reason`), for an experiment that still measures something afterwards."""
         # Set to "all_dormant" by the runner when it stops the run because nothing is left to do.
         self._end_reason = "max_iterations"
         try:
             results = self._run_concurrent() if concurrent else self._run_sequential_round_robin()
+        except KeyboardInterrupt:  # stopped from outside, e.g. the demo server's Stop run
+            self.events.run_end("stopped")
+            raise
         except BaseException:
             self.events.run_end("error")
             raise
-        self.events.run_end(self._end_reason)
+        if end_run:
+            self.events.run_end(self._end_reason)
         return results
+
+    @property
+    def end_reason(self) -> str:
+        return self._end_reason
 
     def _run_sequential_round_robin(self) -> dict[str, AgentResult]:
         active = [(agent, agent.run()) for agent in self.agents]
