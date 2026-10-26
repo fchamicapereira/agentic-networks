@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 from mininet.node import Host
 
 from .network_agent import AGENT_TOOLS_DEFINITIONS, IDLE_DESCRIPTION_OBSERVING, AgentResult, NetworkAgent, SYSTEM_PROMPT_TEMPLATE
+from .events import EventLog, NO_EVENTS
 from .message_bus import MessageBus
 from .network import Network
 from .agent_claude import AgentClaude
@@ -65,6 +66,7 @@ def _create_network_agent(
     window_size: int,
     extra_tools: list[dict] | None = None,
     context_fn: "Callable[[], str] | None" = None,
+    events: EventLog = NO_EVENTS,
 ) -> NetworkAgent:
     model = MODELS[model_key]
 
@@ -109,6 +111,7 @@ def _create_network_agent(
         max_iterations=max_iterations,
         context_fn=context_fn,
         extra_tools=extra_tools,
+        events=events,
     )
 
 
@@ -127,6 +130,9 @@ class AgenticNetwork:
 
     ``agent_models`` optionally runs some nodes on a model other than
     ``model_key`` ({node: model_key}), e.g. a fixed attacker across runs.
+
+    ``events`` receives the run as the demo event stream (demo/EVENTS.md); the
+    caller emits run_start before creating the network.
     """
 
     REACTOR_POLL_INTERVAL_S = 0.5
@@ -148,14 +154,16 @@ class AgenticNetwork:
         start_waiting: Iterable[str] = (),
         external_contacts: "dict[str, list[str]] | None" = None,
         agent_models: "dict[str, str] | None" = None,
+        events: EventLog = NO_EVENTS,
     ):
         self.logger = logging.getLogger("main")
         self.network = network
+        self.events = events
         # external_contacts maps an agent to parties outside the network it may message
         # (e.g. {"User": ["human"]}: only the laptop agent can talk to its owner).
         external_contacts = external_contacts or {}
         self.message_bus = MessageBus(
-            list(network.hosts.keys()), external=sorted({c for cs in external_contacts.values() for c in cs})
+            list(network.hosts.keys()), external=sorted({c for cs in external_contacts.values() for c in cs}), events=events
         )
         agent_models = agent_models or {}
         unknown = set(agent_models) - set(network.hosts)
@@ -178,6 +186,7 @@ class AgenticNetwork:
                 window_size=window_size,
                 extra_tools=extra_tools,
                 context_fn=context_fns.get(name) if context_fns else None,
+                events=events,
             )
             for name, host in network.hosts.items()
         ]
@@ -190,6 +199,14 @@ class AgenticNetwork:
         for agent in self.agents:
             agent.waiting = agent.node_name in start_waiting
 
+        for agent in self.agents:
+            events.emit("prompt", agent.node_name, text=agent.agent.system_prompt.strip())
+            if agent.waiting:
+                events.emit("state", agent.node_name, state="dormant")
+            events.watch_warnings(agent.node_name)
+        self._routes: dict[str, str] = {}
+        self._emit_route_changes()
+
         self._stopped: set[str] = set()
 
     def send_message(self, to: str, sender: str, message: str) -> None:
@@ -197,6 +214,16 @@ class AgenticNetwork:
         if to not in valid:
             raise ValueError(f"Unknown agent '{to}'. Valid agents: {sorted(valid)}")
         self.message_bus.send(to, sender, message)
+
+    def _emit_route_changes(self) -> None:
+        """Emit a `routes` event for every node whose routing table changed since the last call."""
+        if not self.events.enabled:
+            return
+        for name, host in self.network.hosts.items():
+            table = host.cmd("ip route show").replace("\r", "").strip()
+            if table != self._routes.get(name):
+                self._routes[name] = table
+                self.events.emit("routes", name, table=table)
 
     def stop_agent(self, node_name: str) -> None:
         self._stopped.add(node_name)
@@ -213,6 +240,7 @@ class AgenticNetwork:
                 text = f"(report unavailable: {exc})"
             with lock:
                 reports[agent.node_name] = text
+            self.events.emit("report", agent.node_name, text=text)
 
         # daemon=True so a wedged report request can't block interpreter exit. Reports are
         # best-effort and run *after* the experiment's real work is done, so a stalled one
@@ -242,9 +270,15 @@ class AgenticNetwork:
         return reports
 
     def run(self, concurrent: bool = True) -> dict[str, AgentResult]:
-        if concurrent:
-            return self._run_concurrent()
-        return self._run_sequential_round_robin()
+        # Set to "all_dormant" by the runner when it stops the run because nothing is left to do.
+        self._end_reason = "max_iterations"
+        try:
+            results = self._run_concurrent() if concurrent else self._run_sequential_round_robin()
+        except BaseException:
+            self.events.run_end("error")
+            raise
+        self.events.run_end(self._end_reason)
+        return results
 
     def _run_sequential_round_robin(self) -> dict[str, AgentResult]:
         active = [(agent, agent.run()) for agent in self.agents]
@@ -298,9 +332,11 @@ class AgenticNetwork:
 
             for reactor in self.post_reactors:
                 reactor(self, global_iter)
+            self._emit_route_changes()
 
             if active and all(agent.waiting for agent, _ in active) and not self.message_bus.in_flight():
                 self.logger.info("All agents are idle and no messages are in flight. Stopping experiment.")
+                self._end_reason = "all_dormant"
                 for agent, gen in active:
                     results[agent.node_name] = agent.result()
                     bars[agent.node_name].set_description(f"✓ {agent.node_name}")
@@ -423,11 +459,13 @@ class AgenticNetwork:
 
             for reactor in self.post_reactors:
                 reactor(self, step)
+            self._emit_route_changes()
 
             active = still_active
 
             if active and all(agent.waiting for agent, _ in active) and not self.message_bus.in_flight():
                 self.logger.info("All agents are idle and no messages are in flight. Stopping experiment.")
+                self._end_reason = "all_dormant"
                 for agent, gen in active:
                     results[agent.node_name] = agent.result()
                     bars[agent.node_name].set_description(f"✓ {agent.node_name}")

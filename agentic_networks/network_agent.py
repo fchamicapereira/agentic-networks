@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from dataclasses import dataclass
 
 from .agent import Agent, ToolUseBlock
+from .events import EventLog, NO_EVENTS
 from .message_bus import MessageBus
 from .mininet_host import MininetHost
 from mininet.node import Host
@@ -122,8 +123,12 @@ class NetworkAgent:
         max_iterations: int,
         context_fn: "Callable[[], str] | None" = None,
         extra_tools: list[dict] | None = None,
+        events: EventLog = NO_EVENTS,
     ):
         self.node_name = node_name
+        self.events = events
+        # The reason given with the tool call being executed, for the events it produces.
+        self._reason = ""
         self.agent = agent
         self.context_fn = context_fn
         self.max_iterations = max_iterations
@@ -154,10 +159,11 @@ class NetworkAgent:
         if to not in self._neighbors:
             return f"Error: {to} is not a directly connected neighbor. " f"Direct neighbors: {', '.join(sorted(self._neighbors))}. " f"To reach {to}, ask a neighbor to relay your message."
         self.log.info("[msg → %s] %s", to, message)
-        self.bus.send(to=to, sender=self.node_name, message=message)
+        self.bus.send(to=to, sender=self.node_name, message=message, reason=self._reason)
         return f"Message sent to {to}."
 
     def idle(self) -> str:
+        self.events.emit("idle", self.node_name, reason=self._reason)
         if self.context_fn:
             self.log.info("Idle — passing turn, no action taken.")
             return "Idle: no action taken this iteration. A fresh observation will arrive next iteration."
@@ -176,9 +182,10 @@ class NetworkAgent:
         reason = inputs.pop("reason", None)
         if reason:
             self.log.info("[reason] %s", reason)
+        self._reason = reason or ""
         try:
             if name == "exec":
-                output, exit_code = self.mininet_host.exec(**inputs)
+                output, exit_code = self._exec(inputs)
                 if exit_code != 0:
                     result = f"Command failed (exit {exit_code}):\n{output}"
                     self.log.warning("Command exited with code %d — halting tool execution for this turn.", exit_code)
@@ -192,6 +199,18 @@ class NetworkAgent:
         except Exception as exc:
             self.log.error("Error executing tool %s: %s", name, exc)
             return f"Error in {name}: {exc}", False
+
+    def _exec(self, inputs: dict) -> tuple[str, int]:
+        exec_id = self.events.next_id(f"{self.node_name}-x")
+        self.events.emit("exec", self.node_name, id=exec_id, command=inputs.get("command", ""), reason=self._reason)
+        try:
+            output, exit_code = self.mininet_host.exec(**inputs)
+        except Exception as exc:
+            self.events.emit("exec_result", self.node_name, id=exec_id, output=f"Error: {exc}", exit=-1)
+            raise
+        self.events.emit("exec_result", self.node_name, id=exec_id,
+                         output="" if output == "(no output)" else output, exit=exit_code)
+        return output, exit_code
 
     def _run_tool_blocks(self, tool_blocks: list[ToolUseBlock]) -> bool:
         """Execute the turn's tool calls. Returns True if the agent idled (called idle alone)."""
@@ -240,11 +259,13 @@ class NetworkAgent:
                     continue
                 self.waiting = False
                 self.log.info("=== AGENT WOKEN === responding to an incoming message.")
+                self.events.emit("state", self.node_name, state="active")
 
             context = self.context_fn() if self.context_fn else ""
             user_message = f"{context}\n\nState the next action." if context else "State the next action."
             if self._toolless_turns:
                 user_message = f"{NO_TOOL_REMINDER}\n\n{user_message}"
+            self.events.emit("turn", self.node_name, iter=iteration + 1, of=self.max_iterations)
             response = self.agent.request_action(user_message)
 
             self.log.debug("Raw response from model:\n%s", response.raw)
@@ -254,6 +275,7 @@ class NetworkAgent:
             for block in response.content:
                 if isinstance(block, str):
                     self.log.info("[assistant] %s", block)
+                    self.events.emit("assistant", self.node_name, text=block.strip())
 
             if response.stop_reason == "max_tokens":
                 self.log.warning("Token limit reached (max_tokens=%d); response may be truncated.", self.agent.max_tokens)
@@ -283,6 +305,7 @@ class NetworkAgent:
             if idled and not self.context_fn:
                 self.waiting = True
                 self.log.info("=== AGENT WAITING === nothing to do until a message arrives.")
+                self.events.emit("state", self.node_name, state="dormant")
 
             yield iteration + 1
 

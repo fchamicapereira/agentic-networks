@@ -11,6 +11,7 @@ from pathlib import Path
 from agentic_networks.network import load_topology, Network
 from agentic_networks.agentic_network import AgenticNetwork, MODELS
 from agentic_networks import paths, testbed_certs
+from agentic_networks.events import EventLog, NO_EVENTS, load_topology as load_event_topology
 from agentic_networks.experiment import (
     DEFAULT_LOG_DIR,
     chown_to_user,
@@ -80,6 +81,14 @@ def _resolver_cmd(network: Network, res: str, extra: str = "") -> str:
 
 FAULTS = ["bgp_hijack", "dns_stale", "firewall", "overload"]
 
+# Each fault's scenario in the demo's event stream (demo/EVENTS.md): (id, title).
+SCENARIOS = {
+    "bgp_hijack": ("kp_bgp_hijack", "Knowledge Plane: BGP hijack"),
+    "dns_stale": ("kp_dns_stale", "Knowledge Plane: stale DNS"),
+    "firewall": ("kp_university_firewall", "Knowledge Plane: university firewall"),
+    "overload": ("kp_server_overload", "Knowledge Plane: overloaded server"),
+}
+
 FAULT_DESCRIPTIONS = {
     "bgp_hijack": (
         "EveLink (a customer of AS1) has announced 198.82.0.1/32 on its loopback, "
@@ -147,6 +156,7 @@ def parse_args():
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
+    parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
     return parser.parse_args()
 
 
@@ -668,6 +678,7 @@ def main():
     # `ps`/`/proc` cannot read other orgs' processes (e.g. EveLink's load client) or the
     # orchestrator's command line out of a shared process table.
     network.start()
+    events = NO_EVENTS
 
     try:
         setup_routing(network, logger)
@@ -694,6 +705,11 @@ def main():
         logger.info("Model: %s (%s)", args.model, MODELS[args.model])
         logger.info("Fault: %s", args.fault)
 
+        events = EventLog(args.events)
+        scenario, title = SCENARIOS[args.fault]
+        events.run_start(scenario, title, args.model, {name: args.model for name in network.hosts},
+                         load_event_topology(TOPOLOGY))
+
         anet = AgenticNetwork(
             network=network,
             initial_prompts=prompts,
@@ -708,6 +724,7 @@ def main():
             start_waiting=[name for name in network.hosts if name != "User"],
             # The laptop agent answers its owner, who complained to it as "human".
             external_contacts={"User": ["human"]},
+            events=events,
         )
 
         anet.send_message(
@@ -751,18 +768,23 @@ def main():
                 run_stem=run_stem,
                 logger=logger,
             )
+            events.emit("report", text=(log_dir / f"{run_stem}-final-report.md").read_text())
 
         stop_services(network, logger)
         network.stop()
 
     except Exception:
         logger.exception("Experiment failed")
+        events.run_end("error")
         stop_services(network, logger)
         network.stop()
         raise
 
     finally:
+        events.close()
         chown_to_user(log_dir)
+        if args.events:
+            chown_to_user(Path(args.events))
         orig = Path("/tmp/orig-resolv.conf")
         if orig.exists():
             Path("/etc/resolv.conf").write_text(orig.read_text())

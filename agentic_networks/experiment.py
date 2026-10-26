@@ -48,6 +48,9 @@ def chown_to_user(path: Path) -> None:
     if not (uid and gid):
         return
     uid_i, gid_i = int(uid), int(gid)
+    if path.is_file():
+        os.chown(path, uid_i, gid_i)
+        return
     for dirpath, _, filenames in os.walk(path):
         os.chown(dirpath, uid_i, gid_i)
         for filename in filenames:

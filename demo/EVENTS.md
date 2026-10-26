@@ -6,6 +6,9 @@ viewer is a function of this stream alone: it never reads the text logs, so a re
 live run look the same.
 
 Recordings of the paper runs are produced from `logs/` by `demo/tools/logs_to_events.py`.
+A live run writes its own stream as it happens, one line at a time, to the file given with
+`--events FILE` (the Knowledge Plane experiment, `experiments/kp_why_fix.py`, for now).
+`demo/tools/test_event_stream.py` checks that a live stream matches the recording of the same run.
 
 ## Common fields
 
@@ -52,9 +55,9 @@ cross-agent report.
 | `type` | Extra fields | Meaning |
 |---|---|---|
 | `prompt` | `text` | The agent's full system prompt (harness template + scenario prompt). |
-| `turn` | `iter`, `of` | The agent starts an iteration, which means an LLM request is in flight. The viewer shows the node as *thinking* until its next action. |
+| `turn` | `iter`, `of` | The agent starts an iteration, which means an LLM request is in flight. The viewer shows the node as *thinking* until its next action. In live runs it comes after the `delivered` and `state` that woke the agent; recordings place it just before them. |
 | `assistant` | `text` | Free text the model wrote alongside its tool calls. |
-| `thinking` | `text` | Extended thinking/reasoning output. Live runs only, when capture is enabled. |
+| `thinking` | `text` | Extended thinking/reasoning output. Live runs only, when capture is enabled (not emitted yet). |
 | `exec` | `id`, `command`, `reason` | The agent runs a shell command. |
 | `exec_result` | `id`, `output`, `exit` | The command's result. `exit` 124 = killed by the harness timeout. |
 | `message` | `id`, `from`, `to`, `text`, `reason` | A knowledge-plane message is sent. `node` = `from`. `from` is `"human"` for the owner's complaint. |
@@ -62,8 +65,8 @@ cross-agent report.
 | `idle` | `reason` | The agent passed its turn. |
 | `state` | `state`, `summary`?, `reason`? | `"dormant"` (asleep until a message arrives: it idled, or, in runs from before `idle` replaced it, called `report_done`, whose message is `summary`) or `"active"` (woken by a message). |
 | `warning` | `text` | Harness warnings, e.g. a failed command halting a turn, or a truncated response. |
-| `usage` | `in`, `out`, `cache_read`, `cache_write`, `usd` | Tokens and cost of one LLM request. Live runs only. |
-| `routes` | `table` | A snapshot of `ip route show`, emitted when it changes. Live runs only. |
+| `usage` | `in`, `out`, `cache_read`, `cache_write`, `usd` | Tokens and cost of one LLM request. Live runs only (not emitted yet). |
+| `routes` | `table` | A snapshot of `ip route show`: every node's at the start, then a node's whenever it changes (checked after each step). Live runs only. |
 
 `id`s are unique within a run. An `exec_result` always follows its `exec` for the same node.
 

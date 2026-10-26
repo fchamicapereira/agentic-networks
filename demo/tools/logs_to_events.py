@@ -13,7 +13,6 @@ Standard library only (like tools/build_website.py), so the Pages build can run 
 """
 
 import argparse
-import csv
 import json
 import sys
 
@@ -23,23 +22,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from agentic_networks.events import FORMAT_VERSION, load_topology  # noqa: E402
 from agentic_networks.visualize_logs import _CMD_OUT_RE, _ITER_RE, _MSG_RE, _REPORT_LEVELS, _raw_records  # noqa: E402
-
-FORMAT_VERSION = 1
 PAPER_DATA = REPO_ROOT / "paper-data"
-
-
-def load_topology(path: Path) -> dict:
-    nodes, links = [], []
-    with open(path) as f:
-        for row in csv.reader(line for line in f if line.strip() and not line.startswith("#")):
-            if row[0] == "node":
-                nodes.append({"id": row[1], "address": row[2]})
-            elif row[0] in ("prefix", "address"):
-                continue
-            else:
-                links.append({"a": row[0], "b": row[1], "rel": row[5], "delay_ms": int(row[2])})
-    return {"nodes": nodes, "links": links}
 
 
 def parse_node(path: Path, node: str) -> list[dict]:
