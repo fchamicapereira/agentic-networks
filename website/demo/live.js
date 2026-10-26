@@ -103,7 +103,10 @@ export class LiveServer {
     source.addEventListener("replaced", () => { source.close(); this.runId = null; });
   }
 
-  start(scenario, model) { return this.request("/api/runs", { scenario, model }).then((s) => this.apply(s)); }
+  // prompts: {agent: whole system prompt} the attendee edited; opening: their edited opening message.
+  start(scenario, model, prompts = {}, opening = undefined) {
+    return this.request("/api/runs", { scenario, model, prompts, opening }).then((s) => this.apply(s));
+  }
   stop() { return this.request("/api/runs/stop", {}).then((s) => this.apply(s)); }
   clear() { return this.request("/api/runs/clear", {}).then((s) => this.apply(s)); }
   recheck() { return this.request("/api/models/check", {}).then((s) => this.apply(s)); }

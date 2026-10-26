@@ -17,6 +17,7 @@ from agentic_networks.experiment import (
     chown_to_user,
     collect_node_logs,
     collect_route_tables,
+    load_system_prompts,
     setup_logging,
     setup_node_logs,
     write_final_report,
@@ -91,6 +92,8 @@ SCENARIOS = {
 
 # The laptop agent answers its owner, who complained to it as "human".
 EXTERNAL_CONTACTS = {"User": ["human"]}
+# The owner's complaint, which starts every run.
+HUMAN_MESSAGE = "I tried to load the website at acm.org in my browser but the page failed to load. Can you investigate why?"
 
 
 def starts_waiting(nodes) -> list[str]:
@@ -168,6 +171,8 @@ def parse_args():
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
     parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--system-prompts", default=None, metavar="DIR", help="<node>.txt files, each that agent's whole system prompt, used exactly as given (the demo's edited prompts)")
+    parser.add_argument("--human-message-file", default=None, metavar="FILE", help="The owner's complaint that starts the run, instead of the usual one")
     parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     return parser.parse_args()
 
@@ -683,7 +688,8 @@ def main():
         scenario, title = SCENARIOS[args.fault]
         planned = Network(load_topology(str(TOPOLOGY)))  # constructed, never started
         describe_run(args.describe, scenario, title, planned, str(TOPOLOGY), load_prompts(args.fault),
-                     starts_waiting(planned.ifaces_per_host), EXTERNAL_CONTACTS)
+                     starts_waiting(planned.ifaces_per_host), EXTERNAL_CONTACTS,
+                     opening={"from": "human", "to": "User", "text": HUMAN_MESSAGE})
         chown_to_user(Path(args.describe))
         return
 
@@ -743,12 +749,13 @@ def main():
             start_waiting=starts_waiting(network.hosts),
             external_contacts=EXTERNAL_CONTACTS,
             events=events,
+            system_prompts=load_system_prompts(args.system_prompts),
         )
 
         anet.send_message(
             to="User",
             sender="human",
-            message="I tried to load the website at acm.org in my browser but the page failed to load. Can you investigate why?",
+            message=Path(args.human_message_file).read_text() if args.human_message_file else HUMAN_MESSAGE,
         )
 
         results = anet.run(concurrent=not args.sequential)

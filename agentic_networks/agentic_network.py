@@ -14,7 +14,7 @@ from .agent_claude import AgentClaude
 from .agent_claude import MODELS as CLAUDE_MODELS
 from .agent_openai import AgentOpenAI
 from .agent_openai import MODELS as GPT_MODELS
-from .agent_vllm import AgentVLLM
+from .agent_vllm import AgentVLLM, _build_tool_guide
 from .agent_vllm import MODELS as VLLM_MODELS
 from .agent_together import AgentTogether
 from .agent_together import MODELS as TOGETHER_MODELS
@@ -52,6 +52,23 @@ def _inject_reason(schema: dict) -> dict:
     return {**schema, "properties": props, "required": req}
 
 
+def agent_tool_defs(extra_tools: list[dict] | None = None, observing: bool = False) -> list[dict]:
+    """The tools an agent is given: the standard ones, plus the experiment's own (each with a
+    reason field). `observing`: the agent gets a fresh observation every turn (context_fn)."""
+    extra_defs = [
+        {
+            "name": t["name"],
+            "description": t["description"],
+            "schema": _inject_reason(t["schema"]),
+        }
+        for t in (extra_tools or [])
+    ]
+    base_defs = AGENT_TOOLS_DEFINITIONS
+    if observing:
+        base_defs = [{**d, "description": IDLE_DESCRIPTION_OBSERVING} if d["name"] == "idle" else d for d in base_defs]
+    return base_defs + extra_defs
+
+
 def system_prompt_for(node_name: str, ifaces: list, initial_prompt: str) -> str:
     """A node's system prompt: the harness template, with its connections and its scenario prompt."""
     connections = "\n".join(f"  - {iface.iface}: connected to {iface.peer} (your IP: {iface.ip}, peer IP: {iface.peer_ip})" for iface in ifaces)
@@ -71,20 +88,33 @@ def describe_run(
     initial_prompts: str | dict[str, str],
     start_waiting: Iterable[str] = (),
     external_contacts: "dict[str, list[str]] | None" = None,
+    extra_tools: list[dict] | None = None,
+    observing: Iterable[str] = (),
+    opening: "dict | None" = None,
+    agent_models: "dict[str, str] | None" = None,
 ) -> None:
     """Write what a run would start with, as the demo's event stream (demo/EVENTS.md), and nothing else.
 
     run_start, each agent's system prompt (as AgenticNetwork builds it), and which agents start
     idle; the network is not started and no model is called. Experiments' --describe uses this so
     the demo can show a scenario before running it. `network` only needs to be constructed.
+
+    Each prompt also carries `tool_guide`: what text-tool models (vLLM, Together) get after it.
+    `observing`: agents given an observation every turn (context_fns). `opening`: the message the
+    run starts with ({"from", "to", "text"}), e.g. the owner's complaint in the KP scenarios.
+    `agent_models`: agents that run on a set model whatever the run's model; their prompt says
+    which (`model`), since it decides whether they get the tool guide.
     """
     events = EventLog(path)
+    fields = {"opening": opening} if opening else {}
     events.run_start(scenario, title, "", {}, load_event_topology(topology_file),
-                     outsiders={c: agent for agent, cs in (external_contacts or {}).items() for c in cs})
-    start_waiting = set(start_waiting)
+                     outsiders={c: agent for agent, cs in (external_contacts or {}).items() for c in cs}, **fields)
+    start_waiting, observing = set(start_waiting), set(observing)
     for name, ifaces in network.ifaces_per_host.items():
         prompt = initial_prompts[name] if isinstance(initial_prompts, dict) else initial_prompts
-        events.emit("prompt", name, text=system_prompt_for(name, ifaces, prompt).strip())
+        fixed = {"model": agent_models[name]} if agent_models and name in agent_models else {}
+        events.emit("prompt", name, text=system_prompt_for(name, ifaces, prompt).strip(),
+                    tool_guide=_build_tool_guide(agent_tool_defs(extra_tools, name in observing)), **fixed)
         if name in start_waiting:
             events.emit("state", name, state="dormant")
     events.close()
@@ -105,32 +135,25 @@ def _create_network_agent(
     extra_tools: list[dict] | None = None,
     context_fn: "Callable[[], str] | None" = None,
     events: EventLog = NO_EVENTS,
+    system_prompt: str | None = None,
 ) -> NetworkAgent:
+    """`system_prompt`, if given, is the agent's whole system prompt, used exactly as given: no
+    template, and no tool guide added for text-tool models (e.g. a prompt edited in the demo)."""
     model = MODELS[model_key]
-    system_prompt = system_prompt_for(node_name, ifaces, initial_prompt)
-
-    extra_defs = [
-        {
-            "name": t["name"],
-            "description": t["description"],
-            "schema": _inject_reason(t["schema"]),
-        }
-        for t in (extra_tools or [])
-    ]
-
-    base_defs = AGENT_TOOLS_DEFINITIONS
-    if context_fn:
-        base_defs = [{**d, "description": IDLE_DESCRIPTION_OBSERVING} if d["name"] == "idle" else d for d in base_defs]
-    tool_defs = base_defs + extra_defs
+    as_given = system_prompt is not None
+    if not as_given:
+        system_prompt = system_prompt_for(node_name, ifaces, initial_prompt)
+    tool_defs = agent_tool_defs(extra_tools, observing=context_fn is not None)
 
     if model_key in CLAUDE_MODELS:
         llm_agent = AgentClaude(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
     elif model_key in GPT_MODELS:
         llm_agent = AgentOpenAI(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
     elif model_key in TOGETHER_MODELS:
-        llm_agent = AgentTogether(model, node_name, system_prompt, max_tokens, tool_defs, window_size)
+        llm_agent = AgentTogether(model, node_name, system_prompt, max_tokens, tool_defs, window_size, tool_guide=not as_given)
     elif model_key in VLLM_MODELS:
-        llm_agent = AgentVLLM(model, node_name, vllm_host, vllm_port, system_prompt, max_tokens, tool_defs, window_size)
+        llm_agent = AgentVLLM(model, node_name, vllm_host, vllm_port, system_prompt, max_tokens, tool_defs, window_size,
+                              tool_guide=not as_given)
     else:
         raise ValueError(f"Unknown model key: {model_key!r}")
 
@@ -165,6 +188,10 @@ class AgenticNetwork:
 
     ``events`` receives the run as the demo event stream (demo/EVENTS.md); the
     caller emits run_start before creating the network.
+
+    ``system_prompts`` optionally gives some nodes their whole system prompt
+    ({node: text}), used exactly as given instead of the template and
+    ``initial_prompts`` (the demo's edited prompts).
     """
 
     REACTOR_POLL_INTERVAL_S = 0.5
@@ -187,6 +214,7 @@ class AgenticNetwork:
         external_contacts: "dict[str, list[str]] | None" = None,
         agent_models: "dict[str, str] | None" = None,
         events: EventLog = NO_EVENTS,
+        system_prompts: "dict[str, str] | None" = None,
     ):
         self.logger = logging.getLogger("main")
         self.network = network
@@ -201,6 +229,10 @@ class AgenticNetwork:
         unknown = set(agent_models) - set(network.hosts)
         if unknown:
             raise ValueError(f"agent_models names unknown nodes: {sorted(unknown)}")
+        system_prompts = system_prompts or {}
+        unknown = set(system_prompts) - set(network.hosts)
+        if unknown:
+            raise ValueError(f"system_prompts names unknown nodes: {sorted(unknown)}")
         self.reactors: list[Reactor] = reactors
         self.post_reactors: list[Reactor] = post_reactors
         self.agents: list[NetworkAgent] = [
@@ -219,6 +251,7 @@ class AgenticNetwork:
                 extra_tools=extra_tools,
                 context_fn=context_fns.get(name) if context_fns else None,
                 events=events,
+                system_prompt=system_prompts.get(name),
             )
             for name, host in network.hosts.items()
         ]

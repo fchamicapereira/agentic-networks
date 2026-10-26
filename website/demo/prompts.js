@@ -1,10 +1,15 @@
-// Prompts dialog: each agent's system prompt, one tab per agent. Most of a prompt is harness
-// boilerplate every agent gets; what is specific to an agent comes first, and the shared rest is
-// folded under "Common instructions". Nothing is rewritten, only regrouped. Prompt text is
-// untrusted: it goes into textContent only.
+// Prompts dialog: each agent's system prompt, one tab per agent, and the message a run opens with
+// (the laptop owner's complaint in the KP scenarios). Read-only, most of a prompt is harness
+// boilerplate every agent gets: what is specific to an agent comes first, and the shared rest is
+// folded under "Common instructions". Nothing is rewritten, only regrouped. In Live, before a run
+// starts, the dialog edits instead: each agent's whole prompt, exactly as the agent will get it.
+// Prompt text is untrusted: it goes into textContent and textarea values only.
 
 import { redact } from "./state.js";
 import { badge } from "./identity.js";
+
+export const OPENING = "opening"; // the tab of the message a run opens with
+export const MAX_PROMPT_CHARS = 12000, MAX_OPENING_CHARS = 2000; // as demo/server.py checks
 
 // A prompt is a list of blocks separated by blank lines or headings (top-level lines ending in
 // ":"). A heading block's body is split into items: a line at the body's base indentation starts
@@ -62,24 +67,41 @@ export class PromptsDialog {
     this.dialog = dialog;
     this.tabs = dialog.querySelector(".tabs");
     this.body = dialog.querySelector(".prompt-body");
+    this.resetAll = dialog.querySelector(".reset-all");
+    this.resetAll.addEventListener("click", () => {
+      this.editor?.reset(null);
+      this.show(this.current);
+    });
     this.run = null;
+    this.editor = null;
   }
 
-  setRun(run) {
+  // run: the run on screen. editor (or null, read-only): { original: Map id -> text,
+  // current: Map id -> text, change(id, text), reset(id | null) } over the same ids, OPENING included.
+  setRun(run, editor = null) {
     this.run = run;
+    this.editor = editor;
     const prompts = new Map(run.events.filter((e) => e.type === "prompt" && run.nodes.includes(e.node)).map((e) => [e.node, e.text]));
     this.split = splitPrompts(prompts);
-    this.ids = run.nodes.filter((id) => this.split.has(id));
+    this.ids = run.nodes.filter((id) => prompts.has(id));
+    // The opening message: a preview names it; a run has it as its first message from outside.
+    const first = run.messages.find((m) => run.pseudo.has(m.from));
+    this.opening = run.start.opening?.text ?? first?.text ?? null;
+    this.openingFrom = run.start.opening?.from ?? first?.from ?? null;
+    if (this.opening !== null) this.ids.push(OPENING);
+    this.resetAll.hidden = !editor;
   }
 
   get available() { return !!this.run && this.ids.length > 0; }
+
+  edited(id) { return !!this.editor && this.editor.current.get(id) !== this.editor.original.get(id); }
 
   open(id = this.ids[0]) {
     if (!this.available) return;
     this.tabs.replaceChildren(...this.ids.map((n) => {
       const b = document.createElement("button");
       b.setAttribute("role", "tab");
-      b.append(badge(this.run.ident, n));
+      b.append(n === OPENING ? badge(this.run.ident, this.openingFrom, "Laptop owner") : badge(this.run.ident, n));
       b.addEventListener("click", () => this.show(n));
       return b;
     }));
@@ -89,10 +111,34 @@ export class PromptsDialog {
     this.tabs.children[this.ids.indexOf(sel)].focus(); // not the first tab, which would look selected
   }
 
+  marks() {
+    [...this.tabs.children].forEach((b, k) => {
+      b.setAttribute("aria-selected", this.ids[k] === this.current);
+      b.classList.toggle("edited", this.edited(this.ids[k]));
+    });
+    this.resetAll.disabled = !this.ids.some((id) => this.edited(id));
+  }
+
   show(id) {
-    [...this.tabs.children].forEach((b, k) => b.setAttribute("aria-selected", this.ids[k] === id));
+    this.current = id;
+    const who = id === OPENING ? this.openingFrom : id;
+    this.dialog.style.setProperty("--c", this.run.ident.get(who)?.color || "");
+    this.body.replaceChildren(...(this.editor ? this.editView(id) : this.readView(id)));
+    this.marks();
+    this.body.scrollTop = 0;
+  }
+
+  readView(id) {
+    if (id === OPENING) {
+      const note = document.createElement("p");
+      note.className = "prompt-note";
+      note.textContent = "The message that starts the run.";
+      const pre = document.createElement("pre");
+      pre.className = "prompt-own";
+      pre.textContent = redact(this.opening);
+      return [note, pre];
+    }
     const { own, common } = this.split.get(id);
-    this.dialog.style.setProperty("--c", this.run.ident.get(id).color);
     const mine = document.createElement("pre");
     mine.className = "prompt-own";
     mine.textContent = redact(own);
@@ -106,7 +152,40 @@ export class PromptsDialog {
       d.append(s, pre);
       parts.push(d);
     }
-    this.body.replaceChildren(...parts);
-    this.body.scrollTop = 0;
+    return parts;
+  }
+
+  // The whole text, editable, exactly as the run will use it.
+  editView(id) {
+    const opening = id === OPENING;
+    const max = opening ? MAX_OPENING_CHARS : MAX_PROMPT_CHARS;
+    const note = document.createElement("p");
+    note.className = "prompt-note";
+    note.textContent = opening
+      ? "The message that starts the run. Edit it to ask something else; it is sent exactly as written."
+      : "This agent's whole system prompt, exactly as it will get it. Edit any part of it. " +
+        "Your edits stay in this browser, and are used when you press Play.";
+    const area = document.createElement("textarea");
+    area.className = "prompt-edit";
+    area.spellcheck = false;
+    area.maxLength = max;
+    area.value = this.editor.current.get(id);
+    area.setAttribute("aria-label", opening ? "The opening message" : `${id}'s system prompt`);
+    const foot = document.createElement("div");
+    foot.className = "prompt-foot";
+    const count = document.createElement("span");
+    count.className = "prompt-count";
+    const reset = document.createElement("button");
+    reset.textContent = "Reset to original";
+    const update = () => {
+      count.textContent = `${area.value.length.toLocaleString()} / ${max.toLocaleString()} characters`;
+      reset.disabled = !this.edited(id);
+      this.marks();
+    };
+    area.addEventListener("input", () => { this.editor.change(id, area.value); update(); });
+    reset.addEventListener("click", () => { this.editor.reset(id); area.value = this.editor.current.get(id); update(); });
+    foot.append(count, reset);
+    update();
+    return [note, area, foot];
   }
 }

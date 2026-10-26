@@ -3,7 +3,7 @@
 
 The demo page (website/demo/, also on the project's public website) connects to this server
 at http://localhost:<port> when switched to Live. The server starts one experiment at a time,
-with the paper's settings for the chosen scenario (experiments.toml) and the chosen model,
+with the paper's settings for the chosen scenario (paper_experiments.toml) and the chosen model,
 through tools/run_in_docker.sh, so the models are reached through the per-run LLM proxy and the
 keys never enter the container. The run writes its event stream (demo/EVENTS.md) to
 demo/logs/<run>/events.jsonl, and the server streams that file to every connected page.
@@ -19,7 +19,8 @@ API (JSON unless noted):
     GET  /api/status          the server, the models' availability, and the current run
     GET  /api/scenarios       each scenario as a run would start: topology and every agent's prompt
     GET  /api/events          the current run's events as Server-Sent Events, from its start
-    POST /api/runs            start a run: {"scenario": ..., "model": ...}
+    POST /api/runs            start a run: {"scenario", "model"}, and optionally the attendee's edits:
+                              "prompts" {agent: whole system prompt}, "opening" (KP: the owner's complaint)
     POST /api/runs/stop       stop the current run
     POST /api/runs/clear      forget the current run and delete its folder (stopping it first)
     POST /api/models/check    test every model again (a tiny real request to each)
@@ -49,7 +50,7 @@ LOGS = DEFAULT_LOGS  # --logs-dir; must be inside the repository, which the cont
 RUNNER = REPO / "tools" / "run_in_docker.sh"
 RECORDINGS = REPO / "_site" / "demo" / "recordings"
 
-# The paper's scenarios (experiments.toml names) and models.
+# The paper's scenarios (paper_experiments.toml names) and models.
 SCENARIOS = ["kp_university_firewall", "kp_dns_stale", "kp_server_overload", "celer_bridge", "optimizing_billing_policy"]
 MODELS = {
     "opus-4-7": "Claude Opus 4.7",
@@ -57,7 +58,13 @@ MODELS = {
     "glm-5.2": "GLM 5.2 (FP4)",
     "qwen2.5-72b-awq": "Qwen 2.5 72B (AWQ)",
 }
-# experiments.toml fields that don't become flags: the server sets the model, logs and reports.
+# Models called with tools described in the system prompt (vLLM, Together): the harness adds a tool
+# guide after their prompt, which the page shows (each preview prompt's tool_guide).
+TOOL_GUIDE_MODELS = {"glm-5.2", "qwen2.5-72b-awq"}
+# Attendees' edits: whole system prompts, and the message a run opens with.
+MAX_PROMPT_CHARS = 12_000
+MAX_OPENING_CHARS = 2_000
+# paper_experiments.toml fields that don't become flags: the server sets the model, logs and reports.
 NOT_FLAGS = {"name", "script", "report_model", "log_dir"}
 
 PUBLIC_ORIGIN = "https://fchamicapereira.github.io"
@@ -66,8 +73,9 @@ STOP_GRACE_S = 60  # how long a stopped run gets to wind down before it is kille
 MODEL_CHECK_PREFIX = "MODEL_CHECK_RESULTS "  # tools/test_model_connection.py --json
 
 
-def load_experiments(path: Path) -> dict[str, dict[str, str]]:
-    """experiments.toml's [[experiment]] blocks, by name. Only `key = "string"` lines occur there."""
+def load_experiments(path: Path) -> dict[str, dict[str, "str | list[str]"]]:
+    """The [[experiment]] blocks of an experiments TOML file, by name. Only `key = "string"` and
+    `key = ["string", ...]` lines occur there, which is all this reads."""
     experiments, current = {}, None
     for n, line in enumerate(path.read_text().splitlines(), 1):
         line = line.strip()
@@ -76,23 +84,36 @@ def load_experiments(path: Path) -> dict[str, dict[str, str]]:
         if line == "[[experiment]]":
             current = {}
             continue
-        m = re.fullmatch(r'(\w+)\s*=\s*"([^"]*)"', line)
+        m = re.fullmatch(r'(\w+)\s*=\s*(?:"([^"]*)"|\[((?:\s*"[^"]*"\s*,?)*)\])', line)
         if current is None or not m:
-            sys.exit(f"{path}:{n}: unexpected line (the server reads only [[experiment]] blocks of key = \"value\")")
-        current[m.group(1)] = m.group(2)
-        if m.group(1) == "name":
-            experiments[m.group(2)] = current
+            sys.exit(f"{path}:{n}: unexpected line (the server reads only [[experiment]] blocks of "
+                     'key = "value" and key = ["value", ...])')
+        key = m.group(1)
+        current[key] = m.group(2) if m.group(2) is not None else re.findall(r'"([^"]*)"', m.group(3))
+        if key == "name":
+            experiments[current[key]] = current
     return experiments
 
 
-def preview_from_recording(path: Path) -> list[dict]:
-    """--fake: a scenario's preview from a recording, standing in for its --describe."""
-    events = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+def preview_from_recording(scenario: str, fixed_models: dict[str, str]) -> list[dict]:
+    """--fake: a scenario's preview from its recordings, standing in for its --describe. The tool
+    guide is what an agent's Qwen prompt has after its Opus one."""
+    def read(model):
+        return [json.loads(l) for l in (RECORDINGS / f"{scenario}__{model}.jsonl").read_text().splitlines() if l.strip()]
+    events, text_tools = read("opus-4-7"), read("qwen2.5-72b-awq")
     start = dict(events[0], source="live", model="", models={})
-    human = next((e for e in events if e["type"] == "message" and e["from"] not in {n["id"] for n in start["topology"]["nodes"]}), None)
+    nodes = {n["id"] for n in start["topology"]["nodes"]}
+    human = next((e for e in events if e["type"] == "message" and e["from"] not in nodes), None)
     if human:
         start["outsiders"] = {human["from"]: human["to"]}
-    out = [start] + [dict(e, t=0) for e in events if e["type"] == "prompt"]
+        start["opening"] = {"from": human["from"], "to": human["to"], "text": human["text"]}
+    guided = {e["node"]: e["text"] for e in text_tools if e["type"] == "prompt"}
+    out = [start]
+    for e in (e for e in events if e["type"] == "prompt"):
+        g = guided.get(e["node"], "")
+        guide = g[len(e["text"]) + 2:] if g.startswith(e["text"] + "\n\n") else ""
+        fixed = {"model": fixed_models[e["node"]]} if e["node"] in fixed_models else {}
+        out.append({"t": 0, "type": "prompt", "node": e["node"], "text": e["text"], "tool_guide": guide, **fixed})
     for node in (n["id"] for n in start["topology"]["nodes"]):
         first = next((e for e in events if e.get("node") == node and e["type"] not in ("prompt", "usage")), None)
         if first and first["type"] == "state" and first["state"] == "dormant":
@@ -103,9 +124,11 @@ def preview_from_recording(path: Path) -> list[dict]:
 class Run:
     """One experiment run: its process, and its folder under demo/logs/."""
 
-    def __init__(self, scenario: str, model: str, folder: Path, command: list[str], container: str | None):
+    def __init__(self, scenario: str, model: str, folder: Path, command: list[str], container: str | None,
+                 edited: list[str] = ()):
         self.id = folder.name
         self.scenario, self.model = scenario, model
+        self.edited = list(edited)  # agents whose prompt the attendee edited, and "opening"
         self.folder = folder
         self.events = folder / "events.jsonl"
         self.container = container
@@ -161,7 +184,7 @@ class Run:
         return "stopped" if self.stopping else "error"
 
     def status(self) -> dict:
-        return {"id": self.id, "scenario": self.scenario, "model": self.model,
+        return {"id": self.id, "scenario": self.scenario, "model": self.model, "edited": self.edited,
                 "state": "ended" if self.ended else ("stopping" if self.stopping else "running"),
                 "started": self.started, "elapsed": round((self.ended or time.time()) - self.started, 1),
                 "end_reason": self.end_reason()}
@@ -173,10 +196,10 @@ class DemoServer(ThreadingHTTPServer):
     def __init__(self, addr, args):
         super().__init__(addr, Handler)
         self.args = args
-        self.experiments = load_experiments(REPO / "experiments.toml")
+        self.experiments = load_experiments(REPO / "paper_experiments.toml")
         missing = [s for s in SCENARIOS if s not in self.experiments]
         if missing:
-            sys.exit(f"experiments.toml has no experiment named {', '.join(missing)}")
+            sys.exit(f"paper_experiments.toml has no experiment named {', '.join(missing)}")
         self.origins = {PUBLIC_ORIGIN, *args.allow_origin}
         self.lock = threading.Lock()
         self.run: Run | None = None
@@ -190,28 +213,43 @@ class DemoServer(ThreadingHTTPServer):
 
     # --- runs ---------------------------------------------------------------------------
 
-    def command(self, scenario: str, model: str, folder: Path, container: str | None) -> list[str]:
+    def command(self, scenario: str, model: str, folder: Path, container: str | None,
+                edits: list[str] = ()) -> list[str]:
         if self.args.fake:
             recording = RECORDINGS / f"{scenario}__{model}.jsonl"
             return [sys.executable, str(REPO / "demo" / "tools" / "fake_run.py"), str(recording),
                     str(folder / "events.jsonl"), "--speed", str(self.args.fake_speed)]
         rel = folder.relative_to(REPO)  # as the container sees it, from the repository root
         exp = self.experiments[scenario]
+        edit_flags = []
+        if any(e != "opening" for e in edits):
+            edit_flags += ["--system-prompts", str(rel / "prompts")]
+        if "opening" in edits:
+            edit_flags += ["--human-message-file", str(rel / "opening.txt")]
         return [str(RUNNER), "--container-name", container, exp["script"], *self.flags(scenario),
                 "--model", model, "--vllm-host", self.args.vllm_host,
-                "--log-dir", str(rel), "--events", str(rel / "events.jsonl"), "--no-reports"]
+                "--log-dir", str(rel), "--events", str(rel / "events.jsonl"), "--no-reports", *edit_flags]
 
     def flags(self, scenario: str) -> list[str]:
-        """The scenario's paper settings (experiments.toml) as the experiment's flags."""
-        exp = self.experiments[scenario]
-        return [x for k, v in exp.items() if k not in NOT_FLAGS for x in ("--" + k.replace("_", "-"), v)]
+        """The scenario's paper settings (paper_experiments.toml) as the experiment's flags; a list
+        repeats its flag (as run_experiments.py does)."""
+        out = []
+        for key, value in self.experiments[scenario].items():
+            if key not in NOT_FLAGS:
+                for item in value if isinstance(value, list) else [value]:
+                    out += ["--" + key.replace("_", "-"), item]
+        return out
+
+    def fixed_models(self, scenario: str) -> dict[str, str]:
+        """Agents that run on a set model whatever the run's model (agent_model = ["NODE=MODEL"])."""
+        return dict(spec.split("=", 1) for spec in self.experiments[scenario].get("agent_model", []))
 
     def describe_scenarios(self) -> None:
         """Fill self.previews in the background: each experiment's --describe, through Docker."""
         def describe() -> None:
             for scenario in SCENARIOS:
                 if self.args.fake:
-                    events = preview_from_recording(RECORDINGS / f"{scenario}__opus-4-7.jsonl")
+                    events = preview_from_recording(scenario, self.fixed_models(scenario))
                 else:
                     out = LOGS / f".describe-{scenario}.jsonl"  # dotfiles survive clearing old runs
                     exp = self.experiments[scenario]
@@ -232,13 +270,40 @@ class DemoServer(ThreadingHTTPServer):
         LOGS.mkdir(parents=True, exist_ok=True)
         threading.Thread(target=describe, daemon=True).start()
 
-    def start_run(self, scenario: str, model: str) -> tuple[int, dict]:
+    def check_edits(self, scenario: str, prompts, opening) -> "str | None":
+        """Why the attendee's edits can't be used, or None. Agents come from the scenario's preview."""
+        preview = self.previews.get(scenario)
+        if (prompts or opening is not None) and preview is None:
+            return "the scenario is still being prepared; try again in a moment"
+        if not isinstance(prompts, dict):
+            return "prompts must be {agent: text}"
+        agents = {e["node"] for e in preview or [] if e["type"] == "prompt"}
+        for agent, text in prompts.items():
+            if agent not in agents:
+                return f"no agent {agent!r} in this scenario"
+            if not isinstance(text, str) or not text.strip():
+                return f"{agent}'s prompt is empty"
+            if len(text) > MAX_PROMPT_CHARS:
+                return f"{agent}'s prompt is longer than {MAX_PROMPT_CHARS} characters"
+        if opening is not None:
+            if not preview[0].get("opening"):
+                return "this scenario does not start with a message"
+            if not isinstance(opening, str) or not opening.strip() or len(opening) > MAX_OPENING_CHARS:
+                return f"the opening message must have 1 to {MAX_OPENING_CHARS} characters"
+        return None
+
+    def start_run(self, scenario: str, model: str, prompts=None, opening=None) -> tuple[int, dict]:
         if scenario not in SCENARIOS:
             return 400, {"error": f"unknown scenario {scenario!r}"}
         if model not in MODELS:
             return 400, {"error": f"unknown model {model!r}"}
-        if self.models[model]["ok"] is False:
-            return 409, {"error": f"{MODELS[model]} is not available: {self.models[model]['error']}"}
+        prompts = prompts or {}
+        problem = self.check_edits(scenario, prompts, opening)
+        if problem:
+            return 400, {"error": problem}
+        for needed in {model, *self.fixed_models(scenario).values()}:
+            if self.models.get(needed, {}).get("ok") is False:
+                return 409, {"error": f"{MODELS[needed]} is not available: {self.models[needed]['error']}"}
         with self.lock:
             if self.run and not self.run.ended:
                 return 409, {"error": "a run is already going; stop it first"}
@@ -251,8 +316,16 @@ class DemoServer(ThreadingHTTPServer):
             run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{scenario}-{model}"
             folder = LOGS / run_id
             folder.mkdir()
+            # The attendee's edits, as files in the run's folder; prompts/<scenario>/ is never touched.
+            if prompts:
+                (folder / "prompts").mkdir()
+                for agent, text in prompts.items():
+                    (folder / "prompts" / f"{agent}.txt").write_text(text)
+            if opening is not None:
+                (folder / "opening.txt").write_text(opening)
+            edits = sorted(prompts) + (["opening"] if opening is not None else [])
             container = None if self.args.fake else f"demo-{run_id}"
-            self.run = Run(scenario, model, folder, self.command(scenario, model, folder, container), container)
+            self.run = Run(scenario, model, folder, self.command(scenario, model, folder, container, edits), container, edits)
             print(f"{time.strftime('%H:%M:%S')} run {run_id} started", flush=True)
             return 200, self.status()
 
@@ -328,7 +401,7 @@ class DemoServer(ThreadingHTTPServer):
         return {
             "server": "agentic-networks-demo", "v": 1, "fake": self.args.fake,
             "scenarios": SCENARIOS,
-            "models": [{"key": k, "label": MODELS[k], **self.models[k]} for k in MODELS],
+            "models": [{"key": k, "label": MODELS[k], "tool_guide": k in TOOL_GUIDE_MODELS, **self.models[k]} for k in MODELS],
             "checking": self.checking, "checked_at": self.checked_at,
             "previews": sorted(self.previews), "clearing": self.clearing,
             "run": self.run.status() if self.run else None,
@@ -409,7 +482,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "invalid JSON"}, origin)
         path = urlparse(self.path).path
         if path == "/api/runs":
-            return self.reply(*self.server.start_run(body.get("scenario", ""), body.get("model", "")), origin)
+            return self.reply(*self.server.start_run(body.get("scenario", ""), body.get("model", ""),
+                                                     body.get("prompts"), body.get("opening")), origin)
         if path == "/api/runs/stop":
             return self.reply(*self.server.stop_run(), origin)
         if path == "/api/runs/clear":

@@ -7,7 +7,7 @@ import { AgentPanel } from "./panels.js";
 import { ThroughputChart } from "./chart.js";
 import { Spotlight, readingTime } from "./spotlight.js";
 import { identities } from "./identity.js";
-import { PromptsDialog } from "./prompts.js";
+import { OPENING, PromptsDialog } from "./prompts.js";
 import { LiveServer } from "./live.js";
 
 const RECORDINGS = "recordings/";
@@ -24,7 +24,7 @@ const $ = (sel) => document.querySelector(sel);
 const ui = {
   scenario: $("#scenario"), model: $("#model"),
   stage: $(".stage"), svg: $("#graph"), chart: $("#chart"), panel: $("#panel"), spot: $("#spotlight"),
-  title: $("#run-title"), sub: $("#run-sub"), pill: $("#run-pill"),
+  title: $("#run-title"), sub: $("#run-sub"), pill: $("#run-pill"), editedTag: $("#edited-tag"),
   play: $("#play"), speed: $("#speed"), scrub: $("#scrub"), ticks: $("#ticks"), time: $("#time"),
   next: $("#next-msg"), prev: $("#prev-msg"), reports: $("#open-reports"),
   dialog: $("#reports"), reportTabs: $("#report-tabs"), reportBody: $("#report-body"), status: $("#status"),
@@ -54,6 +54,11 @@ let following = null; // id of the server's run on screen (or being started)
 // A run plays by itself only when Play on this page started it; one found already going (on
 // coming back to Live, or after a reload) opens paused.
 let startedHere = false, autoplay = false;
+// Attendees' edits to a scenario's prompts and opening message, kept in this browser:
+// { "<scenario>|<guide|plain>": { <agent or OPENING>: text } }. Prompts for models with a tool
+// guide in their prompt (Qwen, GLM) differ from the others', so they are kept apart.
+const EDITS_KEY = "demo-edits";
+let edits = loadEdits();
 
 // --- loading ------------------------------------------------------------------------
 
@@ -145,6 +150,9 @@ const titleOf = (scenario) => index?.runs.find((r) => r.scenario === scenario)?.
 const scenarioHasMessages = (scenario) => !!index?.runs.some((r) => r.scenario === scenario && r.messages > 0);
 
 function subtitle() {
+  ui.editedTag.hidden = !(mode === "live" && run && (run.preview && !following
+    ? Object.keys(edits[editsKey(run.start.scenario, ui.model.value)] || {}).length
+    : live.status?.run?.id === following && live.status.run.edited?.length));
   if (!run) return;
   if (run.preview) {
     const model = labels[ui.model.value] || ui.model.value;
@@ -391,12 +399,78 @@ function showPreview(scenario) {
     clearStage(titleOf(scenario) || "Live run", "Preparing this scenario…");
     return;
   }
-  openRun(events.map((e) => ({ ...e })));
+  // Each prompt as the chosen model's agents will get it: the attendee's edit, or the original.
+  const { current } = promptsFor(scenario, ui.model.value);
+  openRun(events.map((e) => (e.type === "prompt" ? { ...e, text: current.get(e.node) }
+    : e.type === "run_start" && e.opening ? { ...e, opening: { ...e.opening, text: current.get(OPENING) } } : { ...e })));
   run.preview = true;
+  // Editable until the run starts; a preview standing in while a run starts is not.
+  if (!following) prompts.setRun(run, editorFor(scenario, ui.model.value));
   for (const b of [ui.next, ui.prev]) b.disabled = true;
   ui.scrub.disabled = true;
   subtitle();
   controls();
+}
+
+// --- edited prompts -------------------------------------------------------------------
+
+function loadEdits() {
+  try { return JSON.parse(localStorage.getItem(EDITS_KEY)) || {}; } catch { return {}; }
+}
+
+function saveEdits() {
+  try { localStorage.setItem(EDITS_KEY, JSON.stringify(edits)); } catch { /* private mode: kept for this visit only */ }
+}
+
+const usesGuide = (model) => !!live.status?.models.find((m) => m.key === model)?.tool_guide;
+const editsKey = (scenario, model) => `${scenario}|${usesGuide(model) ? "guide" : "plain"}`;
+
+// A scenario's prompts and opening message on a model: as the paper has them (original), and as
+// the run would get them (current: the attendee's edits on top). An agent with a set model
+// (Celer's LegitAS) goes by its own model for the tool guide.
+function promptsFor(scenario, model) {
+  const events = previews.get(scenario) || [];
+  const original = new Map();
+  for (const e of events.filter((e) => e.type === "prompt")) {
+    original.set(e.node, usesGuide(e.model || model) && e.tool_guide ? `${e.text}\n\n${e.tool_guide}` : e.text);
+  }
+  const opening = events[0]?.opening;
+  if (opening) original.set(OPENING, opening.text);
+  const mine = edits[editsKey(scenario, model)] || {};
+  const current = new Map([...original].map(([id, text]) => [id, mine[id] ?? text]));
+  return { original, current };
+}
+
+function editorFor(scenario, model) {
+  const { original, current } = promptsFor(scenario, model);
+  const key = editsKey(scenario, model);
+  const store = () => {
+    const changed = Object.fromEntries([...current].filter(([id, text]) => text !== original.get(id)));
+    if (Object.keys(changed).length) edits[key] = changed;
+    else delete edits[key];
+    saveEdits();
+    subtitle();
+  };
+  return {
+    original, current,
+    change(id, text) { current.set(id, text); store(); },
+    reset(id) {
+      for (const k of id === null ? [...original.keys()] : [id]) current.set(k, original.get(k));
+      store();
+    },
+  };
+}
+
+// What Play sends: only what differs from the original.
+function changedPrompts(scenario, model) {
+  const { original, current } = promptsFor(scenario, model);
+  const out = { prompts: {} };
+  for (const [id, text] of current) {
+    if (text === original.get(id)) continue;
+    if (id === OPENING) out.opening = text;
+    else out.prompts[id] = text;
+  }
+  return out;
 }
 
 async function loadPreviews(ids) {
@@ -596,6 +670,7 @@ async function liveAction(action) {
 // The replay pauses while the prompts are open, and picks up again when they close.
 function openPrompts(id) {
   if (!prompts.available) return;
+  if (id && run.pseudo.has(id)) id = OPENING; // the person: their message
   if (!$("#prompts").open) resumeAfterPrompts = playing;
   setPlaying(false);
   prompts.open(id);
@@ -632,7 +707,8 @@ ui.scenario.addEventListener("change", () => {
 });
 ui.model.addEventListener("change", () => {
   if (mode === "replay") return load();
-  if (run && !run.preview) { following = null; showPreview(ui.scenario.value); }
+  following = null; // its prompts depend on the model (the tool guide): show it afresh
+  showPreview(ui.scenario.value);
   subtitle();
   controls(); // Play follows the chosen model's availability
 });
@@ -653,7 +729,8 @@ $("#help .close").addEventListener("click", () => $("#help").close());
 ui.play.addEventListener("click", () => {
   if (mode === "live" && run?.preview) {
     startedHere = true;
-    return liveAction(() => live.start(ui.scenario.value, ui.model.value)).finally(() => { startedHere = false; });
+    const { prompts: edited, opening } = changedPrompts(ui.scenario.value, ui.model.value);
+    return liveAction(() => live.start(ui.scenario.value, ui.model.value, edited, opening)).finally(() => { startedHere = false; });
   }
   setPlaying(!playing);
 });

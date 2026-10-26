@@ -14,6 +14,14 @@ server (`demo/server.py`) starts runs that way and streams the file to the page.
 `--describe FILE` writes only what a run would start with, and exits without starting the network
 or calling a model: `run_start` (with empty `model` and `models`), every agent's `prompt`, and a
 `state` `dormant` for each agent that starts idle. The demo draws a scenario from it before running it.
+In a description, each `prompt` also has `tool_guide`: what models called with their tools described
+in the prompt (vLLM, Together) get after it (`text` + blank line + `tool_guide`), and `model` when
+the agent runs on a set model whatever the run's (Celer's LegitAS). `run_start` has `opening` when
+the run starts with a message: `{ "from": "human", "to": "User", "text": … }`.
+
+A run given `--system-prompts DIR` uses `DIR/<agent>.txt` as that agent's whole system prompt,
+exactly (no template, no tool guide added); its `prompt` event shows it. The demo's edited prompts
+reach runs this way.
 
 ## Common fields
 

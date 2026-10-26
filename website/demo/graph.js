@@ -205,13 +205,11 @@ export class Graph {
       if (isPseudo) tip.textContent = name;
       // The state mark sits on the box's top-left corner.
       if (!isPseudo) appendMark(g, { transform: `translate(${-NODE_W / 2 + 2},${-NODE_H / 2 + 2})` });
-      if (!isPseudo) {
-        // Clicking an agent opens its system prompt.
-        g.setAttribute("tabindex", 0);
-        g.setAttribute("role", "button");
-        g.addEventListener("click", () => onSelect?.(id));
-        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); onSelect?.(id); } });
-      }
+      // Clicking an agent opens its system prompt; clicking the person, their message.
+      g.setAttribute("tabindex", 0);
+      g.setAttribute("role", "button");
+      g.addEventListener("click", () => onSelect?.(id));
+      g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); onSelect?.(id); } });
       this.nodeEls.set(id, { g, status, tip, isPseudo });
     }
     this.envelope = el("g", { class: "dot", style: "display:none" }, this.gMsgs);

@@ -82,6 +82,13 @@ def setup_node_logs(node_names: Iterable[str], log_dir: Path, run_stem: str) -> 
         node_logger.propagate = False
 
 
+def load_system_prompts(prompts_dir: "str | None") -> dict[str, str]:
+    """--system-prompts DIR: <node>.txt files, each that node's whole system prompt, used as is."""
+    if not prompts_dir:
+        return {}
+    return {f.stem: f.read_text() for f in sorted(Path(prompts_dir).glob("*.txt"))}
+
+
 def collect_route_tables(network: Network) -> dict[str, str]:
     return {name: host.cmd("ip route show").strip() for name, host in network.hosts.items()}
 

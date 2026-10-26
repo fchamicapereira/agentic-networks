@@ -163,6 +163,11 @@ def _build_tool_guide(tool_defs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def with_tool_guide(system_prompt: str, tool_defs: list[dict]) -> str:
+    """The system prompt as text-tool models (vLLM, Together) get it: with the tool guide after it."""
+    return f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
+
+
 def _split_json_objects(text: str) -> list[str]:
     objects = []
     depth = 0
@@ -320,10 +325,13 @@ class AgentVLLM(Agent):
         tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
         temperature: float = 0.3,
+        tool_guide: bool = True,
     ):
         # Augment the system prompt with a text-based tool guide so local models
         # can fall back to <tool_call> tags if structured tool_calls fails.
-        augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
+        # tool_guide=False: the system prompt is used as given (it already has whatever guide
+        # it should have, e.g. a prompt edited in the demo, which shows the guide).
+        augmented_prompt = with_tool_guide(system_prompt, tool_defs) if tool_guide else system_prompt
         super().__init__(model, name, augmented_prompt, max_tokens, tool_defs, window_size)
         self.temperature = temperature
         self._sampling = _sampling_for_model(model, temperature)

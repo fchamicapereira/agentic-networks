@@ -65,11 +65,12 @@ class EventLog:
             return f"{prefix}{next(counter)}"
 
     def run_start(self, scenario: str, title: str, model: str, models: dict[str, str], topology: dict,
-                  outsiders: "dict[str, str] | None" = None) -> None:
-        """`outsiders`: parties outside the network, each with the agent it talks to ({"human": "User"})."""
+                  outsiders: "dict[str, str] | None" = None, **extra) -> None:
+        """`outsiders`: parties outside the network, each with the agent it talks to ({"human": "User"}).
+        `extra`: further run_start fields (demo/EVENTS.md), e.g. a preview's `opening`."""
         fields = {"outsiders": outsiders} if outsiders else {}
         self.emit("run_start", v=FORMAT_VERSION, source="live", scenario=scenario, title=title,
-                  model=model, models=models, topology=topology, **fields)
+                  model=model, models=models, topology=topology, **fields, **extra)
 
     def run_end(self, reason: str) -> None:
         """The first call wins: a crash after the agents finished must not end the run twice."""

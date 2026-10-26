@@ -30,6 +30,7 @@ from agentic_networks.experiment import (
     collect_node_logs,
     collect_route_tables,
     generate_routes_pdf,
+    load_system_prompts,
     setup_logging,
     setup_node_logs,
     write_agent_reports,
@@ -37,6 +38,15 @@ from agentic_networks.experiment import (
     write_timeline_html,
 )
 from agentic_networks.billing_plot import generate_throughput_plot
+
+# ISP's extra tool (its handler, which needs the running sampler, is added in main), and the
+# agents that get a fresh traffic observation every turn.
+TRAFFIC_TOOL = {
+    "name": "get_traffic_sample",
+    "description": "Take a live measurement of the current per-provider throughput.",
+    "schema": {"type": "object", "properties": {}, "required": []},
+}
+OBSERVING = ("ISP",)
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -270,6 +280,7 @@ def parse_args():
     parser.add_argument("--topology", required=True, metavar="FILE")
     parser.add_argument("--prompts-dir", required=True, metavar="DIR")
     parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--system-prompts", default=None, metavar="DIR", help="<node>.txt files, each that agent's whole system prompt, used exactly as given (the demo's edited prompts)")
     parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     parser.add_argument("--sequential", "-s", action="store_true", default=False)
     parser.add_argument("--vllm-host", default="localhost", metavar="HOST")
@@ -343,7 +354,8 @@ def main():
     # The scenario is named after its prompts (optimizing_billing_policy), in the demo's event stream too.
     if args.describe:
         describe_run(args.describe, prompts_dir.name, prompts_dir.name, Network(load_topology(args.topology)),
-                     args.topology, load_prompts(prompts_dir, args.step_hours, start_day))
+                     args.topology, load_prompts(prompts_dir, args.step_hours, start_day),
+                     extra_tools=[TRAFFIC_TOOL], observing=OBSERVING)
         chown_to_user(Path(args.describe))
         return
 
@@ -459,14 +471,7 @@ def main():
     def clock_reactor(_, step: int) -> None:
         clock.set_elapsed(start_day + step * step_days)
 
-    extra_tools = [
-        {
-            "name": "get_traffic_sample",
-            "description": "Take a live measurement of the current per-provider throughput.",
-            "schema": {"type": "object", "properties": {}, "required": []},
-            "handler": lambda: sampler.measure_now(),
-        }
-    ]
+    extra_tools = [{**TRAFFIC_TOOL, "handler": lambda: sampler.measure_now()}]
 
     try:
         anet = AgenticNetwork(
@@ -481,8 +486,9 @@ def main():
             reactors=[sample_reactor, spike_restore_reactor, clock_reactor],
             post_reactors=[],
             extra_tools=extra_tools,
-            context_fns={"ISP": sampler.measure_now},
+            context_fns={node: sampler.measure_now for node in OBSERVING},
             events=events,
+            system_prompts=load_system_prompts(args.system_prompts),
         )
         results = anet.run(concurrent=not args.sequential, end_run=False)
 

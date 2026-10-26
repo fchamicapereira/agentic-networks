@@ -9,7 +9,7 @@ from .agent_vllm import (
     HistorySummarizer,
     LogSummarizer,
     ThinkingSummarizer,
-    _build_tool_guide,
+    with_tool_guide,
     _sampling_for_model,
     fetch_context_limit,
     _REQUEST_TIMEOUT_SECONDS,
@@ -59,8 +59,10 @@ class AgentTogether(AgentVLLM):
         tool_defs: list[dict] = DEFAULT_TOOL_DEFS,
         window_size: int = DEFAULT_WINDOW_SIZE,
         temperature: float = 0.3,
+        tool_guide: bool = True,
     ):
-        augmented_prompt = f"{system_prompt.rstrip()}\n\n{_build_tool_guide(tool_defs or [])}"
+        # As AgentVLLM: the tool guide goes after the system prompt, unless it is used as given.
+        augmented_prompt = with_tool_guide(system_prompt, tool_defs) if tool_guide else system_prompt
         Agent.__init__(self, model, name, augmented_prompt, max_tokens, tool_defs, window_size)
         self.temperature = temperature
         self._sampling = _sampling_for_model(model, temperature)

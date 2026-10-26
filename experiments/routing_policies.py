@@ -13,6 +13,7 @@ from agentic_networks.experiment import (
     collect_node_logs,
     collect_route_tables,
     generate_routes_pdf,
+    load_system_prompts,
     setup_logging,
     setup_node_logs,
     write_agent_reports,
@@ -46,6 +47,7 @@ def parse_args():
     prompt_group.add_argument("--prompt", "-p", metavar="FILE",
                               help="Single prompt file given to every agent")
     parser.add_argument("--events", default=None, metavar="FILE", help="Also write the run as the demo's event stream (demo/EVENTS.md) to FILE, as it happens")
+    parser.add_argument("--system-prompts", default=None, metavar="DIR", help="<node>.txt files, each that agent's whole system prompt, used exactly as given (the demo's edited prompts)")
     parser.add_argument("--describe", default=None, metavar="FILE", help="Write only what the run would start with (topology, prompts) as the demo's event stream to FILE, and exit: no network, no models")
     prompt_group.add_argument("--prompts-dir", metavar="DIR",
                               help="Directory of per-node prompt files ({node}.txt)")
@@ -96,7 +98,7 @@ def run(seed_stable: bool = False):
     if args.describe:
         prompts, prompt_stem = load_prompts(args)
         describe_run(args.describe, prompt_stem, prompt_stem, Network(load_topology(args.topology)),
-                     args.topology, prompts)
+                     args.topology, prompts, agent_models=agent_models)
         chown_to_user(Path(args.describe))
         return
 
@@ -140,6 +142,7 @@ def run(seed_stable: bool = False):
             window_size=args.window_size,
             agent_models=agent_models,
             events=events,
+            system_prompts=load_system_prompts(args.system_prompts),
         )
         results = anet.run(concurrent=not args.sequential)
 
