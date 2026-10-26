@@ -58,7 +58,7 @@ cross-agent report.
 | `exec` | `id`, `command`, `reason` | The agent runs a shell command. |
 | `exec_result` | `id`, `output`, `exit` | The command's result. `exit` 124 = killed by the harness timeout. |
 | `message` | `id`, `from`, `to`, `text`, `reason` | A knowledge-plane message is sent. `node` = `from`. `from` is `"human"` for the owner's complaint. |
-| `delivered` | `id` | The recipient (`node`) took the message from its inbox, at the start of its next iteration. The viewer animates the message along the edge between `message` and `delivered`. |
+| `delivered` | `id` | The recipient (`node`) took the message from its inbox, at the start of its next iteration. The viewer shows the recipient picking it up; the envelope itself crosses the edge while the message is in the spotlight. |
 | `idle` | `reason` | The agent passed its turn. |
 | `state` | `state`, `summary`?, `reason`? | `"dormant"` (asleep until a message arrives: it idled, or, in runs from before `idle` replaced it, called `report_done`, whose message is `summary`) or `"active"` (woken by a message). |
 | `warning` | `text` | Harness warnings, e.g. a failed command halting a turn, or a truncated response. |

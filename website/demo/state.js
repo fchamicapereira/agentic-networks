@@ -21,8 +21,13 @@ export function parseRun(events) {
     if (e.type === "message" && !nodes.includes(e.from) && !pseudo.has(e.from)) pseudo.set(e.from, e.to);
   }
 
-  const deliveredAt = new Map();
-  for (const e of events) if (e.type === "delivered") deliveredAt.set(e.id, e.t);
+  // Agents that start idle (in the KP scenarios, everyone but the User): their first event
+  // other than the system prompt is going idle. They are drawn idle from the first frame.
+  const startIdle = new Set();
+  for (const id of nodes) {
+    const first = events.find((e) => e.node === id && e.type !== "prompt" && e.type !== "usage");
+    if (first && first.type === "state" && first.state === "dormant") startIdle.add(id);
+  }
 
   const end = events.find((e) => e.type === "run_end");
   return {
@@ -31,7 +36,7 @@ export function parseRun(events) {
     topo,
     nodes,
     pseudo,
-    deliveredAt,
+    startIdle,
     duration: end ? end.t : events[events.length - 1].t,
     endReason: end ? end.reason : "unknown",
     messages: events.filter((e) => e.type === "message"),
@@ -56,7 +61,7 @@ export class World {
     this.now = 0;
     this.node = {};
     for (const id of [...this.run.nodes, ...this.run.pseudo.keys()]) {
-      this.node[id] = { state: "waiting", iter: 0, of: 0, lastT: -Infinity, cmd: null, cmdT: -Infinity, summary: "" };
+      this.node[id] = { state: this.run.startIdle.has(id) ? "dormant" : "waiting", iter: 0, of: 0, lastT: -Infinity, cmd: null, cmdT: -Infinity, summary: "" };
     }
   }
 
@@ -81,7 +86,9 @@ export class World {
     n.lastT = e.t;
     switch (e.type) {
       case "turn":
-        n.state = "thinking";
+        // A sleeping agent's turn only starts because a message is waiting: it stays asleep
+        // until it takes the message ("delivered" below), so the cog follows the envelope.
+        if (n.state !== "dormant") n.state = "thinking";
         n.iter = e.iter;
         n.of = e.of;
         break;
@@ -90,8 +97,11 @@ export class World {
         n.cmd = e.command;
         n.cmdT = e.t;
         break;
+      case "delivered":
+        n.state = "thinking"; // took a message from its inbox; its model is now working on it
+        break;
       case "state":
-        n.state = e.state === "dormant" ? "dormant" : "acting";
+        n.state = e.state === "dormant" ? "dormant" : "thinking"; // woken up: its model is now working
         if (e.state === "dormant") n.summary = e.summary || "";
         break;
       case "assistant":
@@ -108,17 +118,6 @@ export class World {
     const n = this.node[id];
     if (n.state === "acting" && this.now - n.lastT > ACTING_DECAY_S) return "waiting";
     return n.state;
-  }
-
-  // Messages sent but not yet taken from the recipient's inbox.
-  inFlight() {
-    const out = [];
-    for (const m of this.run.messages) {
-      if (m.t > this.now) break;
-      const d = this.run.deliveredAt.get(m.id);
-      if (d === undefined || d > this.now) out.push(m);
-    }
-    return out;
   }
 }
 

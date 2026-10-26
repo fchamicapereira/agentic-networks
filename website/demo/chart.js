@@ -14,10 +14,15 @@ function el(name, attrs = {}, parent) {
 }
 
 export class ThroughputChart {
-  constructor(root, metrics) {
+  constructor(root, metrics, ident) {
     this.root = root;
     this.samples = metrics.filter((m) => m.name === "throughput_mbps");
     this.series = [...new Set(this.samples.flatMap((s) => Object.keys(s.values)))];
+    // A "via_X" series takes transit X's node colour; the rest keep the default series colours.
+    const color = (s) => ident?.get(s.replace(/^via_/, ""))?.color;
+    root.style.removeProperty("--s1");
+    root.style.removeProperty("--s2");
+    this.series.slice(0, 2).forEach((s, i) => { if (color(s)) root.style.setProperty(`--s${i + 1}`, color(s)); });
     const prefix = this.samples[0]?.prefix;
     const maxDay = Math.max(...this.samples.map((s) => s.sim_days));
     const maxV = Math.max(...this.samples.flatMap((s) => Object.values(s.values)));

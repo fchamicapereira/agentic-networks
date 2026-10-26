@@ -1,8 +1,9 @@
 // The message spotlight: one knowledge-plane message at a time, large enough to read on a
-// projector, held on screen for a reading time that depends on its length (real seconds,
-// independent of the playback speed). The app pauses the run clock while a message is up.
+// projector, held on screen for a reading time that depends on its length (real seconds at 1×,
+// divided by the playback speed). The app pauses the run clock while a message is up.
 
 import { redact, setMarkdown } from "./state.js";
+import { badge } from "./identity.js";
 
 const WORDS_PER_S = 3.5; // ~210 words per minute: a comfortable pace for reading off a screen
 const MIN_S = 5, MAX_S = 40;
@@ -17,6 +18,7 @@ const who = (id) => (id === "human" ? "Laptop owner" : id);
 export class Spotlight {
   constructor(root) {
     this.root = root;
+    this.ident = new Map();
     this.head = root.querySelector(".spot-head");
     this.reason = root.querySelector(".spot-reason");
     this.text = root.querySelector(".spot-text");
@@ -26,18 +28,14 @@ export class Spotlight {
   }
 
   // n: position of this message in the run (1-based), of: number of messages in the run.
-  show(m, { level, n, of }) {
+  show(m, { n, of }) {
     this.root.classList.remove("idle");
-    const from = document.createElement("span");
-    from.className = "from";
-    from.textContent = who(m.from);
-    const to = document.createElement("span");
-    to.className = "to";
-    to.textContent = who(m.to);
-    this.head.replaceChildren(from, document.createTextNode(" → "), to);
+    // The card wears the sender's colour; both ends carry their node's colour.
+    this.root.style.setProperty("--c", this.ident.get(m.from)?.color || "");
+    this.head.replaceChildren(badge(this.ident, m.from, who(m.from)), document.createTextNode(" → "), badge(this.ident, m.to, who(m.to)));
     this.count.textContent = `message ${n} of ${of}`;
     // The sender's stated reason for the message: from "Actions" up, like commands' reasons.
-    this.reason.textContent = level >= 2 && m.reason ? redact(m.reason) : "";
+    this.reason.textContent = m.reason ? redact(m.reason) : "";
     this.reason.hidden = !this.reason.textContent;
     setMarkdown(this.text, m.text);
     this.text.scrollTop = 0;
