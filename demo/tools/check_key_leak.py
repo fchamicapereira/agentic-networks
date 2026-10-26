@@ -7,15 +7,11 @@ a Mininet host, the commands an agent could run through the `exec` tool (exactly
 agents use, MininetHost.exec). Every probe's full output is printed, so a wrapper outside the
 container can search it for keys the container was never meant to have.
 
-Two modes, picked from the environment:
-- Direct keys (the paper's setup): the keys are in the container. Reports every probe whose
-  output contains one. Expected to leak; that is the problem the proxy solves.
-- Through demo/llm_proxy.py (ANTHROPIC_BASE_URL set): the container only holds a throwaway run
-  token. Seeing the token is expected. What must hold: the harness reaches the proxy, and an
-  agent does not.
-
-Use fake values only (they must contain LEAKTEST). The full check, with the proxy, is
-demo/tools/test_key_isolation.sh. Exits 1 on a failure, 0 otherwise.
+run_in_docker.sh runs every experiment through tools/llm_proxy.py, so the container only holds
+a throwaway run token in place of each key. Seeing the token is expected. What must hold: the
+harness reaches the proxy, and an agent does not. That the real keys never appear is checked
+by the wrapper, demo/tools/test_key_isolation.sh, which runs this with fake ones. Exits 1 on a
+failure, 0 otherwise.
 """
 
 import os
@@ -48,14 +44,11 @@ def proxy_request(token: str, base_url: str) -> str:
 
 def main() -> int:
     values = {var: os.environ[var] for var in KEY_VARS if os.environ.get(var, "").strip()}
-    if not values:
-        print("error: set at least one of %s to a fake value" % ", ".join(KEY_VARS), file=sys.stderr)
-        return 2
-    if any("LEAKTEST" not in v for v in values.values()):
-        print("error: refusing to run with what looks like a real key; use values containing LEAKTEST", file=sys.stderr)
-        return 2
     proxy = os.environ.get("ANTHROPIC_BASE_URL", "")
-    print(f"Mode: {'through the LLM proxy at ' + proxy if proxy else 'keys passed directly into the container'}")
+    if not values or not proxy:
+        print("error: run this with tools/run_in_docker.sh, which gives it the proxy and a run token", file=sys.stderr)
+        return 2
+    print(f"Through the LLM proxy at {proxy}")
 
     failed = False
     network = Network(load_topology(TOPOLOGIES_DIR / "pair.csv"))
@@ -66,30 +59,24 @@ def main() -> int:
         for probe in PROBES:
             output, _ = host.exec(probe, timeout=20)
             found = sorted(var for var, value in values.items() if value in output)
-            if not found:
-                verdict = "ok"
-            elif proxy:
-                verdict = "token visible (expected: worthless outside the proxy)"
-            else:
-                verdict, failed = "LEAK " + ",".join(found), True
+            verdict = "token visible (expected: worthless outside the proxy)" if found else "ok"
             print(f"  {verdict:<55} {probe}")
             # The full output, for test_key_isolation.sh to search for the proxy's real keys.
             print("    | " + output.replace("\n", "\n    | ").rstrip())
 
-        if proxy:
-            token = values.get("ANTHROPIC_API_KEY", "")
-            # From the harness's own position (the container's main namespaces): must get an
-            # answer. Any HTTP status means the proxy is reachable and responding.
-            harness = subprocess.run(proxy_request(token, proxy), shell=True, capture_output=True, text=True).stdout.strip()
-            ok = harness not in ("", "000")
-            failed |= not ok
-            print(f"\nHarness -> proxy: HTTP {harness or '000'}  {'ok' if ok else 'FAIL: the harness cannot reach the proxy'}")
-            # From an agent's position (a Mininet host): must not get through at all.
-            agent, _ = host.exec(proxy_request(token, proxy), timeout=20)
-            agent = agent.strip()
-            blocked = agent.endswith("000")
-            failed |= not blocked
-            print(f"Agent   -> proxy: {'no connection  ok' if blocked else 'HTTP ' + agent + '  FAIL: an agent can reach the proxy'}")
+        token = values.get("ANTHROPIC_API_KEY", "")
+        # From the harness's own position (the container's main namespaces): must get an
+        # answer. Any HTTP status means the proxy is reachable and responding.
+        harness = subprocess.run(proxy_request(token, proxy), shell=True, capture_output=True, text=True).stdout.strip()
+        ok = harness not in ("", "000")
+        failed |= not ok
+        print(f"\nHarness -> proxy: HTTP {harness or '000'}  {'ok' if ok else 'FAIL: the harness cannot reach the proxy'}")
+        # From an agent's position (a Mininet host): must not get through at all.
+        agent, _ = host.exec(proxy_request(token, proxy), timeout=20)
+        agent = agent.strip()
+        blocked = agent.endswith("000")
+        failed |= not blocked
+        print(f"Agent   -> proxy: {'no connection  ok' if blocked else 'HTTP ' + agent + '  FAIL: an agent can reach the proxy'}")
     finally:
         network.stop()
 

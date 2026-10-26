@@ -1,8 +1,8 @@
 #!/bin/bash
 # test_key_isolation.sh — End-to-end check that agents can't get at our model access.
 #
-# Starts demo/llm_proxy.py holding FAKE "real" keys, runs demo/tools/check_key_leak.py in the
-# experiment container through the proxy (so the container only gets a run token), and then:
+# Runs demo/tools/check_key_leak.py in the experiment container with run_in_docker.sh, its
+# proxy holding FAKE "real" keys (so the container only gets a run token), and then:
 #   1. searches everything the container printed for the fake real keys: they must not appear,
 #      since they never entered the container;
 #   2. relies on check_key_leak.py for the rest: the harness reaches the proxy, agents don't.
@@ -14,31 +14,16 @@ set -u
 cd "$(dirname "$(readlink -f "$0")")/../.."
 
 SCRATCH=$(mktemp -d)
-trap 'kill "$PROXY_PID" 2>/dev/null; rm -rf "$SCRATCH"' EXIT
+trap 'rm -rf "$SCRATCH"' EXIT
 
-# Fake keys for the proxy. They are in this script's environment, so run_in_docker.sh sees
-# them too: the test also catches it passing them into the container.
+# Fake keys. run_in_docker.sh hands them to the proxy it starts on this host; the test
+# also catches it passing them into the container.
 export ANTHROPIC_API_KEY="sk-ant-LEAKTEST-REAL-$RANDOM$RANDOM"
 export OPENAI_API_KEY="sk-LEAKTEST-REAL-$RANDOM$RANDOM"
 export TOGETHER_API_KEY="LEAKTEST-REAL-$RANDOM$RANDOM"
-TOKEN="run-LEAKTEST-token-$RANDOM$RANDOM"
-BRIDGE=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
-PORT=8767
 
-python3 demo/llm_proxy.py --listen "$BRIDGE:$PORT" --token "$TOKEN" > "$SCRATCH/proxy.log" 2>&1 &
-PROXY_PID=$!
-sleep 1
-if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-    echo "The proxy did not start:"; cat "$SCRATCH/proxy.log"; exit 1
-fi
-
-tools/run_in_docker.sh --llm-proxy "http://$BRIDGE:$PORT" --llm-proxy-token "$TOKEN" \
-    demo/tools/check_key_leak.py 2>&1 | tee "$SCRATCH/container.log"
+tools/run_in_docker.sh demo/tools/check_key_leak.py 2>&1 | tee "$SCRATCH/container.log"
 CHECK=${PIPESTATUS[0]}
-
-echo
-echo "Proxy log:"
-sed 's/^/  /' "$SCRATCH/proxy.log"
 
 LEAKED=0
 for VAR in ANTHROPIC_API_KEY OPENAI_API_KEY TOGETHER_API_KEY; do

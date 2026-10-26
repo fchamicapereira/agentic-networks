@@ -7,29 +7,14 @@ PROJECT_ROOT=$(realpath "$SCRIPT_DIR/..")
 IMAGE_NAME="agentic-networks"
 
 usage() {
-    echo "Usage: $0 [--llm-proxy URL --llm-proxy-token TOKEN] <script.py> [args...]"
-    echo "  Builds the Docker image and runs the given Python script inside it."
-    echo "  --llm-proxy, --llm-proxy-token: reach the models through demo/llm_proxy.py, so the"
+    echo "Usage: $0 <script.py> [args...]"
+    echo "  Builds the Docker image and runs the given Python script inside it. The models are"
+    echo "  reached through tools/llm_proxy.py, started for the run and stopped after it, so the"
     echo "  container gets only the proxy's address and a run token, never the real keys."
     exit 1
 }
 
-LLM_PROXY=""
-LLM_PROXY_TOKEN=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --llm-proxy) [ $# -ge 2 ] || usage; LLM_PROXY="$2"; shift 2 ;;
-        --llm-proxy-token) [ $# -ge 2 ] || usage; LLM_PROXY_TOKEN="$2"; shift 2 ;;
-        -h|--help) usage ;;
-        *) break ;;
-    esac
-done
-if { [ -n "$LLM_PROXY" ] && [ -z "$LLM_PROXY_TOKEN" ]; } || { [ -z "$LLM_PROXY" ] && [ -n "$LLM_PROXY_TOKEN" ]; }; then
-    echo "Error: --llm-proxy and --llm-proxy-token go together"
-    exit 1
-fi
-
-if [ $# -lt 1 ]; then
+if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     usage
 fi
 
@@ -62,23 +47,41 @@ if ls /dev/nvidia[0-9]* 2>/dev/null | grep -q .; then
     done
 fi
 
-# Model access. With --llm-proxy (see demo/llm_proxy.py), the container gets only the proxy's
-# address and a throwaway run token: the real keys never enter it, so an agent's commands can't
-# read them. Otherwise the keys are passed in directly, as before.
-if [ -n "$LLM_PROXY" ]; then
-    echo "Model access through $LLM_PROXY (no keys in the container)"
-    KEY_ARGS=(
-        -e ANTHROPIC_API_KEY="$LLM_PROXY_TOKEN" -e ANTHROPIC_BASE_URL="$LLM_PROXY/anthropic"
-        -e OPENAI_API_KEY="$LLM_PROXY_TOKEN" -e OPENAI_BASE_URL="$LLM_PROXY/openai/v1"
-        -e TOGETHER_API_KEY="$LLM_PROXY_TOKEN" -e TOGETHER_BASE_URL="$LLM_PROXY/together/v1"
-    )
-else
-    KEY_ARGS=(
-        -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-        -e OPENAI_API_KEY="${OPENAI_API_KEY:-}"
-        -e TOGETHER_API_KEY="${TOGETHER_API_KEY:-}"
-    )
+# Model access. Every run gets its own tools/llm_proxy.py, holding the real keys on this host,
+# and the container gets only its address and a throwaway run token: the keys never enter it,
+# so an agent's commands can't read them.
+BRIDGE=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
+LLM_PROXY_TOKEN="run-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+PROXY_LOG=$(mktemp)
+# Port 0: any free port, so runs side by side each get their own proxy.
+python3 "$SCRIPT_DIR/llm_proxy.py" --listen "$BRIDGE:0" --token "$LLM_PROXY_TOKEN" > "$PROXY_LOG" 2>&1 &
+PROXY_PID=$!
+# However the run ends, stop the proxy and report what went through it.
+proxy_done() {
+    local status=$?  # the run's, which the script must still exit with
+    kill "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+    TOTALS=$(grep -o 'total [0-9]* calls, [0-9]* in / [0-9]* out' "$PROXY_LOG" | tail -n 1 || true)
+    echo "LLM proxy stopped: ${TOTALS:-no model calls} (tokens)"
+    rm -f "$PROXY_LOG"
+    exit "$status"
+}
+trap proxy_done EXIT
+for _ in $(seq 50); do
+    LLM_PROXY=$(sed -n 's/^LLM proxy on \([^ ]*\).*/\1/p' "$PROXY_LOG")
+    [ -n "$LLM_PROXY" ] && break
+    kill -0 "$PROXY_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if [ -z "$LLM_PROXY" ]; then
+    echo "Error: the LLM proxy did not start:"; cat "$PROXY_LOG"; exit 1
 fi
+echo "Model access through $LLM_PROXY (no keys in the container)"
+KEY_ARGS=(
+    -e ANTHROPIC_API_KEY="$LLM_PROXY_TOKEN" -e ANTHROPIC_BASE_URL="$LLM_PROXY/anthropic"
+    -e OPENAI_API_KEY="$LLM_PROXY_TOKEN" -e OPENAI_BASE_URL="$LLM_PROXY/openai/v1"
+    -e TOGETHER_API_KEY="$LLM_PROXY_TOKEN" -e TOGETHER_BASE_URL="$LLM_PROXY/together/v1"
+)
 
 # --ulimit nofile: Mininet raises RLIMIT_NOFILE on startup; without this the container
 # inherits a low hard limit and setrlimit fails with a harmless but noisy warning.

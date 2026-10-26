@@ -42,12 +42,15 @@ run inside a privileged Docker container. This is the supported path.
 
 ```bash
 # Requires Docker on Linux with privileged container support.
-export ANTHROPIC_API_KEY=sk-...        # forwarded into the container automatically
+export ANTHROPIC_API_KEY=sk-...        # stays on the host (see below)
 export OPENAI_API_KEY=...              # only for gpt-* models
 export TOGETHER_API_KEY=...            # only for glm-* models
 ```
 
-The image is rebuilt automatically on each run; no manual build step is needed.
+The image is rebuilt automatically on each run; no manual build step is needed. The keys
+never enter the container: `tools/run_in_docker.sh` starts a small proxy on the host for each
+run (`tools/llm_proxy.py`), gives the container only a throwaway token for it, and stops it when
+the run ends. Agents run arbitrary shell commands, so this keeps them from reading the keys.
 
 <details>
 <summary>Running without Docker</summary>

@@ -6,9 +6,9 @@ with a throwaway per-run token. The proxy checks the token, swaps in the real ke
 this process holds), forwards the request, and passes the answer back. Agents inside the
 container can read the token, but it is worthless anywhere but here.
 
-    # on this host, outside Docker, with the real keys in the environment:
-    python3 demo/llm_proxy.py                     # prints the flags to give run_in_docker.sh
-    tools/run_in_docker.sh --llm-proxy URL --llm-proxy-token TOKEN <script.py> ...
+tools/run_in_docker.sh starts one for every run and stops it after. It runs on this host,
+outside Docker, where the real keys are, listening on the Docker bridge with a fresh token,
+and run_in_docker.sh prints its totals at the end.
 
 Routes: /anthropic/... -> api.anthropic.com, /openai/... -> api.openai.com,
 /together/... -> api.together.xyz. Only the endpoints the harness uses are forwarded.
@@ -163,7 +163,7 @@ class ProxyServer(ThreadingHTTPServer):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--listen", metavar="HOST:PORT", help="default: this host's docker0 address, port 8766")
+    parser.add_argument("--listen", metavar="HOST:PORT", help="default: this host's docker0 address, port 8766 (port 0: any free port)")
     parser.add_argument("--token", help="the run token the container must present (default: a random one)")
     args = parser.parse_args()
 
@@ -174,10 +174,8 @@ def main() -> int:
     token = args.token or "run-" + secrets.token_urlsafe(24)
 
     server = ProxyServer((host, int(port)), token, keys)
-    url = f"http://{host}:{port}"
-    print(f"LLM proxy on {url}  (providers: {', '.join(sorted(r for r, (_, v, _) in PROVIDERS.items() if v in keys)) or 'none'})")
-    print("Run experiments through it with:")
-    print(f"  tools/run_in_docker.sh --llm-proxy {url} --llm-proxy-token {token} <script.py> ...", flush=True)
+    url = f"http://{host}:{server.server_address[1]}"
+    print(f"LLM proxy on {url}  (providers: {', '.join(sorted(r for r, (_, v, _) in PROVIDERS.items() if v in keys)) or 'none'})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
