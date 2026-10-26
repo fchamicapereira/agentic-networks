@@ -1,0 +1,3 @@
+I observed my interface and routing setup: loopback 45.32.0.1/32, single uplink to ISP (10.4.0.2, REACHABLE), and four downstream prefixes all routed via ISP. A traffic sample showed ~102 Mbps to 200.7.0.0/24 via the "Cheap" path and nothing via "Expensive." I sent ISP an introductory message with my loopback and prefixes, then went idle. No responses came back.
+
+I decided to make no route changes since the network was already converged and correctly configured for a single-homed customer. The inspection and traffic baseline were needed to confirm connectivity and establish reference data for detecting future anomalies. Contacting ISP opened a communication channel in case route changes or relay requests become necessary later.

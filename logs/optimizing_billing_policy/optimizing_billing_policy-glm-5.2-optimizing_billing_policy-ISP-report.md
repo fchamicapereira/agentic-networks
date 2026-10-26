@@ -1,0 +1,5 @@
+I observed a prolonged ~510 Mbps traffic spike to 200.7.0.0/24 lasting ~3 days (days 26.75–29.5), far exceeding the typical "several hours" pattern, with Expensive having 12 discard slots at $5/Mbps and Cheap having 6 discard slots at $1/Mbps.
+
+I decided to alternate routing the spike across both providers six times, balancing discard budget consumption while weighting toward protecting Expensive's costlier slots. As the cycle neared its end with ~4 samples remaining, I routed to Expensive (5 slots left, could absorb all) rather than Cheap (3 slots, could not). When the spike ended at day 29.5, I immediately returned traffic to Cheap for baseline.
+
+This kept Expensive at ~8 samples (within 12 slots) and Cheap at ~4 samples (within 6 slots), yielding a total bill of ~$100 — all from Cheap's baseline traffic — with no discard-window overflow on either provider.

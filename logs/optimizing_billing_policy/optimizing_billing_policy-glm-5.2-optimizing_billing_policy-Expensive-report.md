@@ -1,0 +1,5 @@
+**Observed:** ~102 Mbps of traffic to 200.7.0.0/24 (Remote's network) is flowing ISP → Cheap → Remote, bypassing my direct 20ms peering link to Remote entirely (0 Mbps on my link). Remote uses static routing only and can't influence inbound path selection. My own routing is correctly configured — the problem is ISP choosing Cheap's path over mine.
+
+**Decided:** Pursued a commercial solution with ISP rather than technical changes. Offered ISP $0.50/Mbps transit for 200.7.0.0/24 with no commitment, no exclusivity, standard 90th percentile billing, and 30-day notice for changes.
+
+**Why:** Since Remote can't do BGP manipulation and my routing is already correct, the only lever is convincing ISP to prefer my path. My marginal cost is near zero (settlement-free peering to Remote), so $0.50/Mbps is profitable while being competitive enough to undercut whatever ISP pays Cheap. Flexible terms remove adoption barriers since ISP emphasized their traffic engineering is dynamic.
