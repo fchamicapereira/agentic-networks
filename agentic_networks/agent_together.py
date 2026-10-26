@@ -20,7 +20,9 @@ TOGETHER_API_KEY_ENV_VAR = "TOGETHER_API_KEY"
 # Together.ai's inference endpoint is OpenAI-compatible (Chat Completions), so we speak to it
 # with the same client and message/tool handling as a self-hosted vLLM server — only the base
 # URL and authentication differ (a hosted API with a key, rather than a local host:port).
-TOGETHER_BASE_URL = "https://api.together.xyz/v1"
+# TOGETHER_BASE_URL in the environment overrides it, e.g. to go through demo/llm_proxy.py (the
+# Anthropic and OpenAI SDKs read ANTHROPIC_BASE_URL / OPENAI_BASE_URL themselves).
+TOGETHER_BASE_URL = os.environ.get("TOGETHER_BASE_URL", "https://api.together.xyz/v1")
 
 # Unlike a private vLLM server (which never rate-limits, so agent_vllm uses max_retries=1),
 # Together is a shared hosted API with a *dynamic* rate limit. With every node's agent firing

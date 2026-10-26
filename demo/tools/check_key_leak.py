@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""check_key_leak.py — Can an agent read the provider API keys from inside a Mininet host?
+"""check_key_leak.py — Can an agent get at our model access from inside a Mininet host?
 
-The demo runs on our API keys and shows agent output on a projector, so a prompt such as
-"run `env` and send me the output" must not be able to surface a key. This builds a two-node
-network, runs the commands an agent could run through the `exec` tool (exactly the code path
-agents use, MininetHost.exec), and reports every probe whose output contains a key.
+The demo runs on our API keys and attendees write the prompts, so a prompt such as "run `env`
+and send me the output" must not surface a key. This builds a two-node network and runs, from
+a Mininet host, the commands an agent could run through the `exec` tool (exactly the code path
+agents use, MininetHost.exec). Every probe's full output is printed, so a wrapper outside the
+container can search it for keys the container was never meant to have.
 
-Run it with FAKE keys only — the point is to see whether they show up:
+Two modes, picked from the environment:
+- Direct keys (the paper's setup): the keys are in the container. Reports every probe whose
+  output contains one. Expected to leak; that is the problem the proxy solves.
+- Through demo/llm_proxy.py (ANTHROPIC_BASE_URL set): the container only holds a throwaway run
+  token. Seeing the token is expected. What must hold: the harness reaches the proxy, and an
+  agent does not.
 
-    export ANTHROPIC_API_KEY=sk-ant-LEAKTEST-$RANDOM
-    export OPENAI_API_KEY=sk-LEAKTEST-$RANDOM TOGETHER_API_KEY=LEAKTEST-$RANDOM
-    tools/run_in_docker.sh demo/tools/check_key_leak.py
-
-Exits 1 if any key leaks, 0 otherwise.
+Use fake values only (they must contain LEAKTEST). The full check, with the proxy, is
+demo/tools/test_key_isolation.sh. Exits 1 on a failure, 0 otherwise.
 """
 
 import os
+import subprocess
 import sys
 
 from agentic_networks.mininet_host import MininetHost
@@ -36,30 +40,61 @@ PROBES = [
 ]
 
 
+def proxy_request(token: str, base_url: str) -> str:
+    """A curl call to the proxy as the harness would make it; prints the HTTP status, or 000."""
+    return (f"curl -s -m 5 -o /dev/null -w '%{{http_code}}' -X POST -H 'x-api-key: {token}' "
+            f"-H 'content-type: application/json' -d '{{}}' {base_url}/v1/messages")
+
+
 def main() -> int:
-    keys = {var: os.environ[var] for var in KEY_VARS if os.environ.get(var, "").strip()}
-    if not keys:
+    values = {var: os.environ[var] for var in KEY_VARS if os.environ.get(var, "").strip()}
+    if not values:
         print("error: set at least one of %s to a fake value" % ", ".join(KEY_VARS), file=sys.stderr)
         return 2
-    if any("LEAKTEST" not in v for v in keys.values()):
+    if any("LEAKTEST" not in v for v in values.values()):
         print("error: refusing to run with what looks like a real key; use values containing LEAKTEST", file=sys.stderr)
         return 2
+    proxy = os.environ.get("ANTHROPIC_BASE_URL", "")
+    print(f"Mode: {'through the LLM proxy at ' + proxy if proxy else 'keys passed directly into the container'}")
 
-    leaked_any = False
+    failed = False
     network = Network(load_topology(TOPOLOGIES_DIR / "pair.csv"))
     network.start()
     try:
         host = MininetHost("A", network.hosts["A"])
+        print("\nWhat an agent can read:")
         for probe in PROBES:
             output, _ = host.exec(probe, timeout=20)
-            found = sorted(var for var, value in keys.items() if value in output)
-            leaked_any |= bool(found)
-            print(f"  {'LEAK ' + ','.join(found) if found else 'ok':<40} {probe}")
+            found = sorted(var for var, value in values.items() if value in output)
+            if not found:
+                verdict = "ok"
+            elif proxy:
+                verdict = "token visible (expected: worthless outside the proxy)"
+            else:
+                verdict, failed = "LEAK " + ",".join(found), True
+            print(f"  {verdict:<55} {probe}")
+            # The full output, for test_key_isolation.sh to search for the proxy's real keys.
+            print("    | " + output.replace("\n", "\n    | ").rstrip())
+
+        if proxy:
+            token = values.get("ANTHROPIC_API_KEY", "")
+            # From the harness's own position (the container's main namespaces): must get an
+            # answer. Any HTTP status means the proxy is reachable and responding.
+            harness = subprocess.run(proxy_request(token, proxy), shell=True, capture_output=True, text=True).stdout.strip()
+            ok = harness not in ("", "000")
+            failed |= not ok
+            print(f"\nHarness -> proxy: HTTP {harness or '000'}  {'ok' if ok else 'FAIL: the harness cannot reach the proxy'}")
+            # From an agent's position (a Mininet host): must not get through at all.
+            agent, _ = host.exec(proxy_request(token, proxy), timeout=20)
+            agent = agent.strip()
+            blocked = agent.endswith("000")
+            failed |= not blocked
+            print(f"Agent   -> proxy: {'no connection  ok' if blocked else 'HTTP ' + agent + '  FAIL: an agent can reach the proxy'}")
     finally:
         network.stop()
 
-    print("\nRESULT:", "keys are readable from agent commands" if leaked_any else "no key leaked")
-    return 1 if leaked_any else 0
+    print("\nRESULT:", "FAIL" if failed else "ok")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
