@@ -142,7 +142,11 @@ def write_final_report(
     log_dir: Path,
     run_stem: str,
     logger: logging.Logger,
+    extra_context: str = "",
 ) -> None:
+    # extra_context: further sections for the judge, e.g. figures the harness computed from the
+    # run (appended after the routing tables).
+    #
     # Agent self-reports are deliberately excluded from the final-report context: they are
     # themselves LLM-generated and have been observed to confabulate outcomes that contradict the
     # logs. The final report must be grounded only in the raw logs and the collected routing state.
@@ -156,6 +160,7 @@ def write_final_report(
         + logs_section
         + "\n\n=== Routing Tables ===\n\n"
         + routing_section
+        + ("\n\n" + extra_context if extra_context else "")
     )
 
     logger.info("Generating final report with model %s...", model_key)
@@ -190,6 +195,7 @@ def write_final_report(
             + compressed_logs_section
             + "\n\n=== Routing Tables ===\n\n"
             + routing_section
+            + ("\n\n" + extra_context if extra_context else "")
         )
 
     text = agent.query(report_context)

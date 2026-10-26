@@ -1,8 +1,9 @@
 The goal of this experiment was to test whether ISP, an LLM-based routing agent, could
 reason about percentile transit billing and make routing decisions that minimise cost.
-The experiment started with all traffic routed through Expensive. Recurring traffic spikes
-(~100 Mbps baseline rising to ~500 Mbps, lasting from a few hours up to several days) were
-injected throughout the billing period.
+The run covers the last days of a 30-day billing cycle. Until it started, TinyInc's traffic
+had been a steady ~100 Mbps baseline, all carried via Cheap, and the run starts with routing
+via Cheap. During the run, traffic spikes (~100 Mbps baseline rising to ~500 Mbps, lasting
+from a few hours up to several days) were injected.
 
 The billing model — read this carefully before judging any decision:
 - Expensive: $5.00/Mbps, billed at the 90th percentile. The top 10% of samples are
@@ -31,7 +32,11 @@ Expensive exceed 10% of Expensive's samples over the billing period, the surplus
 discarded and starts setting Expensive's 90th percentile, at $5/Mbps — at which point
 continuing to push spikes through Expensive becomes very costly and falling back to Cheap
 becomes the correct move (a spike on Cheap costs $1/Mbps; the same spike on Expensive, once
-the budget is gone, costs $5/Mbps). Reasoning about this budget — tracking how much of the
+the budget is gone, costs $5/Mbps). In this experiment the overflow fits inside Cheap's own
+top-5% window, so an agent that moves exactly the overflow to Cheap keeps both providers
+billed at baseline or below. Once a
+provider's billed percentile is already pinned at spike level, further spike traffic there
+costs nothing extra; judge decisions made after that point accordingly. Reasoning about this budget — tracking how much of the
 free window has been spent, anticipating exhaustion, and switching back to Cheap when the
 budget runs out — is the most sophisticated behaviour available in this experiment and
 should be credited as such. A reversion to Cheap late in a long spike is not a failure if it
@@ -39,7 +44,11 @@ is justified by budget exhaustion; it is a failure if it is justified by naive p
 reasoning. Judge the reasoning, not just the routing table.
 
 Analyse the agent logs, routing tables, and traffic samples. For every finding, cite
-specific log evidence and quote the relevant excerpt.
+specific log evidence and quote the relevant excerpt. The run ends when the billing cycle
+does, so ISP's planning horizon and the bill end together. The harness computes
+the bill from the samples and appends it below ("Bill"), together with what the reference
+strategies would have cost on the same traffic. Use those figures for every cost statement
+rather than estimating your own, and judge ISP's reasoning against them.
 
 1. Initial state recognition:
    Did ISP examine its routing table and billing contracts at the start? Did it notice that
@@ -48,9 +57,9 @@ specific log evidence and quote the relevant excerpt.
    traffic samples, and what conclusions did it draw from them?
 
 2. The baseline routing decision:
-   Did ISP move baseline traffic from Expensive to Cheap? At what simulated day (from the
-   elapsed_days signal) did the reroute occur? What command did it use? Did it reroute all
-   traffic or only specific prefixes? What reasoning did it give?
+   Did ISP keep the baseline on Cheap, or did it move it? If it changed the baseline's
+   provider, at what simulated day (from the elapsed_days signal), with what command, and
+   with what reasoning?
 
 3. Understanding of percentile billing:
    Did ISP demonstrate understanding that billing discards the busiest samples — i.e. that
@@ -117,9 +126,11 @@ specific log evidence and quote the relevant excerpt.
 
 Conclude with a verdict: how well did ISP optimise its transit costs? Rank its behaviour on
 this scale:
-  (1) No action taken — everything left on Expensive.
-  (2) Naive reroute — all traffic, spikes included, moved to Cheap. Cheaper than (1), but the
-      spikes now inflate Cheap's 95th percentile.
+  (1) Worse than doing nothing — changes that raise the bill above leaving everything on
+      Cheap (e.g. moving the baseline to Expensive, or pushing spikes onto Expensive past its
+      discard window).
+  (2) No optimisation — everything left on Cheap, spikes included, so the spikes set Cheap's
+      95th percentile.
   (3) Partial optimisation — baseline on Cheap plus some explicit reasoning about percentiles
       and discard windows, but the spikes were not (or only inconsistently) shifted to
       Expensive.

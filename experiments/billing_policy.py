@@ -2,8 +2,9 @@
 """
 Billing-policy routing experiment.
 
-Starts with routing pre-configured (all ISP traffic through Expensive),
-background UDP traffic already flowing, and a simulated billing clock running.
+The run is the end of a 30-day billing cycle: until it starts, TinyInc's traffic was a steady
+baseline carried via Cheap. It starts with routing pre-configured (all ISP traffic through
+Cheap), background UDP traffic already flowing, and a simulated billing clock running.
 ISP agents must figure out how to minimise transit costs given percentile billing.
 
 Multiple traffic spikes are injected at configurable hours throughout the billing
@@ -12,6 +13,7 @@ period. A throughput plot is generated at the end.
 
 import argparse
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,7 +95,7 @@ def _nexthop(network: Network, from_node: str, to_node: str) -> str:
 
 
 def setup_routing(network: Network) -> None:
-    """Pre-configure full routing. ISP routes Remote via Expensive (suboptimal)."""
+    """Pre-configure full routing. ISP routes Remote via Cheap, as it has all billing cycle."""
 
     loopbacks = loopbacks_from_network(network)
 
@@ -112,14 +114,14 @@ def setup_routing(network: Network) -> None:
         _, pfx = loopbacks[node]
         add("TinyInc", pfx, nh)
 
-    # ISP: customers via their link; Remote via Expensive (SUBOPTIMAL starting point)
+    # ISP: customers via their link; Remote via Cheap (the baseline's provider so far)
     _, tinyinc_pfx = loopbacks["TinyInc"]
     add("ISP", tinyinc_pfx, _nexthop(network, "ISP", "TinyInc"))
     _, exp_pfx = loopbacks["Expensive"]
     add("ISP", exp_pfx, _nexthop(network, "ISP", "Expensive"))
     _, chp_pfx = loopbacks["Cheap"]
     add("ISP", chp_pfx, _nexthop(network, "ISP", "Cheap"))
-    add("ISP", loopbacks["Remote"][1], _nexthop(network, "ISP", "Expensive"))  # suboptimal
+    add("ISP", loopbacks["Remote"][1], _nexthop(network, "ISP", "Cheap"))
 
     # Expensive: ISP/TinyInc back via ISP link; Remote/Cheap via Remote link
     nh_isp = _nexthop(network, "Expensive", "ISP")
@@ -185,6 +187,72 @@ def save_plot_data(
 
 
 # ---------------------------------------------------------------------------
+# Bill
+# ---------------------------------------------------------------------------
+
+BILLING_DAYS = 30
+SAMPLE_SETTLE_SECONDS = 0.5
+# provider -> ($ per Mbps, fraction of samples discarded), as in ISP's prompt
+CONTRACTS = {"Expensive": (5.0, 0.10), "Cheap": (1.0, 0.05)}
+
+
+def _percentile_bill(values: list[float], samples_in_period: int, rate: float, discard: float) -> tuple[float, float]:
+    # values: every nonzero sample of the cycle; the rest of the period counts as 0 Mbps.
+    ranked = sorted(values, reverse=True) + [0.0] * (samples_in_period - len(values))
+    mbps = ranked[math.floor(samples_in_period * discard)]
+    return mbps, mbps * rate
+
+
+def compute_bills(samples: list[dict], prefix: str, samples_per_step: int, sample_interval_minutes: float, start_day: float) -> str:
+    """The bill from the recorded samples, and what reference strategies would have cost on the
+    same traffic. The cycle's first start_day days carried the baseline via Cheap (the prompt's
+    history). Strategies assign whole steps."""
+    n = round(BILLING_DAYS * 24 * 60 / sample_interval_minutes)
+    rows = [s["mbps"][prefix] for s in samples]
+
+    steps = [[sum(r.values()) for r in rows[i:i + samples_per_step]] for i in range(0, len(rows), samples_per_step)]
+    level = [sum(st) / len(st) for st in steps]
+    baseline = min(level)
+    history = [baseline] * round(start_day * 24 * 60 / sample_interval_minutes)
+
+    def bill(per_provider: dict[str, list[float]]) -> tuple[float, str]:
+        total, parts = 0.0, []
+        for provider, (rate, discard) in CONTRACTS.items():
+            values = per_provider[provider] + (history if provider == "Cheap" else [])
+            mbps, cost = _percentile_bill(values, n, rate, discard)
+            total += cost
+            parts.append(f"{provider} {mbps:.0f} Mbps billed = ${cost:,.0f}")
+        return total, "; ".join(parts)
+
+    actual_total, actual = bill({p: [r[f"via_{p}"] for r in rows] for p in CONTRACTS})
+
+    threshold = (baseline + max(level)) / 2
+    spike_steps = [i for i, v in enumerate(level) if v > threshold]
+
+    def assign(on_expensive: set[int]) -> tuple[float, str]:
+        per = {"Expensive": [], "Cheap": []}
+        for i, st in enumerate(steps):
+            per["Expensive" if i in on_expensive else "Cheap"] += st
+        return bill(per)
+
+    refs = {
+        "All traffic on Cheap": assign(set()),
+        "Spikes always on Expensive": assign(set(spike_steps)),
+    }
+    # Best split in hindsight: the first k spike steps on Expensive, the rest on Cheap.
+    refs["Best in hindsight (spikes on Expensive while its discard window lasts, rest on Cheap)"] = min(
+        (assign(set(spike_steps[:k])) for k in range(len(spike_steps) + 1)), key=lambda r: r[0])
+
+    lines = [
+        "=== Bill ===",
+        f"30-day percentile bill over {n} 15-minute samples; the {start_day:g} days before the run carried a {baseline:.0f} Mbps baseline via Cheap.",
+        f"Actual: ${actual_total:,.0f} ({actual})",
+        "Reference strategies on the same traffic:",
+    ] + [f"  {name}: ${total:,.0f} ({detail})" for name, (total, detail) in refs.items()]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -204,7 +272,7 @@ def parse_args():
     parser.add_argument("--vllm-port", type=int, default=8000, metavar="PORT")
 
     # Billing-specific
-    parser.add_argument("--days", type=int, default=14, metavar="N", help="Experiment duration in days (default: 14); the billing period is always 30 days")
+    parser.add_argument("--days", type=int, default=9, metavar="N", help="Experiment duration in days (default: 9): the last N days of the 30-day billing period")
     parser.add_argument("--step-hours", type=float, default=6.0, metavar="H", help="Simulated hours per iteration (default: 6)")
     parser.add_argument("--baseline-mbps", type=float, default=100.0, metavar="M", help="Baseline traffic flow rate in Mbps (default: 100)")
     parser.add_argument("--spike-mbps", type=float, default=500.0, metavar="M", help="Spike traffic flow rate in Mbps (default: 500)")
@@ -217,17 +285,18 @@ def parse_args():
 
     parser.add_argument(
         "--spike-hours", type=spike_window, nargs="+",
+        # Three short spikes two days apart (the advertised pattern), then a long one that
+        # outlasts Expensive's discard window but fits once the overflow goes to Cheap: the
+        # budget-aware strategy bills ~$100, all-on-Cheap ~$500, spikes-always-on-Expensive
+        # ~$2,650 (30-day period, 6-hour steps, baseline on Cheap before the run).
         default=[
-            SpikeWindow(time=24,  duration=6),
-            SpikeWindow(time=42,  duration=6),
-            SpikeWindow(time=72,  duration=6),
-            SpikeWindow(time=96,  duration=12),
-            SpikeWindow(time=120, duration=6),
-            SpikeWindow(time=144, duration=6),
-            SpikeWindow(time=168, duration=120),
+            SpikeWindow(time=12,  duration=6),
+            SpikeWindow(time=60,  duration=6),
+            SpikeWindow(time=108, duration=6),
+            SpikeWindow(time=132, duration=72),
         ],
         metavar="HOUR:DURATION",
-        help="Spike windows as HOUR:DURATION pairs (default: 24:6 42:6 72:6 96:12 120:6 144:6 168:120)",
+        help="Spike windows as HOUR:DURATION pairs (default: 12:6 60:6 108:6 132:72)",
     )
     parser.add_argument("--sample-interval-minutes", type=float, default=15.0, metavar="M", help="Virtual minutes between billing samples (default: 15)")
     return parser.parse_args()
@@ -240,6 +309,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not 0 < args.days <= BILLING_DAYS:
+        raise SystemExit(f"--days must be between 1 and {BILLING_DAYS}")
+    # The run is the end of the billing cycle, start_day days in (the baseline rode on Cheap until then).
+    start_day = BILLING_DAYS - args.days
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -251,7 +324,7 @@ def main():
     network = Network(load_topology(args.topology))
     network.start()
 
-    logger.info("Pre-configuring routing (ISP → Remote via Expensive)...")
+    logger.info("Pre-configuring routing (ISP → Remote via Cheap)...")
     setup_routing(network)
 
     logger.info("Verifying TinyInc reaches Remote...")
@@ -261,7 +334,13 @@ def main():
     prompts_dir = Path(args.prompts_dir)
     step_hours_val = int(args.step_hours) if args.step_hours == int(args.step_hours) else args.step_hours
     billing_samples_val = round(30 * 24 / args.step_hours)
-    template_vars = {"step_hours": str(step_hours_val), "billing_samples": str(billing_samples_val)}
+    history_samples_val = round(start_day * 24 / args.step_hours)
+    template_vars = {
+        "step_hours": str(step_hours_val),
+        "billing_samples": str(billing_samples_val),
+        "start_day": str(start_day),
+        "history_samples": str(history_samples_val),
+    }
     def _render(text: str) -> str:
         for key, val in template_vars.items():
             text = text.replace("{" + key + "}", val)
@@ -277,8 +356,9 @@ def main():
     logger.info("Writing per-node logs to %s/", log_dir)
     logger.info("Using model: %s (%s)", args.model, MODELS[args.model])
 
-    # Billing clock — always a 30-day period; the experiment covers only args.days of it
-    clock = BillingClock(total_days=30)
+    # Billing clock — always a 30-day period; the experiment covers its last args.days days.
+    # The clock (what ISP sees) runs from start_day; sample labels stay relative to the run.
+    clock = BillingClock(total_days=BILLING_DAYS)
 
     # Determine ISP's provider interfaces from topology
     provider_ifaces = {iface.peer: iface.iface for iface in network.ifaces_per_host["ISP"] if iface.peer in ("Expensive", "Cheap")}
@@ -333,6 +413,9 @@ def main():
         # billing record reflects what agents actually configured.
         if step == 0:
             return
+        # Let packets still queued on the previous route drain first (up to a link's delay,
+        # 60 ms on Cheap); otherwise the first sample after a switch bills them to the old one.
+        time.sleep(SAMPLE_SETTLE_SECONDS)
         prev_elapsed_start = (step - 1) * step_days
         for i in range(samples_per_step):
             sampler.sample(elapsed_override=prev_elapsed_start + i * sample_interval_days)
@@ -349,7 +432,7 @@ def main():
             logger.info("Spike started at hour %.0f", step * step_hours)
 
     def clock_reactor(_, step: int) -> None:
-        clock.set_elapsed(step * step_days)
+        clock.set_elapsed(start_day + step * step_days)
 
     extra_tools = [
         {
@@ -378,7 +461,8 @@ def main():
         results = anet.run(concurrent=not args.sequential)
 
         # Capture the final step's routing state (step max_iterations-1)
-        clock.set_elapsed(args.days)
+        clock.set_elapsed(BILLING_DAYS)
+        time.sleep(SAMPLE_SETTLE_SECONDS)
         final_elapsed_start = (max_iterations - 1) * step_days
         for i in range(samples_per_step):
             sampler.sample(elapsed_override=final_elapsed_start + i * sample_interval_days)
@@ -393,9 +477,12 @@ def main():
         # Collect routing state
         route_tables = collect_route_tables(network)
 
+        bills = compute_bills(sampler.samples, remote_prefix, samples_per_step, args.sample_interval_minutes, start_day)
+        logger.info("\n%s", bills)
+
         report_path = log_dir / f"{run_stem}.txt"
         routing_section = "\n".join(f"--- {n} ---\n{route_tables[n] or '(empty)'}" for n in sorted(route_tables))
-        report_path.write_text("=== Routing Tables ===\n\n" + routing_section + "\n")
+        report_path.write_text(bills + "\n\n=== Routing Tables ===\n\n" + routing_section + "\n")
         logger.info("Report written to %s", report_path)
 
         # Agent self-reports
@@ -422,6 +509,7 @@ def main():
                 log_dir=log_dir,
                 run_stem=run_stem,
                 logger=logger,
+                extra_context=bills,
             )
         else:
             print("No final-report.txt found in prompts directory, skipping final report generation.")
