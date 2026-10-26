@@ -29,9 +29,14 @@ export class AgentPanel {
     this.root = root;
     this.run = run;
     this.list = root.querySelector(".panel-list");
-    this.feed = run.events.filter((e) => PANEL_TYPES.has(e.type) && run.nodes.includes(e.node));
     this.shown = 0; // number of feed entries already rendered
+    this.refeed();
     this.list.replaceChildren();
+  }
+
+  // Pick up events appended to the run since (a live run grows; the entries shown stay).
+  refeed() {
+    this.feed = this.run.events.filter((e) => PANEL_TYPES.has(e.type) && this.run.nodes.includes(e.node));
   }
 
   show(world) {
@@ -47,11 +52,13 @@ export class AgentPanel {
       this.shown++;
     }
     if (added && stick) this.list.scrollTop = this.list.scrollHeight;
-    if (!this.list.childElementCount) {
-      this.list.appendChild(h("li", "empty", world.now === 0 ? "Press play to start the replay." : "Nothing yet."));
-    } else {
-      this.list.querySelector(".empty")?.remove();
-    }
+    // The placeholder is not an entry: count entries only, or it would remove itself on one
+    // frame and come back on the next (a visible flicker while playing).
+    const empty = this.list.querySelector(".empty");
+    const note = world.now === 0 && !this.run.live ? "Press play to start the replay." : "Nothing yet.";
+    if (this.shown) empty?.remove();
+    else if (!empty) this.list.appendChild(h("li", "empty", note));
+    else if (empty.textContent !== note) empty.textContent = note;
   }
 
   render(e) {

@@ -170,26 +170,17 @@ export class Graph {
     const minY = Math.min(...ys) - NODE_H / 2 - PAD * 0.8, maxY = Math.max(...ys) + NODE_H / 2 + PAD * 0.8;
     svg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
 
-    const defs = el("defs", {}, svg);
-    // userSpaceOnUse: arrowheads keep their size when a link is drawn thicker (focus).
-    const marker = el("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 11, markerHeight: 11, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" }, defs);
-    el("path", { d: "M0,0 L10,5 L0,10 z", class: "arrowhead" }, marker);
-
     // While a message is in the spotlight, its link is lit up underneath in the sender's colour.
-    // No arrowhead: arrows show business relationships, and the envelope shows the direction.
     this.focusLine = el("line", { class: "focus-link", style: "display:none" }, svg);
+    // Links are plain lines: who is whose provider or peer is left out of the picture. The
+    // owner's link to their laptop (a pseudo-node) is dashed, since it is not a network link.
     const gEdges = el("g", { class: "edges" }, svg);
-    const rel = new Map(run.topo.links.map((l) => [`${l.a}|${l.b}`, l.rel]));
+    const links = new Set(run.topo.links.map((l) => `${l.a}|${l.b}`));
     this.edgeEls = new Map(); // "a|b" and "b|a" -> line
     for (const [a, b] of edges) {
-      const r = rel.get(`${a}|${b}`) || "pseudo";
-      // Arrow points from provider to customer.
-      const [from, to] = r === "customer/provider" ? [b, a] : [a, b];
-      const p1 = pos.get(from), p2 = pos.get(to);
+      const p1 = pos.get(a), p2 = pos.get(b);
       const s = boxExit(p1, p2.x, p2.y), e = boxExit(p2, p1.x, p1.y);
-      const cls = r === "peer/peer" ? "edge peer" : r === "pseudo" ? "edge pseudo" : "edge transit";
-      const line = el("line", { x1: s.x, y1: s.y, x2: e.x, y2: e.y, class: cls }, gEdges);
-      if (cls === "edge transit") line.setAttribute("marker-end", "url(#arrow)");
+      const line = el("line", { x1: s.x, y1: s.y, x2: e.x, y2: e.y, class: links.has(`${a}|${b}`) ? "edge" : "edge pseudo" }, gEdges);
       this.edgeEls.set(`${a}|${b}`, line).set(`${b}|${a}`, line);
     }
 

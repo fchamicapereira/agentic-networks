@@ -11,12 +11,19 @@ export function parseJsonl(text) {
 export function parseRun(events) {
   const start = events[0];
   if (!start || start.type !== "run_start") throw new Error("recording does not begin with run_start");
-  const topo = start.topology;
-  const nodes = topo.nodes.map((n) => n.id);
+  const run = { start, events, topo: start.topology, nodes: start.topology.nodes.map((n) => n.id), models: start.models || {} };
+  indexRun(run);
+  return run;
+}
+
+// The parts of a run derived from its events. A live run grows: after appending to
+// run.events, call this again (it is cheap at these sizes).
+export function indexRun(run) {
+  const { events, nodes } = run;
 
   // Senders outside the topology (the laptop owner in the KP scenarios) are drawn as
-  // pseudo-nodes attached to whoever they talk to.
-  const pseudo = new Map();
+  // pseudo-nodes attached to whoever they talk to. Live runs name them up front (outsiders).
+  const pseudo = new Map(Object.entries(run.start.outsiders || {}));
   for (const e of events) {
     if (e.type === "message" && !nodes.includes(e.from) && !pseudo.has(e.from)) pseudo.set(e.from, e.to);
   }
@@ -30,20 +37,16 @@ export function parseRun(events) {
   }
 
   const end = events.find((e) => e.type === "run_end");
-  return {
-    start,
-    events,
-    topo,
-    nodes,
+  Object.assign(run, {
     pseudo,
     startIdle,
+    ended: !!end,
     duration: end ? end.t : events[events.length - 1].t,
     endReason: end ? end.reason : "unknown",
     messages: events.filter((e) => e.type === "message"),
     metrics: events.filter((e) => e.type === "metric"),
     reports: events.filter((e) => e.type === "report"),
-    models: start.models || {},
-  };
+  });
 }
 
 // Node states shown on the graph. "acting" decays to "waiting" once the node has been quiet

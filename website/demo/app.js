@@ -1,27 +1,35 @@
-// Demo viewer: replays a recorded run (demo/EVENTS.md) as a live network.
+// Demo viewer: replays a recorded run (demo/EVENTS.md) as a live network, or, in Live mode,
+// follows a run going on a demo server on this machine (demo/server.py, see live.js).
 
-import { Clock, World, fmtTime, parseJsonl, parseRun, redact } from "./state.js";
+import { Clock, World, fmtTime, indexRun, parseJsonl, parseRun, redact } from "./state.js";
 import { Graph, appendMark } from "./graph.js";
 import { AgentPanel } from "./panels.js";
 import { ThroughputChart } from "./chart.js";
 import { Spotlight, readingTime } from "./spotlight.js";
 import { identities } from "./identity.js";
 import { PromptsDialog } from "./prompts.js";
+import { LiveServer } from "./live.js";
 
 const RECORDINGS = "recordings/";
 const PAUSE_CAP_S = 3; // longest pause between events, in run seconds (mostly waiting on the models)
 const COMMAND_REAL_S = 1.6; // how long a finished command stays under its node, in real seconds
 const FLIGHT_S = 1.5; // how long the spotlighted message's envelope takes to cross its link, at 1×
 const SPEEDS = [1, 2, 4, 8, 16, 32];
+const DEFAULT_PORT = 8800;
+// How a live run ended, for the subtitle (run_end reasons, demo/EVENTS.md).
+const ENDINGS = { all_dormant: "every agent idle", max_iterations: "out of iterations", stopped: "stopped",
+  budget: "out of budget", error: "failed", unknown: "ended" };
 
 const $ = (sel) => document.querySelector(sel);
 const ui = {
   scenario: $("#scenario"), model: $("#model"),
   stage: $(".stage"), svg: $("#graph"), chart: $("#chart"), panel: $("#panel"), spot: $("#spotlight"),
-  title: $("#run-title"), sub: $("#run-sub"),
+  title: $("#run-title"), sub: $("#run-sub"), pill: $("#run-pill"),
   play: $("#play"), speed: $("#speed"), scrub: $("#scrub"), ticks: $("#ticks"), time: $("#time"),
   next: $("#next-msg"), prev: $("#prev-msg"), reports: $("#open-reports"),
   dialog: $("#reports"), reportTabs: $("#report-tabs"), reportBody: $("#report-body"), status: $("#status"),
+  modes: [...document.querySelectorAll(".mode button")], conn: $("#conn"), port: $("#port"),
+  connect: $("#connect"), recheck: $("#recheck"), stop: $("#stop-run"), clear: $("#clear-run"), catchUp: $("#catch-up"),
 };
 
 let index = null, labels = {};
@@ -34,6 +42,18 @@ const prompts = new PromptsDialog($("#prompts"));
 let resumeAfterPrompts = false;
 let spot = null, queue = [], nextMsg = 0;
 let loadToken = 0;
+let mode = "replay";
+let replayEntry = null; // the recording on screen (index.json entry)
+// Live: the server connection, and the followed run's events until its run_start arrives.
+const live = new LiveServer({ onStatus: liveStatus, onRun: liveRun, onEvents: liveEvents });
+let livePending = [];
+let liveModelsSig = "";
+// Each scenario as a run would start (the server's /api/scenarios), drawn before a run.
+const previews = new Map();
+let following = null; // id of the server's run on screen (or being started)
+// A run plays by itself only when Play on this page started it; one found already going (on
+// coming back to Live, or after a reload) opens paused.
+let startedHere = false, autoplay = false;
 
 // --- loading ------------------------------------------------------------------------
 
@@ -41,17 +61,22 @@ async function init() {
   try {
     index = await (await fetch(RECORDINGS + "index.json")).json();
   } catch {
-    ui.status.textContent = "Couldn't load the recordings index.";
-    ui.status.hidden = false;
+    notice("Couldn't load the recordings index.");
     return;
   }
   for (const r of index.runs) labels[r.model] = r.model_label;
-  const scenarios = [...new Map(index.runs.map((r) => [r.scenario, r.title])).entries()];
-  ui.scenario.replaceChildren(...scenarios.map(([id, title]) => new Option(title, id)));
+  fillReplayScenarios();
   SPEEDS.forEach((s) => ui.speed.append(new Option(`${s}×`, s)));
   ui.speed.value = speed;
+  ui.port.value = savedPort();
 
-  await openFromHash();
+  if (location.hash === "#live") await setMode("live");
+  else await openFromHash();
+}
+
+function fillReplayScenarios() {
+  const scenarios = [...new Map(index.runs.map((r) => [r.scenario, r.title])).entries()];
+  ui.scenario.replaceChildren(...scenarios.map(([id, title]) => new Option(title, id)));
 }
 
 // The URL hash names the run (#scenario/model), so links and the back button work.
@@ -74,19 +99,26 @@ async function load() {
   if (!entry) return;
   history.replaceState(null, "", `#${entry.scenario}/${entry.model}`);
   setPlaying(false);
-  ui.status.textContent = "Loading recording…";
-  ui.status.hidden = false;
+  notice("Loading recording…");
   let events;
   try {
     events = parseJsonl(await (await fetch(RECORDINGS + entry.file)).text());
   } catch {
-    ui.status.textContent = "Couldn't load this recording.";
+    notice("Couldn't load this recording.");
     return;
   }
-  if (token !== loadToken) return; // a newer selection won
-  ui.status.hidden = true;
+  if (token !== loadToken || mode !== "replay") return; // a newer selection won
+  replayEntry = entry;
+  openRun(events);
+}
 
+// Put a run on screen from its events so far, at its start.
+function openRun(events) {
+  ui.status.hidden = true;
+  ui.stage.classList.remove("no-run");
+  enableTransport();
   run = parseRun(events);
+  run.live = mode === "live";
   run.ident = identities(run);
   spotlight.ident = run.ident;
   world = new World(run);
@@ -97,24 +129,72 @@ async function load() {
   panel = new AgentPanel(ui.panel, run);
   chart = run.metrics.length ? new ThroughputChart(ui.chart, run.metrics, run.ident) : null;
   ui.chart.hidden = !chart;
-  ui.spot.hidden = !run.messages.length; // billing: no messages, the chart takes the space
+  // Billing has no messages: the chart takes the space. A live run (or preview) has none yet,
+  // so it goes by whether its scenario's recordings have any.
+  ui.spot.hidden = !run.messages.length && !(run.live && scenarioHasMessages(run.start.scenario));
 
-  ui.title.textContent = run.start.title;
-  ui.sub.replaceChildren(
-    `${labels[run.start.model] || run.start.model} · ${fmtTime(run.duration)} long · ${entry.messages} messages · ${entry.commands} commands`);
+  ui.title.textContent = titleOf(run.start.scenario) || run.start.title;
+  subtitle();
+  controls();
   p = 0;
   drawTicks();
   seek(0);
 }
 
+const titleOf = (scenario) => index?.runs.find((r) => r.scenario === scenario)?.title;
+const scenarioHasMessages = (scenario) => !!index?.runs.some((r) => r.scenario === scenario && r.messages > 0);
+
+function subtitle() {
+  if (!run) return;
+  if (run.preview) {
+    const model = labels[ui.model.value] || ui.model.value;
+    ui.sub.textContent = following ? `${model} · starting…` : `${model} · ready · press Play to run it`;
+    return;
+  }
+  const model = labels[run.start.model] || run.start.model;
+  if (!run.live) {
+    ui.sub.textContent = `${model} · ${fmtTime(run.duration)} long · ${replayEntry.messages} messages · ${replayEntry.commands} commands`;
+    return;
+  }
+  const s = live.status?.run;
+  const state = run.ended ? `ended after ${fmtTime(run.duration)}: ${ENDINGS[run.endReason] || run.endReason}`
+    : s?.state === "stopping" ? "stopping…" : `running for ${fmtTime(s ? s.elapsed : run.duration)}`;
+  const n = run.messages.length;
+  ui.sub.textContent = `${model} · live run · ${state} · ${n} message${n === 1 ? "" : "s"}`;
+}
+
 // --- playback -------------------------------------------------------------------------
 
+// The newest events of a live run that is still going: playback waits there for more.
+const atLiveEdge = () => run.live && !run.ended;
+
 function setPlaying(on) {
-  if (on && run && p >= clock.length) seek(0);
-  playing = on && !!run;
-  ui.play.textContent = playing ? "Pause" : "Play";
-  ui.play.setAttribute("aria-pressed", playing);
+  if (on && run && p >= clock.length && !atLiveEdge()) seek(0);
+  playing = on && !!run && !run.preview;
   lastFrame = performance.now();
+  controls();
+}
+
+// Play/Pause, and in Live Stop and Clear. Play on a scenario's preview starts the run; Stop and
+// Clear act on the server's run on screen (Clear: stop it if need be, and delete it, so the
+// scenario is ready to run again).
+function controls() {
+  ui.play.classList.toggle("playing", playing);
+  ui.play.setAttribute("aria-pressed", playing);
+  ui.play.querySelector("span").textContent = playing ? "Pause" : "Play";
+  const s = mode === "live" ? live.status : null;
+  const going = !!s?.run && s.run.state !== "ended";
+  if (mode === "live" && run?.preview) {
+    ui.play.title = "Start the run";
+    ui.play.disabled = !s || going || !!s.clearing || ui.model.selectedOptions[0]?.disabled !== false;
+  } else {
+    ui.play.title = playing ? "Pause (the run carries on)" : "Play";
+    ui.play.disabled = !run;
+  }
+  // The server's run on screen, or still starting (its scenario's preview showing meanwhile).
+  const shown = mode === "live" && !!run && !!s?.run && s.run.id === following;
+  ui.stop.disabled = !shown || !going || s.run.state === "stopping";
+  ui.clear.disabled = !shown || !!s.clearing;
 }
 
 // Jumping around never replays the messages passed over; only playback reaches them.
@@ -162,7 +242,7 @@ function frame(now) {
       world.advanceTo(t);
       if (due) startSpot(queue.shift());
       render();
-      if (p >= clock.length && !spot) setPlaying(false);
+      if (p >= clock.length && !spot && !atLiveEdge()) setPlaying(false);
     }
   }
   lastFrame = now;
@@ -190,6 +270,7 @@ function render() {
   ui.scrub.max = clock.length;
   ui.scrub.value = p;
   ui.time.textContent = `${fmtTime(world.now)} / ${fmtTime(run.duration)}`;
+  ui.catchUp.disabled = p >= clock.length - 0.01;
   ui.reports.disabled = world.now < run.duration - 0.5 || !run.reports.length;
 }
 
@@ -224,8 +305,289 @@ function drawTicks() {
   for (const m of run.messages) {
     const i = document.createElement("i");
     i.style.background = run.ident.get(m.from).color;
-    i.style.left = `${(clock.toPlay(m.t) / clock.length) * 100}%`;
+    i.style.left = `${clock.length ? (clock.toPlay(m.t) / clock.length) * 100 : 0}%`;
     ui.ticks.append(i);
+  }
+}
+
+// --- modes ----------------------------------------------------------------------------
+
+async function setMode(m) {
+  if (m === mode && (m === "replay" || live.connected)) return;
+  mode = m;
+  document.body.classList.toggle("live", m === "live");
+  ui.modes.forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === m));
+  setPlaying(false);
+  if (m === "live") {
+    history.replaceState(null, "", "#live");
+    live.watch(true);
+    clearStage("Live run", "Connecting to the demo server…");
+    await connectLive();
+  } else {
+    // Keep an eye on the server (a run there carries on): the Live toggle shows it going.
+    live.watch(false);
+    runIndicator(live.status);
+    delete ui.scenario.dataset.live;
+    ui.scenario.disabled = ui.model.disabled = false;
+    fillReplayScenarios();
+    await openFromHash();
+  }
+}
+
+// An empty stage, with a note where the graph goes: before a live run's events arrive.
+function clearStage(title, note) {
+  run = null;
+  ui.stage.classList.add("no-run");
+  endSpot(false);
+  ui.svg.replaceChildren();
+  ui.panel.querySelector(".panel-list").replaceChildren();
+  ui.chart.hidden = true;
+  ui.ticks.replaceChildren();
+  ui.title.textContent = title;
+  ui.sub.textContent = "";
+  ui.time.textContent = "0:00 / 0:00";
+  ui.scrub.value = 0;
+  for (const b of [ui.next, ui.prev, ui.reports, ui.catchUp, $("#open-prompts")]) b.disabled = true;
+  ui.scrub.disabled = true;
+  notice(note);
+  controls();
+}
+
+function enableTransport() {
+  for (const b of [ui.next, ui.prev, $("#open-prompts")]) b.disabled = false;
+  ui.scrub.disabled = false;
+}
+
+// A notice on the stage (empty text hides it); one ending in "…" says we're waiting, with a
+// spinner. Over a drawn network it is a small badge in the drawing's bottom-right corner, out of
+// the way; with nothing drawn, a card in the middle of the stage.
+function notice(text) {
+  ui.status.hidden = !text;
+  const parts = [text || ""];
+  if (text?.endsWith("…")) {
+    const spin = document.createElement("span");
+    spin.className = "spin";
+    spin.setAttribute("aria-hidden", "true");
+    parts.unshift(spin);
+  }
+  ui.status.replaceChildren(...parts);
+  const corner = !!text && !!run && ui.svg.childElementCount > 0;
+  ui.status.classList.toggle("corner", corner);
+  if (!corner) {
+    ui.status.style.top = ui.status.style.right = "";
+    return;
+  }
+  // The stage scrolls, and an SVG element has no offsetTop: measure where the drawing is.
+  const wrap = ui.status.offsetParent.getBoundingClientRect(), box = ui.svg.getBoundingClientRect();
+  ui.status.style.top = `${box.bottom - wrap.top + ui.status.offsetParent.scrollTop - 8}px`;
+  ui.status.style.right = `${wrap.right - box.right + 8}px`; // anchored right: it grows leftwards
+}
+
+// A scenario as a run would start: its topology and prompts, before (or while) starting it.
+function showPreview(scenario) {
+  const events = previews.get(scenario);
+  setPlaying(false);
+  if (!events) {
+    clearStage(titleOf(scenario) || "Live run", "Preparing this scenario…");
+    return;
+  }
+  openRun(events.map((e) => ({ ...e })));
+  run.preview = true;
+  for (const b of [ui.next, ui.prev]) b.disabled = true;
+  ui.scrub.disabled = true;
+  subtitle();
+  controls();
+}
+
+async function loadPreviews(ids) {
+  if (ids.every((id) => previews.has(id))) return;
+  try {
+    for (const [id, events] of Object.entries(await live.request("/api/scenarios"))) previews.set(id, events);
+  } catch {
+    return;
+  }
+  if (mode === "live") showChosenScenario();
+}
+
+// Nothing else on the stage (no run followed): show the chosen scenario as it would start.
+function showChosenScenario() {
+  if (following || (run && !run.preview)) return;
+  if (run?.preview && run.start.scenario === ui.scenario.value) return; // already on screen
+  if (previews.has(ui.scenario.value)) showPreview(ui.scenario.value);
+}
+
+// --- live -----------------------------------------------------------------------------
+
+function savedPort() {
+  try { return +localStorage.getItem("demo-port") || DEFAULT_PORT; } catch { return DEFAULT_PORT; }
+}
+
+async function connectLive() {
+  const port = Math.round(+ui.port.value) || DEFAULT_PORT;
+  ui.port.value = port;
+  try { localStorage.setItem("demo-port", port); } catch { /* private mode: not remembered */ }
+  ui.conn.textContent = `Connecting to localhost:${port}…`;
+  ui.conn.className = "conn";
+  liveModelsSig = "";
+  following = null;
+  if (await live.connect(port)) return;
+  if (mode !== "live") return;
+  liveStatus(null);
+}
+
+// Every poll of the server: the connection, the models' availability, and the run buttons.
+// Whether a run is going on the server, wherever the page is: a pulsing dot on the Live toggle,
+// and in Live a "Running" pill by the title. The dropdowns lock meanwhile, and say why.
+function runIndicator(status) {
+  const r = status?.run;
+  const going = !!r && r.state !== "ended";
+  ui.modes.find((b) => b.dataset.mode === "live").classList.toggle("running", going);
+  ui.modes.find((b) => b.dataset.mode === "live").title = going ? "A run is going on the demo server" : "";
+  ui.pill.hidden = !(mode === "live" && going);
+  if (!ui.pill.hidden) ui.pill.textContent = r.state === "stopping" ? "Stopping…" : `Running ${fmtTime(r.elapsed)}`;
+  const why = mode === "live" && going ? "Locked while a run is going: Stop or Clear it first" : "";
+  ui.scenario.title = ui.model.title = why;
+}
+
+function liveStatus(status) {
+  runIndicator(status);
+  if (mode !== "live") return;
+  const port = ui.port.value;
+  if (!status) {
+    ui.conn.textContent = `Not connected (nothing answers on localhost:${port})`;
+    ui.conn.className = "conn bad";
+    ui.recheck.disabled = true;
+    controls();
+    if (!run) {
+      notice("No demo server is running on this machine at that port. " +
+        "See “How to start the server”, or connect to another port.");
+    }
+    return;
+  }
+  ui.conn.textContent = `Connected to localhost:${port}${status.fake ? " (fake runs)" : ""}`;
+  ui.conn.className = "conn ok";
+
+  if (ui.scenario.dataset.live !== "1") {
+    const titles = new Map(index.runs.map((r) => [r.scenario, r.title]));
+    ui.scenario.replaceChildren(...status.scenarios.map((id) => new Option(titles.get(id) || id, id)));
+    ui.scenario.dataset.live = "1";
+  }
+  // Rebuild the model list only when something changed: rebuilding closes it under the cursor.
+  const sig = JSON.stringify([status.models, status.checking]);
+  if (sig !== liveModelsSig) {
+    liveModelsSig = sig;
+    const keep = ui.model.value;
+    ui.model.replaceChildren(...status.models.map((m) => {
+      const mark = status.checking && m.ok === null ? "…" : m.ok ? "✓" : m.ok === false ? "✗" : "?";
+      const o = new Option(`${mark} ${m.label}`, m.key);
+      o.disabled = m.ok === false;
+      o.title = m.ok === false ? m.error : m.ok ? "Answered the last check" : "Not checked yet";
+      return o;
+    }));
+    const usable = status.models.filter((m) => m.ok !== false).map((m) => m.key);
+    ui.model.value = usable.includes(keep) ? keep : usable[0] || status.models[0].key;
+    for (const m of status.models) labels[m.key] = m.label;
+  }
+  ui.recheck.disabled = status.checking;
+  ui.recheck.textContent = status.checking ? "Checking models…" : "Recheck";
+
+  const going = status.run && status.run.state !== "ended";
+  ui.scenario.disabled = ui.model.disabled = !!going || status.clearing;
+  if (following && !status.run) {
+    // The run on screen was cleared (here or from another page): back to the scenario.
+    following = null;
+    livePending = [];
+    showPreview(ui.scenario.value);
+  }
+  if (going) {
+    ui.scenario.value = status.run.scenario;
+    ui.model.value = status.run.model;
+  }
+  loadPreviews(status.previews);
+  showChosenScenario();
+  if (!run && !following) {
+    notice("Preparing the scenarios…");
+  }
+  subtitle();
+  controls();
+}
+
+// A run to follow: a new one, or the one going (or last finished) when we connected. Its
+// scenario's preview stays on screen until the run's own events arrive.
+function liveRun(r) {
+  livePending = [];
+  following = r.id;
+  autoplay = startedHere;
+  startedHere = false;
+  ui.scenario.value = r.scenario;
+  ui.model.value = r.model;
+  showPreview(r.scenario);
+  notice(r.state === "ended" ? "Loading the last run…" : "Building the network and starting the agents…");
+}
+
+function liveEvents(events) {
+  if (mode !== "live") return;
+  if (!run || run.preview) {
+    livePending.push(...events);
+    if (livePending[0]?.type !== "run_start") {
+      // The run ended before it got going (e.g. Docker failed): there is nothing to show.
+      const end = livePending.find((e) => e.type === "run_end");
+      if (end && end.reason === "stopped") {
+        following = null; // nothing of it to show: back to the scenario, ready to run
+        subtitle();
+        controls();
+        notice("Stopped before the network was up.");
+      } else if (end) {
+        ui.title.textContent = "The run did not start";
+        notice(`It ended (${ENDINGS[end.reason] || end.reason}) before the network was up. ` +
+          "The server's terminal, and run.out in the run's folder under demo/logs/, say why.");
+      }
+      return;
+    }
+    openRun(livePending);
+    livePending = [];
+    setPlaying(autoplay);
+    return;
+  }
+  // Keep the position (in run time) while the run grows under it.
+  const t = clock.toRun(p);
+  const wasEnded = run.ended;
+  const before = { pseudo: run.pseudo.size, idle: run.startIdle.size, prompts: prompts.ids?.length, metrics: run.metrics.length };
+  run.events.push(...events);
+  indexRun(run);
+  if (run.pseudo.size !== before.pseudo) {
+    // Someone outside the network appeared (the laptop owner): redraw with them.
+    run.ident = identities(run);
+    spotlight.ident = run.ident;
+    graph = new Graph(ui.svg, run, { onSelect: openPrompts });
+  }
+  if (run.pseudo.size !== before.pseudo || run.startIdle.size !== before.idle) {
+    // Who is there, or who starts asleep, became known only now: rebuild the state from the start.
+    world = new World(run);
+    world.advanceTo(t);
+  }
+  prompts.setRun(run);
+  if (prompts.ids.length !== before.prompts) $("#open-prompts").disabled = !prompts.available;
+  panel.refeed();
+  if (run.metrics.length !== before.metrics) {
+    chart = new ThroughputChart(ui.chart, run.metrics, run.ident);
+    ui.chart.hidden = false;
+  }
+  ui.spot.hidden = !run.messages.length && !scenarioHasMessages(run.start.scenario);
+  clock = new Clock(run, PAUSE_CAP_S);
+  p = clock.toPlay(t);
+  drawTicks();
+  subtitle();
+  render();
+  controls();
+  if (run.ended && !wasEnded) live.poll(); // Play starts a new run again: don't wait for the next poll
+}
+
+async function liveAction(action) {
+  try {
+    await action();
+  } catch (err) {
+    notice(`The server said: ${err.message}`);
   }
 }
 
@@ -263,17 +625,49 @@ function showReport(tabs, i) {
 
 // --- wiring ---------------------------------------------------------------------------
 
-ui.scenario.addEventListener("change", () => { fillModels(ui.model.value); load(); });
-ui.model.addEventListener("change", load);
-ui.play.addEventListener("click", () => setPlaying(!playing));
+ui.scenario.addEventListener("change", () => {
+  if (mode === "replay") { fillModels(ui.model.value); load(); return; }
+  following = null; // looking at another scenario: the last run gives way to its preview
+  showPreview(ui.scenario.value);
+});
+ui.model.addEventListener("change", () => {
+  if (mode === "replay") return load();
+  if (run && !run.preview) { following = null; showPreview(ui.scenario.value); }
+  subtitle();
+  controls(); // Play follows the chosen model's availability
+});
+ui.modes.forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+ui.connect.addEventListener("click", connectLive);
+ui.port.addEventListener("keydown", (ev) => { if (ev.key === "Enter") connectLive(); });
+ui.recheck.addEventListener("click", () => liveAction(() => live.recheck()));
+ui.stop.addEventListener("click", () => liveAction(() => live.stop()));
+ui.clear.addEventListener("click", () => liveAction(() => live.clear()));
+// To the newest event; a run still going carries on playing from there, a finished one stays at its end.
+ui.catchUp.addEventListener("click", () => {
+  if (!run) return;
+  seek(clock.length);
+  setPlaying(atLiveEdge());
+});
+$("#open-help").addEventListener("click", () => $("#help").showModal());
+$("#help .close").addEventListener("click", () => $("#help").close());
+ui.play.addEventListener("click", () => {
+  if (mode === "live" && run?.preview) {
+    startedHere = true;
+    return liveAction(() => live.start(ui.scenario.value, ui.model.value)).finally(() => { startedHere = false; });
+  }
+  setPlaying(!playing);
+});
 ui.speed.addEventListener("change", () => (speed = +ui.speed.value));
-ui.scrub.addEventListener("input", () => seek(+ui.scrub.value));
+ui.scrub.addEventListener("input", () => { if (run) seek(+ui.scrub.value); });
 ui.next.addEventListener("click", () => jumpMessage(1));
 ui.prev.addEventListener("click", () => jumpMessage(-1));
 $("#skip-msg").addEventListener("click", skipMessage);
 ui.reports.addEventListener("click", openReports);
 window.addEventListener("hashchange", () => {
-  if (index && location.hash !== `#${ui.scenario.value}/${ui.model.value}`) openFromHash();
+  if (!index) return;
+  if (location.hash === "#live") setMode("live");
+  else if (mode === "live") setMode("replay");
+  else if (location.hash !== `#${ui.scenario.value}/${ui.model.value}`) openFromHash();
 });
 $("#close-reports").addEventListener("click", () => ui.dialog.close());
 $("#open-prompts").addEventListener("click", () => openPrompts());
