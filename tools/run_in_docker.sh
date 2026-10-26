@@ -7,14 +7,24 @@ PROJECT_ROOT=$(realpath "$SCRIPT_DIR/..")
 IMAGE_NAME="agentic-networks"
 
 usage() {
-    echo "Usage: $0 <script.py> [args...]"
+    echo "Usage: $0 [--container-name NAME] <script.py> [args...]"
     echo "  Builds the Docker image and runs the given Python script inside it. The models are"
     echo "  reached through tools/llm_proxy.py, started for the run and stopped after it, so the"
     echo "  container gets only the proxy's address and a run token, never the real keys."
+    echo "  --container-name: name the container, so another program can stop it (docker stop NAME)."
     exit 1
 }
 
-if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+CONTAINER_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --container-name) [ $# -ge 2 ] || usage; CONTAINER_ARGS=(--name "$2"); shift 2 ;;
+        -h|--help) usage ;;
+        *) break ;;
+    esac
+done
+
+if [ $# -lt 1 ]; then
     usage
 fi
 
@@ -86,6 +96,7 @@ KEY_ARGS=(
 # --ulimit nofile: Mininet raises RLIMIT_NOFILE on startup; without this the container
 # inherits a low hard limit and setrlimit fails with a harmless but noisy warning.
 docker run --rm \
+    "${CONTAINER_ARGS[@]}" \
     --privileged \
     --ulimit nofile=65536:65536 \
     "${GPU_ARGS[@]}" \
