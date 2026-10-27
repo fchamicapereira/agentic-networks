@@ -156,20 +156,23 @@ function subtitle() {
   if (!run) return;
   if (run.preview) {
     const model = labels[ui.model.value] || ui.model.value;
-    ui.sub.textContent = following ? `${model} · starting…` : `${model} · ready · press Play to run it`;
+    ui.sub.textContent = following ? `Model: ${model} · starting…` : `Model: ${model} · ready · press Play to run it`;
     return;
   }
   const model = labels[run.start.model] || run.start.model;
   if (!run.live) {
-    ui.sub.textContent = `${model} · ${fmtTime(run.duration)} long · ${replayEntry.messages} messages · ${replayEntry.commands} commands`;
+    ui.sub.textContent = summary(model, `Duration: ${fmtTime(run.duration)}`, replayEntry.messages, replayEntry.commands);
     return;
   }
   const s = live.status?.run;
   const state = run.ended ? `ended after ${fmtTime(run.duration)}: ${ENDINGS[run.endReason] || run.endReason}`
     : s?.state === "stopping" ? "stopping…" : `running for ${fmtTime(s ? s.elapsed : run.duration)}`;
-  const n = run.messages.length;
-  ui.sub.textContent = `${model} · live run · ${state} · ${n} message${n === 1 ? "" : "s"}`;
+  ui.sub.textContent = summary(model, `Live run, ${state}`, run.messages.length, run.events.filter((e) => e.type === "exec").length);
 }
+
+// Spelled out, so nobody has to guess what a bare "4 messages" counts.
+const summary = (model, time, messages, commands) =>
+  [`Model: ${model}`, time, `Messages exchanged: ${messages}`, `Shell commands run: ${commands}`].join(" · ");
 
 // --- playback -------------------------------------------------------------------------
 
@@ -225,7 +228,7 @@ function endSpot(advance = true) {
   spot = null;
   if (advance && queue.length) return startSpot(queue.shift());
   queue = [];
-  spotlight.clear(run && run.messages.length ? "Messages between the agents appear here, one at a time." : "");
+  spotlight.clear("");
 }
 
 function frame(now) {
