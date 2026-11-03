@@ -13,6 +13,7 @@ Standard library only (like tools/build_website.py), so the Pages build can run 
 """
 
 import argparse
+import hashlib
 import json
 import sys
 
@@ -25,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from agentic_networks.events import FORMAT_VERSION, load_topology  # noqa: E402
 from agentic_networks.visualize_logs import _CMD_OUT_RE, _ITER_RE, _MSG_RE, _REPORT_LEVELS, _raw_records  # noqa: E402
 PAPER_DATA = REPO_ROOT / "paper-data"
+NARRATION = REPO_ROOT / "demo" / "narration"
 
 
 def parse_node(path: Path, node: str) -> list[dict]:
@@ -229,8 +231,38 @@ def _is_paper_run(run: dict, logs_root: Path, paper_dir: Path) -> bool:
     return True
 
 
+def merge_narration(lines: list[str], name: str, narration_dir: Path = NARRATION) -> tuple[list[str], bool]:
+    """Add the captions of `narration_dir/<name>` (made by demo/tools/narrate.py) to a recording.
+
+    The narration's header holds the SHA-256 of the recording it was made from; if the recording
+    has changed since (e.g. the run was redone), its captions no longer fit and are left out.
+    Message captions and thoughts go just before the events they describe, so they are there when
+    the viewer reaches them; story lines and the outcome go after.
+    """
+    sidecar = narration_dir / name
+    if not sidecar.exists():
+        return lines, False
+    narration = [json.loads(line) for line in sidecar.read_text().split("\n") if line.strip()]
+    header, captions = narration[0], narration[1:]
+    sha = hashlib.sha256("".join(line + "\n" for line in lines).encode()).hexdigest()
+    if header.get("type") != "narrator" or header.get("source_sha256") != sha:
+        print(f"  WARNING: {sidecar} narrates an older version of {name}; "
+              "left out (narrate it again)", file=sys.stderr)
+        return lines, False
+    # run_start stays first, whatever shares its time.
+    keyed = [((json.loads(line)["t"] if i else float("-inf"), 1, i), line) for i, line in enumerate(lines)]
+    for i, c in enumerate(captions):
+        keyed.append(((c["t"], 0 if c["kind"] in ("message", "thought") else 2, i), json.dumps(c, ensure_ascii=False)))
+    keyed.sort(key=lambda kl: kl[0])
+    merged = [line for _, line in keyed]
+    # Who narrated it, right after run_start.
+    meta = {k: header[k] for k in ("model", "effort") if k in header}
+    merged.insert(1, json.dumps({"t": 0, "type": "narrator", **meta}, ensure_ascii=False))
+    return merged, True
+
+
 def write_recordings(output: Path, paper_dir: Path = PAPER_DATA, logs_root: Path = REPO_ROOT,
-                     verbose: bool = False) -> int:
+                     verbose: bool = False, narration_dir: Path = NARRATION) -> int:
     """Write every run listed in the paper snapshot plus index.json into `output`; return the count.
 
     Runs are read from `logs_root` (the repository, so logs/...), falling back to the snapshot
@@ -253,11 +285,11 @@ def write_recordings(output: Path, paper_dir: Path = PAPER_DATA, logs_root: Path
                 continue
             events, summary = result
             name = f"{sc['id']}__{run['model']}.jsonl"
+            lines, narrated = merge_narration([json.dumps(ev, ensure_ascii=False) for ev in events], name, narration_dir)
             with open(output / name, "w") as f:
-                for ev in events:
-                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                f.writelines(line + "\n" for line in lines)
             index.append({**summary, "paper": sc["paper"] if paper else None, "paper_section": sc["paper"],
-                          "file": name})
+                          "file": name, "narrated": narrated})
             if verbose:
                 print(f"{name:<55} {summary['duration_s']:>5}s  {summary['messages']:>3} msgs  "
                       f"{summary['commands']:>4} cmds  {summary['end_reason']:<14} {'paper' if paper else 'rerun'}")
@@ -271,8 +303,10 @@ def main() -> int:
     parser.add_argument("--paper-dir", type=Path, default=PAPER_DATA, metavar="DIR")
     parser.add_argument("--logs-root", type=Path, default=REPO_ROOT, metavar="DIR",
                         help="directory holding logs/ (default: the repository)")
+    parser.add_argument("--narration-dir", type=Path, default=NARRATION, metavar="DIR",
+                        help="narrations to merge in (default: demo/narration)")
     args = parser.parse_args()
-    write_recordings(args.output, args.paper_dir, args.logs_root, verbose=True)
+    write_recordings(args.output, args.paper_dir, args.logs_root, verbose=True, narration_dir=args.narration_dir)
     return 0
 
 

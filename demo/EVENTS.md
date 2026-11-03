@@ -85,6 +85,27 @@ cross-agent report.
 
 `id`s are unique within a run. An `exec_result` always follows its `exec` for the same node.
 
+## Narration
+
+Plain-language captions by a narrator model (Claude), outside the experiment: agents never see
+them. `demo/tools/narrate.py` makes them for a recording, offline, into
+`demo/narration/<recording>.jsonl`: a header line
+`{ "type": "narrator", "v": 1, "model", "effort", "source", "source_sha256" }` (the SHA-256 of the
+recording's lines it narrated, captions excluded), then one `caption` per line. The Pages build
+merges them into the recording when the hash still matches (else it warns and leaves them out),
+and puts `{ "t": 0, "type": "narrator", "model", "effort" }` right after `run_start`.
+
+**`caption`**: `{ "t", "type": "caption", "kind", "text", … }`, by `kind`:
+
+| `kind` | Extra fields | Meaning |
+|---|---|---|
+| `thought` | `node`, `iter`, `weight` | One agent turn in a few words, first person (a thought bubble). `t` = the turn's first action. `weight`: `key` (tells the viewer something: a check's result, a finding, a decision, a change, what it will try) or `routine` (only waiting, done, nothing changed); `cut` (optional) marks a thought the narrator's editing pass, seeing the whole run, made `routine` because another thought or a message already says it, and names which. The viewer shows only `key` ones, once the turn's commands are done (just before its first message, or at its last action). |
+| `message` | `node` (sender), `ref` | The gist of message `ref`, in one sentence. Same `t` as the message, placed just before it. |
+| `story` | `node`? | A line for "the story so far", made only when the plot moves. `t` = the end of its turn. |
+| `outcome` | `headline` | How the run ended (`text`: two or three sentences), from the reports. `t` = the last event's. |
+
+Captions change nothing in the run; a viewer without narration ignores them.
+
 ## What recordings cannot contain
 
 The paper runs predate this format, so recordings lack `usage`, `routes`, `thinking`, and
