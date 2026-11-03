@@ -2,8 +2,8 @@
 // follows a run going on a demo server on this machine (demo/server.py, see live.js).
 
 import { Clock, World, fmtTime, indexRun, parseJsonl, parseRun, redact } from "./state.js";
-import { Graph, appendMark } from "./graph.js";
-import { AgentPanel } from "./panels.js";
+import { Graph, PROBLEM_BOX, appendMark, appendProblem } from "./graph.js";
+import { AgentPanel, StoryBox } from "./panels.js";
 import { ThroughputChart } from "./chart.js";
 import { Spotlight, readingTime } from "./spotlight.js";
 import { identities } from "./identity.js";
@@ -14,7 +14,14 @@ const RECORDINGS = "recordings/";
 const PAUSE_CAP_S = 3; // longest pause between events, in run seconds (mostly waiting on the models)
 const COMMAND_REAL_S = 1.6; // how long a finished command stays under its node, in real seconds
 const FLIGHT_S = 1.5; // how long the spotlighted message's envelope takes to cross its link, at 1×
-const SPEEDS = [1, 2, 4, 8, 16, 32];
+const MIN_SPEED = 0.25, MAX_SPEED = 64; // as on the input (index.html)
+// Messages are read at READ_PACE of the spotlight's reading times (spotlight.js), i.e. a third
+// longer than those: for people watching in passing.
+const READ_PACE = 0.75;
+// A thought (Summaries) is up for 2 s + 2.5 words a second, at least 5 s, over READ_PACE like a
+// message: 12 words take 9 s at 1×. Routine thoughts (waiting, setup) are not shown at all.
+const THOUGHT_MIN_S = 5, THOUGHT_BASE_S = 2, THOUGHT_WORDS_PER_S = 2.5;
+const VIEW_KEY = "demo-view";
 const DEFAULT_PORT = 8800;
 // How a live run ended, for the subtitle (run_end reasons, demo/EVENTS.md).
 const ENDINGS = { all_dormant: "every agent idle", max_iterations: "out of iterations", stopped: "stopped",
@@ -30,17 +37,25 @@ const ui = {
   dialog: $("#reports"), reportTabs: $("#report-tabs"), reportBody: $("#report-body"), status: $("#status"),
   modes: [...document.querySelectorAll(".mode button")], conn: $("#conn"), port: $("#port"),
   connect: $("#connect"), recheck: $("#recheck"), stop: $("#stop-run"), clear: $("#clear-run"), catchUp: $("#catch-up"),
+  view: $("#view"), story: $("#story"), legendNarr: $(".lg-narr"), legendProblem: $(".lg-problem"),
 };
 
 let index = null, labels = {};
-let run = null, world = null, clock = null, graph = null, panel = null, chart = null;
+let run = null, world = null, clock = null, graph = null, panel = null, chart = null, story = null;
+// Narrated runs show Claude's summaries unless the viewer asked for the agents' own words.
+let summaries = loadView();
+const narrated = () => !!run?.narrated && summaries;
 let playing = false, speed = 1, p = 0, lastFrame = 0;
-// Message spotlight: while `spot` is set the run clock is held. `nextMsg` indexes the first
-// message playback has not reached yet; messages sent at the same moment wait in `queue`.
+// One thing at a time: the run plays as a queue of *moments*, each of which holds the run clock
+// while it is up (`spot`): every message (in the message box), and in Summaries every key thought
+// (a bubble on its agent, the only one on the graph). `nextMom` indexes the first moment playback
+// has not reached yet; moments at the same time wait in `queue`. Between moments the clock runs,
+// with the commands under the nodes.
 const spotlight = new Spotlight(ui.spot);
+let moments = [];
 const prompts = new PromptsDialog($("#prompts"));
 let resumeAfterPrompts = false;
-let spot = null, queue = [], nextMsg = 0;
+let spot = null, queue = [], nextMom = 0;
 let loadToken = 0;
 let mode = "replay";
 let replayEntry = null; // the recording on screen (index.json entry)
@@ -71,7 +86,6 @@ async function init() {
   }
   for (const r of index.runs) labels[r.model] = r.model_label;
   fillReplayScenarios();
-  SPEEDS.forEach((s) => ui.speed.append(new Option(`${s}×`, s)));
   ui.speed.value = speed;
   ui.port.value = savedPort();
 
@@ -104,6 +118,8 @@ async function load() {
   if (!entry) return;
   history.replaceState(null, "", `#${entry.scenario}/${entry.model}`);
   setPlaying(false);
+  // The index says whether the run is narrated: set the layout now, not once it has loaded.
+  document.documentElement.classList.toggle("narrated", !!entry.narrated && summaries);
   notice("Loading recording…");
   let events;
   try {
@@ -115,6 +131,18 @@ async function load() {
   if (token !== loadToken || mode !== "replay") return; // a newer selection won
   replayEntry = entry;
   openRun(events);
+}
+
+// The legend's line for the scenario's problem: its mark and what it is, in a few words.
+function showProblem(pr) {
+  ui.legendProblem.hidden = !pr;
+  if (!pr) return;
+  const icon = ui.legendProblem.querySelector("svg");
+  icon.replaceChildren();
+  icon.setAttribute("viewBox", PROBLEM_BOX[pr.kind]);
+  appendProblem(icon, pr.kind);
+  ui.legendProblem.querySelector("span").textContent = pr.note;
+  ui.legendProblem.title = pr.title;
 }
 
 // Put a run on screen from its events so far, at its start.
@@ -129,15 +157,19 @@ function openRun(events) {
   world = new World(run);
   clock = new Clock(run, PAUSE_CAP_S);
   graph = new Graph(ui.svg, run, { onSelect: openPrompts });
+  showProblem(graph.problem);
   prompts.setRun(run);
   $("#open-prompts").disabled = !prompts.available;
   panel = new AgentPanel(ui.panel, run);
+  story = new StoryBox(ui.story, run);
+  applyView(false);
   chart = run.metrics.length ? new ThroughputChart(ui.chart, run.metrics, run.ident) : null;
   ui.chart.hidden = !chart;
   // Billing has no messages: the chart takes the space. A live run (or preview) has none yet,
   // so it goes by whether its scenario's recordings have any.
   ui.spot.hidden = !run.messages.length && !(run.live && scenarioHasMessages(run.start.scenario));
 
+  fitGraph(); // the layout is final now (chart, message box)
   ui.title.textContent = titleOf(run.start.scenario) || run.start.title;
   subtitle();
   controls();
@@ -208,25 +240,52 @@ function controls() {
   ui.clear.disabled = !shown || !!s.clearing;
 }
 
-// Jumping around never replays the messages passed over; only playback reaches them.
+// The run's moments, in order: { t, m } a message, { t, c } a thought. A thought comes before a
+// message sent at the same time (it is that turn's thinking).
+function buildMoments() {
+  const out = run.messages.map((m) => ({ t: m.t, m }));
+  if (narrated()) {
+    for (const list of run.thoughts.values()) for (const c of list) if (c.weight !== "routine") out.push({ t: c.at, c });
+  }
+  moments = out.sort((a, b) => a.t - b.t || (a.c ? 0 : 1) - (b.c ? 0 : 1));
+}
+
+// The first moment after the run's current time.
+function momentAfterNow() {
+  const i = moments.findIndex((x) => x.t > world.now);
+  return i < 0 ? moments.length : i;
+}
+
+// Jumping around never replays the moments passed over; only playback reaches them.
 function seek(np) {
   p = Math.min(Math.max(np, 0), clock.length);
   world.advanceTo(clock.toRun(p));
   endSpot(false);
-  nextMsg = run.messages.findIndex((m) => m.t > world.now);
-  if (nextMsg < 0) nextMsg = run.messages.length;
+  nextMom = momentAfterNow();
   render();
 }
 
-function startSpot(m) {
-  spot = { m, total: readingTime(m.text), used: 0 };
-  spotlight.show(m, { n: run.messages.indexOf(m) + 1, of: run.messages.length });
+const thoughtTime = (c) => Math.max(THOUGHT_MIN_S, THOUGHT_BASE_S + c.text.split(/\s+/).length / THOUGHT_WORDS_PER_S);
+
+function startSpot(mo) {
+  if (mo.c) {
+    spot = { mo, c: mo.c, total: thoughtTime(mo.c), used: 0 };
+    return;
+  }
+  const m = mo.m;
+  const gist = narrated() ? run.gists.get(m.id) || null : null;
+  spot = { mo, m, total: gist ? readingTime(gist, { gist: true }) : readingTime(m.text), used: 0 };
+  spotlight.show(m, { n: run.messages.indexOf(m) + 1, of: run.messages.length, gist });
 }
 
-// Retire the current message; show the next one queued at the same moment, if any.
+// Retire the current moment; show the next one queued at the same time, if any.
 function endSpot(advance = true) {
+  const wasMessage = !!spot?.m;
   spot = null;
-  if (advance && queue.length) return startSpot(queue.shift());
+  if (advance && queue.length) {
+    if (wasMessage && !queue[0].m) spotlight.clear("");
+    return startSpot(queue.shift());
+  }
   queue = [];
   spotlight.clear("");
 }
@@ -235,19 +294,19 @@ function frame(now) {
   const dt = (now - lastFrame) / 1000;
   if (playing && run) {
     if (spot) {
-      spot.used += dt * speed; // the reading time shrinks with the playback speed
-      spotlight.progress(spot.used / spot.total);
+      spot.used += dt * speed * READ_PACE; // the reading time shrinks with the playback speed
+      if (spot.m) spotlight.progress(spot.used / spot.total);
       if (spot.used >= spot.total) endSpot();
       graphUpdate();
     } else {
       let np = Math.min(p + dt * speed, clock.length);
       let t = clock.toRun(np);
-      const due = nextMsg < run.messages.length && run.messages[nextMsg].t <= t;
+      const due = nextMom < moments.length && moments[nextMom].t <= t;
       if (due) {
-        // Stop the clock exactly at the message, and put it (and any sent at the same moment) up.
-        t = run.messages[nextMsg].t;
+        // Stop the clock exactly at the moment, and put it (and any at the same time) up.
+        t = moments[nextMom].t;
         np = clock.toPlay(t);
-        while (nextMsg < run.messages.length && run.messages[nextMsg].t <= t) queue.push(run.messages[nextMsg++]);
+        while (nextMom < moments.length && moments[nextMom].t <= t) queue.push(moments[nextMom++]);
       }
       p = np;
       world.advanceTo(t);
@@ -263,20 +322,28 @@ function frame(now) {
 function graphUpdate() {
   const pNow = p;
   graph.update(world, {
-    focus: spot ? spot.m : null,
+    focus: spot?.m || null,
     // The spotlighted message's envelope crosses its link in FLIGHT_S (at 1×), then waits at the
     // recipient while the message is read (the run clock is held while it is up).
-    flight: spot ? spot.used / Math.min(FLIGHT_S, spot.total) : 0,
+    flight: spot?.m ? spot.used / Math.min(FLIGHT_S, spot.total) : 0,
+    // The thought up, if any: its agent is the one to look at, and its bubble the only one.
+    thinker: spot?.c ? spot.c.node : null,
     showCommand: (id) => {
       const n = world.node[id];
       return n.cmd && (world.stateOf(id) === "exec" || pNow - clock.toPlay(n.cmdT) < COMMAND_REAL_S * speed);
     },
+    thoughts: spot?.c ? new Map([[spot.c.node, { caption: spot.c, fresh: true }]]) : null,
   });
 }
 
 function render() {
   graphUpdate();
   panel.show(world);
+  story.show(world, narrated());
+  // Once the run is over and no message is up, the message box tells how it ended.
+  const atEnd = narrated() && !!run.outcome && !spot && world.now >= run.duration - 0.5;
+  if (atEnd && !ui.spot.classList.contains("outcome")) spotlight.showOutcome(run.outcome);
+  else if (!atEnd && ui.spot.classList.contains("outcome")) spotlight.clear("");
   chart?.update(world.now);
   ui.scrub.max = clock.length;
   ui.scrub.value = p;
@@ -285,26 +352,32 @@ function render() {
   ui.reports.disabled = world.now < run.duration - 0.5 || !run.reports.length;
 }
 
-// → / ←: step through messages. → first finishes the one on screen (and any queued with it);
-// ← goes back to the previous message. Either way the target is put in the spotlight.
+// → / ←: step through messages (only: thoughts are passed over). → first finishes the message on
+// screen and any queued with it; ← goes back to the previous message. Either way the target is put
+// in the message box.
 function jumpMessage(dir) {
   if (!run) return;
   const msgs = run.messages;
-  const cur = spot ? msgs.indexOf(spot.m) : nextMsg - 1;
-  if (dir > 0 && spot && queue.length) return endSpot();
-  const i = dir > 0 ? (spot ? cur + 1 : nextMsg) : cur - (spot ? 1 : 0);
+  if (dir > 0 && spot?.m && queue.some((x) => x.m)) {
+    while (!queue[0].m) queue.shift();
+    return endSpot();
+  }
+  let reached = msgs.findIndex((m) => m.t > world.now); // the first message not reached yet
+  if (reached < 0) reached = msgs.length;
+  const cur = spot?.m ? msgs.indexOf(spot.m) : reached - 1;
+  const i = dir > 0 ? (spot?.m ? cur + 1 : reached) : cur - (spot?.m ? 1 : 0);
   if (i < 0 || i >= msgs.length) return;
   const m = msgs[i];
   seek(clock.toPlay(m.t));
-  // Put the message itself up, plus later ones sent at the same moment.
-  nextMsg = i + 1;
-  while (nextMsg < msgs.length && msgs[nextMsg].t <= m.t) queue.push(msgs[nextMsg++]);
-  startSpot(m);
-  render(false);
+  // Put the message itself up, then what else happens at that moment.
+  nextMom = moments.findIndex((x) => x.m === m) + 1;
+  while (nextMom < moments.length && moments[nextMom].t <= m.t) queue.push(moments[nextMom++]);
+  startSpot({ t: m.t, m });
+  render();
 }
 
-// Skip: stop showing the current message and carry on from where it was sent (the next message
-// still gets its turn in the spotlight).
+// Skip: stop showing the current moment and carry on from where it was (the next one still gets
+// its turn).
 function skipMessage() {
   if (!spot) return;
   endSpot();
@@ -319,6 +392,58 @@ function drawTicks() {
     i.style.left = `${clock.length ? (clock.toPlay(m.t) / clock.length) * 100 : 0}%`;
     ui.ticks.append(i);
   }
+}
+
+// --- summaries or the original -----------------------------------------------------------
+
+function loadView() {
+  try { return localStorage.getItem(VIEW_KEY) !== "original"; } catch { return true; }
+}
+
+// Put the run on screen in the chosen view: Claude's summaries (narrated runs), or the agents'
+// own words. The switch shows only for a narrated run. `redraw`: also redo what is on screen
+// (not while a run is being opened: it draws itself once ready).
+function applyView(redraw = true) {
+  ui.view.hidden = !run?.narrated;
+  for (const b of ui.view.querySelectorAll("button")) b.setAttribute("aria-pressed", (b.dataset.view === "summary") === summaries);
+  ui.legendNarr.hidden = !narrated();
+  document.documentElement.classList.toggle("narrated", narrated());
+  fitGraph();
+  panel?.setNarrated(narrated());
+  if (run) buildMoments();
+  if (!redraw || !run) return;
+  queue = [];
+  if (spot?.m) {
+    // Same message, in the other view: keep the share of its reading time already used.
+    const { mo, used, total } = spot;
+    startSpot(mo);
+    spot.used = (used / total) * spot.total;
+  } else if (spot) {
+    endSpot(false);
+  }
+  nextMom = momentAfterNow();
+  render();
+}
+
+// The topology keeps its size and place between the views of a narrated run, though the message
+// box is taller in Original: there it is drawn at the scale the Summaries layout gives it
+// (measured by switching the layout for a moment, before anything is painted).
+function fitGraph() {
+  if (!graph) return;
+  if (!run.narrated || summaries) return graph.fitFull();
+  const root = document.documentElement;
+  root.classList.add("narrated");
+  const ref = ui.svg.getBoundingClientRect();
+  root.classList.remove("narrated");
+  graph.fitAtScaleOf(ref, ui.svg.getBoundingClientRect());
+}
+window.addEventListener("resize", fitGraph);
+
+function setView(summary) {
+  if (summary === summaries) return;
+  summaries = summary;
+  try { localStorage.setItem(VIEW_KEY, summary ? "summary" : "original"); } catch { /* not remembered */ }
+  applyView();
 }
 
 // --- modes ----------------------------------------------------------------------------
@@ -352,6 +477,8 @@ function clearStage(title, note) {
   endSpot(false);
   ui.svg.replaceChildren();
   ui.panel.querySelector(".panel-list").replaceChildren();
+  ui.story.hidden = ui.view.hidden = ui.legendNarr.hidden = ui.legendProblem.hidden = true;
+  document.documentElement.classList.remove("narrated");
   ui.chart.hidden = true;
   ui.ticks.replaceChildren();
   ui.title.textContent = title;
@@ -632,6 +759,7 @@ function liveEvents(events) {
   const before = { pseudo: run.pseudo.size, idle: run.startIdle.size, prompts: prompts.ids?.length, metrics: run.metrics.length };
   run.events.push(...events);
   indexRun(run);
+  buildMoments(); // new messages join the queue at its end
   if (run.pseudo.size !== before.pseudo) {
     // Someone outside the network appeared (the laptop owner): redraw with them.
     run.ident = identities(run);
@@ -737,12 +865,20 @@ ui.play.addEventListener("click", () => {
   }
   setPlaying(!playing);
 });
-ui.speed.addEventListener("change", () => (speed = +ui.speed.value));
+// Any speed in range takes effect as it is typed; leaving the box puts back the one in use if
+// what is there is empty or out of range.
+ui.speed.addEventListener("input", () => {
+  const v = +ui.speed.value;
+  if (ui.speed.value !== "" && v >= MIN_SPEED && v <= MAX_SPEED) speed = v;
+});
+ui.speed.addEventListener("change", () => (ui.speed.value = speed));
+ui.speed.addEventListener("keydown", (ev) => { if (ev.key === "Enter") ui.speed.blur(); });
 ui.scrub.addEventListener("input", () => { if (run) seek(+ui.scrub.value); });
 ui.next.addEventListener("click", () => jumpMessage(1));
 ui.prev.addEventListener("click", () => jumpMessage(-1));
 $("#skip-msg").addEventListener("click", skipMessage);
 ui.reports.addEventListener("click", openReports);
+ui.view.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view === "summary")));
 window.addEventListener("hashchange", () => {
   if (!index) return;
   if (location.hash === "#live") setMode("live");
@@ -762,6 +898,7 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "ArrowRight") jumpMessage(1);
   else if (ev.key === "ArrowLeft") jumpMessage(-1);
   else if (ev.key === "Enter" && !ev.target.closest("button, a, summary")) skipMessage();
+  else if ((ev.key === "o" || ev.key === "O") && run?.narrated) setView(!summaries);
 });
 
 for (const svg of document.querySelectorAll(".lg-mark")) appendMark(svg, {}, svg.dataset.show);

@@ -7,6 +7,36 @@ const NODE_W = 116, NODE_H = 44, GAP_X = 190, GAP_Y = 118, PAD = 64;
 const ENVELOPE_R = 11; // half the envelope's width, plus a little air
 const CMD_CHARS = 21; // a command under its node is cut to roughly the space between nodes
 const PSEUDO_LABEL = { human: "Laptop owner" };
+// Thought bubbles (narrated runs): above the agents on the top row, below the others, so they
+// don't run into each other. Narrower than the gap between columns.
+const BUBBLE_W = 184, BUBBLE_MIN_H = 60, BUBBLE_GAP = 16;
+const CMD_ROOM = 22; // a bubble below its node leaves room for the command line under it
+const XHTML = "http://www.w3.org/1999/xhtml";
+
+// Each scenario's problem (the injected fault, or the attack), marked where it is, for the viewer
+// only: the agents never see it. On a link (`toward` set: next to `node`, on its link to `toward`)
+// or on a node's top-right corner. `note` is the legend's one-liner; `title` the mark's tooltip.
+// Faults as in experiments/kp_why_fix.py; the hijack as in prompts/celer_bridge.
+const PROBLEMS = {
+  kp_university_firewall: { kind: "firewall", node: "Uni", toward: "AS1",
+    note: "Uni's firewall drops all traffic to acm.org",
+    title: "Uni's firewall drops everything bound for acm.org's addresses, so acm.org is unreachable from campus" },
+  kp_dns_stale: { kind: "dns", node: "AS1",
+    note: "AS1's DNS gives acm.org's old, dead address",
+    title: "AS1's DNS resolver still answers acm.org with a pin left over from ACM's migration: an address that no longer hosts the site" },
+  kp_server_overload: { kind: "overload", node: "Web",
+    note: "EveLink's long downloads keep Web too busy for anyone else",
+    title: "Web's server can only work on 3 requests at once. EveLink keeps 5 long downloads going (each takes 90 s), so Web is always busy and turns everyone else away with an error (503)" },
+  celer_bridge: { kind: "hijack", node: "LegitAS", toward: "TransitAS",
+    note: "LegitAS forges a route to AWS's addresses",
+    title: "LegitAS announces AWS's address block to TransitAS with a forged path that passes RPKI's origin check" },
+};
+// Drawn larger than their legend icons, about the size of the agents' state marks; a mark on a
+// link sits this far from the box's edge to its centre.
+const PROBLEM_SCALE = { firewall: 1, dns: 1.3, overload: 1.3, hijack: 1.4 };
+const PROBLEM_OFFSET = { firewall: 13, hijack: 17 };
+// Each mark's extent, as a viewBox for the legend.
+export const PROBLEM_BOX = { firewall: "-13 -11 26 22", dns: "-15 -16 35 26", overload: "-12 -12 24 24", hijack: "-14 -10 28 16" };
 
 // A cogwheel centred on (0, 0): `teeth` teeth between radii r and R, and a hole of radius h.
 export function cogPath(R = 7.5, r = 5.6, h = 2.4, teeth = 8) {
@@ -17,6 +47,31 @@ export function cogPath(R = 7.5, r = 5.6, h = 2.4, teeth = 8) {
     d.push(pt(r, a - step * 0.32), pt(R, a - step * 0.2), pt(R, a + step * 0.2), pt(r, a + step * 0.32));
   }
   return `M${d.join("L")}Z M${h},0 A${h},${h} 0 1 0 ${-h},0 A${h},${h} 0 1 0 ${h},0Z`;
+}
+
+// A problem's mark, centred on (0, 0), all in one dark red: a firewall (a brick wall), stale DNS
+// (a "DNS" tag with a clock), an overload (a gauge pegged at its maximum), a hijack (a mask).
+export function appendProblem(parent, kind, attrs = {}) {
+  const g = el("g", { ...attrs, class: `problem ${kind}` }, parent);
+  if (kind === "firewall") {
+    el("rect", { class: "pr-bg", x: -12, y: -10, width: 24, height: 20, rx: 2.5 }, g);
+    // Mortar: three courses of bricks, every other one offset by half a brick.
+    el("path", { class: "pr-line", d: "M-12,-3.3H12M-12,3.3H12 M-4,-10V-3.3M4,-10V-3.3 M0,-3.3V3.3M-8,-3.3V3.3M8,-3.3V3.3 M-4,3.3V10M4,3.3V10" }, g);
+  } else if (kind === "dns") {
+    el("rect", { class: "pr-bg", x: -14, y: -8, width: 28, height: 16, rx: 4 }, g);
+    el("text", { class: "pr-text", x: -1.5, y: 3.4 }, g).textContent = "DNS";
+    el("circle", { class: "pr-bg", cx: 12, cy: -8, r: 6.5 }, g);
+    el("path", { class: "pr-line", d: "M12,-12V-8H15" }, g);
+  } else if (kind === "overload") {
+    el("circle", { class: "pr-bg", r: 11 }, g);
+    el("path", { class: "pr-line", d: "M-6.5,3.5A7.4,7.4 0 1 1 6.5,3.5" }, g);
+    el("path", { class: "pr-line needle", d: "M0,0L5.4,2.9" }, g);
+    el("circle", { class: "pr-fill", r: 1.8 }, g);
+  } else if (kind === "hijack") {
+    el("path", { class: "pr-bg", d: "M-13,-5Q-7,-10 0,-6.5Q7,-10 13,-5Q13.5,4 6,5Q2,5 0,2Q-2,5 -6,5Q-13.5,4 -13,-5Z" }, g);
+    for (const cx of [-5.5, 5.5]) el("ellipse", { class: "pr-hole", cx, cy: -2, rx: 3.1, ry: 2.1 }, g);
+  }
+  return g;
 }
 
 // The state mark: a disc holding one symbol per state — a turning cog (working: thinking or
@@ -157,6 +212,17 @@ function boxExit(c, tx, ty, w = NODE_W, h = NODE_H) {
 
 // --- rendering ----------------------------------------------------------------------
 
+function bubbleEl(caption) {
+  const b = document.createElementNS(XHTML, "div");
+  b.className = "bubble"; // every thought looks the same; a routine one just stays up less (app.js)
+  const text = document.createElementNS(XHTML, "span");
+  text.className = "bubble-text";
+  text.textContent = caption.text;
+  b.title = caption.text;
+  b.appendChild(text);
+  return b;
+}
+
 export class Graph {
   constructor(svg, run, { onSelect } = {}) {
     this.svg = svg;
@@ -167,8 +233,21 @@ export class Graph {
 
     const xs = [...pos.values()].map((p) => p.x), ys = [...pos.values()].map((p) => p.y);
     const minX = Math.min(...xs) - NODE_W / 2 - PAD, maxX = Math.max(...xs) + NODE_W / 2 + PAD;
-    const minY = Math.min(...ys) - NODE_H / 2 - PAD * 0.8, maxY = Math.max(...ys) + NODE_H / 2 + PAD * 0.8;
-    svg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+    let minY = Math.min(...ys) - NODE_H / 2 - PAD * 0.8, maxY = Math.max(...ys) + NODE_H / 2 + PAD * 0.8;
+    // The drawing without the room for thought bubbles (all of it, in a run without them).
+    this.core = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    const topY = Math.min(...run.nodes.map((id) => pos.get(id).y));
+    const above = (id) => pos.get(id).y === topY;
+    if (run.narrated) {
+      // Room for the bubbles beyond the outermost rows.
+      // As tall as the run's tallest thought needs: the type is one size, the bubbles grow instead.
+      this.bubbleH = this.measureBubbles(svg);
+      const extra = this.bubbleH + BUBBLE_GAP - PAD * 0.8 + 6;
+      minY -= extra;
+      if (run.nodes.some((id) => !above(id))) maxY += extra + CMD_ROOM;
+    }
+    this.full = { x: minX, y: minY, w: maxX - minX, h: maxY - minY }; // with the bubbles' room
+    this.setViewBox(this.full);
 
     // While a message is in the spotlight, its link is lit up underneath in the sender's colour.
     this.focusLine = el("line", { class: "focus-link", style: "display:none" }, svg);
@@ -183,6 +262,12 @@ export class Graph {
       const line = el("line", { x1: s.x, y1: s.y, x2: e.x, y2: e.y, class: links.has(`${a}|${b}`) ? "edge" : "edge pseudo" }, gEdges);
       this.edgeEls.set(`${a}|${b}`, line).set(`${b}|${a}`, line);
     }
+
+    // The scenario's problem: on a link, under the envelope (which passes over it); on a node,
+    // over the box (drawn after the nodes, so it doesn't fade with an idle agent).
+    const gProblem = el("g", { class: "problems" }, svg);
+    const pr = PROBLEMS[run.start.scenario];
+    this.problem = pr && pos.has(pr.node) && (!pr.toward || pos.has(pr.toward)) ? pr : null;
 
     this.gMsgs = el("g", { class: "msgs" }, svg);
     const gNodes = el("g", { class: "nodes" }, svg);
@@ -212,6 +297,37 @@ export class Graph {
       g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); onSelect?.(id); } });
       this.nodeEls.set(id, { g, status, tip, isPseudo });
     }
+    if (this.problem) {
+      const a = pos.get(pr.node);
+      let x = a.x + NODE_W / 2 - 8, y = a.y - NODE_H / 2 + 5; // the box's top-right corner, clear of a bubble above
+      if (pr.toward) {
+        const b = pos.get(pr.toward), edge = boxExit(a, b.x, b.y), len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        x = edge.x + ((b.x - a.x) / len) * PROBLEM_OFFSET[pr.kind];
+        y = edge.y + ((b.y - a.y) / len) * PROBLEM_OFFSET[pr.kind];
+      } else {
+        svg.appendChild(gProblem);
+      }
+      const g = appendProblem(gProblem, pr.kind, { transform: `translate(${x},${y}) scale(${PROBLEM_SCALE[pr.kind]})`, role: "img", "aria-label": pr.title });
+      el("title", {}, g).textContent = pr.title;
+    }
+    // Thought bubbles: HTML inside the drawing, so the text wraps and scales with it. On top of
+    // everything, but never in the way of a click.
+    this.bubbles = new Map();
+    if (run.narrated) {
+      const gBubbles = el("g", { class: "bubbles" }, svg);
+      for (const id of run.nodes) {
+        const p = pos.get(id), up = above(id);
+        const fo = el("foreignObject", {
+          class: `bubble-fo ${up ? "above" : "below"}`, x: p.x - BUBBLE_W / 2, width: BUBBLE_W, height: this.bubbleH,
+          y: up ? p.y - NODE_H / 2 - BUBBLE_GAP - this.bubbleH : p.y + NODE_H / 2 + BUBBLE_GAP + CMD_ROOM,
+          style: `--c:${run.ident.get(id).color}`,
+        }, gBubbles);
+        const wrap = document.createElementNS(XHTML, "div");
+        wrap.className = "bubble-wrap";
+        fo.appendChild(wrap);
+        this.bubbles.set(id, { fo, wrap, caption: null });
+      }
+    }
     this.envelope = el("g", { class: "dot", style: "display:none" }, this.gMsgs);
     el("rect", { x: -9, y: -6.5, width: 18, height: 13, rx: 2 }, this.envelope);
     el("path", { d: "M-9,-6.5 L0,1 L9,-6.5" }, this.envelope);
@@ -219,8 +335,13 @@ export class Graph {
 
   // world: World at the current time. opts: { focus (the spotlighted message, or null),
   // flight (0..1, how far its envelope has got), showCommand(id) -> whether the node's latest
-  // command is still worth showing }
-  update(world, { focus, flight, showCommand }) {
+  // command is still worth showing, thinker: the agent whose thought is up (or null), thoughts:
+  // Map id -> { caption, fresh } for the bubbles (null: none shown) }
+  update(world, { focus, flight, showCommand, thinker = null, thoughts = null }) {
+    this.updateBubbles(thoughts);
+    // A thought up: its agent is the one to look at (a halo), and nothing else moves meanwhile.
+    this.svg.classList.toggle("thinking", !!thinker);
+    for (const [id, n] of this.nodeEls) n.g.classList.toggle("thinker", id === thinker);
     // While a message is in the spotlight, its link stands out as an arrow in the sender's colour.
     // Nodes are not dimmed: fading is reserved for idle agents.
     this.svg.classList.toggle("focusing", !!focus);
@@ -263,6 +384,59 @@ export class Graph {
       const k = f < 0.5 ? 2 * f * f : 1 - Math.pow(-2 * f + 2, 2) / 2; // ease in-out
       this.envelope.style.setProperty("--c", this.run.ident.get(focus.from).color);
       this.envelope.setAttribute("transform", `translate(${x0 + (x1 - x0) * k},${y0 + (y1 - y0) * k})`);
+    }
+  }
+
+  // The height the run's tallest thought needs in a bubble, measured in this browser (words wrap
+  // where they wrap, and fonts differ), with a hidden bubble in a scratch foreignObject.
+  measureBubbles(svg) {
+    const thoughts = [...this.run.thoughts.values()].flat().filter((c) => c.weight !== "routine"); // the only ones shown
+    const fo = el("foreignObject", { class: "bubble-fo", width: BUBBLE_W, height: 2000, style: "visibility:hidden" }, svg);
+    const wrap = document.createElementNS(XHTML, "div");
+    wrap.className = "bubble-wrap";
+    fo.appendChild(wrap);
+    let h = BUBBLE_MIN_H;
+    for (const c of thoughts) {
+      wrap.replaceChildren(bubbleEl(c));
+      h = Math.max(h, Math.ceil(wrap.firstChild.offsetHeight));
+    }
+    fo.remove();
+    return h + 8; // slack: measured before the drawing is scaled to the screen, where text wraps a hair differently
+  }
+
+  setViewBox(b) {
+    this.svg.setAttribute("viewBox", `${b.x} ${b.y} ${b.w} ${b.h}`);
+  }
+
+  // Draw the whole drawing, bubbles' room included, as large as fits (the default).
+  fitFull() {
+    this.setViewBox(this.full);
+  }
+
+  // Draw at the scale the full drawing has in an area of size `ref` (DOMRect), in this element's
+  // actual area `now`, without the bubbles' room: the Original view of a narrated run shows no
+  // bubbles and a taller message box, yet the topology keeps its size, and its place unless the
+  // taller box would cover its bottom row. If the nodes don't fit at that scale, it just fits them.
+  fitAtScaleOf(ref, now) {
+    const { full, core } = this;
+    const scale = Math.min(ref.width / full.w, ref.height / full.h);
+    if (!(scale > 0) || core.h * scale > now.height || core.w * scale > now.width) return this.setViewBox(core);
+    const w = now.width / scale, h = now.height / scale;
+    // Where the full drawing's area starts at that scale (it is centred in `ref`): keep the nodes
+    // right there, unless that would cut off the bottom row; then only as much higher as needed.
+    const top = full.y + full.h / 2 - ref.height / scale / 2;
+    this.setViewBox({ x: full.x + full.w / 2 - w / 2, y: Math.max(top, core.y + core.h - h), w, h });
+  }
+
+  // A bubble per agent with its latest thought; a new thought pops in, an old one fades.
+  updateBubbles(thoughts) {
+    for (const [id, b] of this.bubbles) {
+      const t = thoughts?.get(id) || null;
+      if ((t?.caption || null) !== b.caption) {
+        b.caption = t?.caption || null;
+        b.wrap.replaceChildren(...(t ? [bubbleEl(t.caption)] : []));
+      }
+      b.wrap.firstChild?.classList.toggle("stale", !!t && !t.fresh);
     }
   }
 }

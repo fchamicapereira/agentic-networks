@@ -36,6 +36,27 @@ export function indexRun(run) {
     if (first && first.type === "state" && first.state === "dormant") startIdle.add(id);
   }
 
+  // Narration (demo/narrator.py): plain-language captions made by Claude, offline for recordings.
+  const captions = events.filter((e) => e.type === "caption");
+  const thoughts = new Map(nodes.map((id) => [id, []]));
+  for (const c of captions) if (c.kind === "thought" && thoughts.has(c.node)) thoughts.get(c.node).push(c);
+  // A thought sums up its whole turn, results included, so it is shown (`at`) once the turn's
+  // commands are done: just before the turn's first message, or at its last action. Its `t` is the
+  // turn's first action (demo/EVENTS.md).
+  for (const list of thoughts.values()) {
+    for (const c of list) {
+      let at = c.t, i = events.findIndex((e) => e.t >= c.t && e.node === c.node && e.type !== "caption");
+      for (; i >= 0 && i < events.length; i++) {
+        const e = events[i];
+        if (e.node !== c.node || e.type === "caption") continue;
+        if (e.type === "message") { at = e.t; break; }
+        if ((e.type === "turn" && e.iter !== c.iter) || (e.type === "state" && e.state === "dormant")) break;
+        if (e.t > at) at = e.t;
+      }
+      c.at = at;
+    }
+  }
+
   const end = events.find((e) => e.type === "run_end");
   Object.assign(run, {
     pseudo,
@@ -46,6 +67,15 @@ export function indexRun(run) {
     messages: events.filter((e) => e.type === "message"),
     metrics: events.filter((e) => e.type === "metric"),
     reports: events.filter((e) => e.type === "report"),
+    narrated: captions.length > 0,
+    narrator: events.find((e) => e.type === "narrator") || null,
+    thoughts, // per node, in time order
+    gists: new Map(captions.filter((c) => c.kind === "message").map((c) => [c.ref, c.text])),
+    story: captions.filter((c) => c.kind === "story"),
+    outcome: captions.find((c) => c.kind === "outcome") || null,
+    // The narrated activity feed: only the commands. Thoughts are in the bubbles and messages in the
+    // message box, so repeating them there would only clutter it.
+    narration: events.filter((e) => e.type === "exec" && nodes.includes(e.node)),
   });
 }
 
@@ -85,7 +115,7 @@ export class World {
 
   apply(e) {
     const n = this.node[e.node];
-    if (!n) return;
+    if (!n || e.type === "caption") return; // captions describe the run; they change nothing in it
     n.lastT = e.t;
     switch (e.type) {
       case "turn":
