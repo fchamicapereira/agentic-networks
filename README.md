@@ -147,8 +147,29 @@ into it at deploy time rather than duplicated in the repository.
 
 ## Citation
 
-See [`CITATION.cff`](CITATION.cff). It is a placeholder until the camera-ready version is
-published, at which point the proceedings title, DOI and pages will be filled in.
+Francisco Pereira, Justine Sherry, and Pratiksha Thaker. *Instantiating the Knowledge
+Plane*. In Proceedings of the 25th ACM Workshop on Hot Topics in Networks (HotNets '26),
+Salt Lake City, UT, USA, November 2026. DOI: [10.1145/3847290.3859939](https://doi.org/10.1145/3847290.3859939).
+
+```bibtex
+@inproceedings{pereira2026knowledgeplane,
+  author    = {Pereira, Francisco and Sherry, Justine and Thaker, Pratiksha},
+  title     = {Instantiating the Knowledge Plane},
+  booktitle = {Proceedings of the 25th ACM Workshop on Hot Topics in Networks},
+  series    = {HotNets '26},
+  year      = {2026},
+  month     = nov,
+  location  = {Salt Lake City, UT, USA},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  doi       = {10.1145/3847290.3859939},
+  isbn      = {979-8-4007-3029-0},
+  numpages  = {11},
+}
+```
+
+The same metadata is in [`CITATION.cff`](CITATION.cff), which GitHub uses for the
+"Cite this repository" button.
 
 ## License
 
