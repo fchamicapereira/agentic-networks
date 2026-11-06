@@ -351,32 +351,34 @@ _PAGE_HEAD = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Experiment logs</title>
 <style>
-  :root {{ color-scheme: light; }}
+  :root {{ color-scheme: light;
+          --bg: #e3e7ee; --fg: #2c313a; --muted: #6b7280; --faint: #9aa3b0;
+          --rule: #c3cad5; --accent: #3a75b0; --code-bg: #d8dde6; }}
   body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 60rem;
-         padding: 1.5rem; background: #fff; color: #1c2330; }}
+         padding: 1.5rem; background: var(--bg); color: var(--fg); }}
   h1 {{ margin: 0 0 .25rem; }}
-  .sub {{ color: #888; margin: 0 0 1rem; }}
-  .paper-note {{ margin: 0 0 1rem; padding: .5rem .7rem; border-left: 3px solid #2563eb;
-                background: #f4f7fd; }}
-  .paper-note a {{ color: #2563eb; font-weight: 600; }}
-  .home {{ display: inline-block; margin-bottom: 1rem; color: #2563eb;
+  .sub {{ color: var(--muted); margin: 0 0 1rem; }}
+  .paper-note {{ margin: 0 0 1rem; padding: .5rem .7rem; border-left: 3px solid var(--accent);
+                background: var(--code-bg); }}
+  .paper-note a {{ color: var(--accent); font-weight: 600; }}
+  .home {{ display: inline-block; margin-bottom: 1rem; color: var(--accent);
           text-decoration: none; font-size: .9rem; }}
   #filter {{ width: 100%; box-sizing: border-box; padding: .5rem .6rem;
-            font-size: 1rem; margin-bottom: 1.25rem; border: 1px solid #8884;
-            border-radius: .4rem; }}
+            font-size: 1rem; margin-bottom: 1.25rem; border: 1px solid var(--rule);
+            border-radius: .4rem; background: #eff2f6; color: var(--fg); }}
   section {{ margin-bottom: 1.5rem; }}
-  h2 {{ font-size: 1.1rem; border-bottom: 1px solid #8883; padding-bottom: .2rem; }}
-  .count {{ color: #888; font-weight: normal; font-size: .85rem; }}
-  .run {{ padding: .5rem .7rem; margin: .4rem 0; border: 1px solid #8883;
+  h2 {{ font-size: 1.1rem; border-bottom: 1px solid var(--rule); padding-bottom: .2rem; }}
+  .count {{ color: var(--muted); font-weight: normal; font-size: .85rem; }}
+  .run {{ padding: .5rem .7rem; margin: .4rem 0; border: 1px solid var(--rule);
          border-radius: .4rem; }}
   .stem {{ font-family: ui-monospace, monospace; font-size: .9rem;
           font-weight: 600; word-break: break-all; }}
   .links {{ margin-top: .25rem; }}
   .links a {{ text-decoration: none; }}
   .links a:hover {{ text-decoration: underline; }}
-  .missing {{ color: #aaa; }}
+  .missing {{ color: var(--faint); }}
   details {{ margin-top: .4rem; }}
-  summary {{ cursor: pointer; color: #888; font-size: .85rem; }}
+  summary {{ cursor: pointer; color: var(--muted); font-size: .85rem; }}
   table.hosts {{ margin: .4rem 0 .2rem; border-collapse: collapse; font-size: .9rem; }}
   table.hosts td {{ padding: .1rem .8rem .1rem 0; }}
   table.hosts td:first-child {{ font-family: ui-monospace, monospace; }}
@@ -394,31 +396,33 @@ _PAPER_HEAD = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Paper data</title>
 <style>
-  :root {{ color-scheme: light; }}
+  :root {{ color-scheme: light;
+          --bg: #e3e7ee; --fg: #2c313a; --muted: #6b7280; --faint: #9aa3b0;
+          --rule: #c3cad5; --accent: #3a75b0; --code-bg: #d8dde6; }}
   body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 60rem;
-         padding: 1.5rem; background: #fff; color: #1c2330; }}
+         padding: 1.5rem; background: var(--bg); color: var(--fg); }}
   h1 {{ margin: 0 0 .25rem; }}
   .sub {{ margin: 0 0 .5rem; }}
-  .frozen {{ margin: 0 0 1.5rem; padding: .55rem .8rem; border-left: 3px solid #2563eb;
-            background: #f4f7fd; font-size: .92rem; }}
-  .home {{ display: inline-block; margin-bottom: 1rem; color: #2563eb;
+  .frozen {{ margin: 0 0 1.5rem; padding: .55rem .8rem; border-left: 3px solid var(--accent);
+            background: var(--code-bg); font-size: .92rem; }}
+  .home {{ display: inline-block; margin-bottom: 1rem; color: var(--accent);
           text-decoration: none; font-size: .9rem; }}
-  a {{ color: #2563eb; text-decoration: none; }}
+  a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
   section {{ margin-bottom: 1.8rem; }}
-  h2 {{ font-size: 1.1rem; border-bottom: 1px solid #8883; padding-bottom: .2rem; margin-bottom: .2rem; }}
-  .where {{ color: #666; margin: 0 0 .5rem; font-size: .9rem; }}
+  h2 {{ font-size: 1.1rem; border-bottom: 1px solid var(--rule); padding-bottom: .2rem; margin-bottom: .2rem; }}
+  .where {{ color: var(--muted); margin: 0 0 .5rem; font-size: .9rem; }}
   table.runs {{ border-collapse: collapse; width: 100%; font-size: .92rem; table-layout: fixed; }}
   table.runs th:nth-child(1) {{ width: 24%; }} table.runs th:nth-child(2) {{ width: 20%; }}
   table.runs th:nth-child(3) {{ width: 24%; }}
-  table.runs th {{ text-align: left; font-weight: 600; color: #666; font-size: .8rem;
-                  border-bottom: 1px solid #8883; padding: .2rem .6rem .2rem 0; }}
-  table.runs td {{ padding: .35rem .6rem .35rem 0; border-bottom: 1px solid #8882; vertical-align: top; }}
+  table.runs th {{ text-align: left; font-weight: 600; color: var(--muted); font-size: .8rem;
+                  border-bottom: 1px solid var(--rule); padding: .2rem .6rem .2rem 0; }}
+  table.runs td {{ padding: .35rem .6rem .35rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }}
   td.model {{ font-weight: 600; white-space: nowrap; }}
   details {{ display: inline; }}
-  summary {{ cursor: pointer; color: #2563eb; display: inline; }}
+  summary {{ cursor: pointer; color: var(--accent); display: inline; }}
   details[open] summary {{ margin-right: .4rem; }}
-  .missing {{ color: #aaa; }}
+  .missing {{ color: var(--faint); }}
   ul.inputs {{ columns: 2; font-family: ui-monospace, monospace; font-size: .85rem; padding-left: 1.2rem; }}
   code {{ font-family: ui-monospace, monospace; }}
   @media (max-width: 640px) {{ ul.inputs {{ columns: 1; }} table.runs {{ font-size: .85rem; }} }}
@@ -462,26 +466,28 @@ _MD_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-  :root { color-scheme: light; }
+  :root { color-scheme: light;
+          --bg: #e3e7ee; --fg: #2c313a; --muted: #6b7280; --faint: #9aa3b0;
+          --rule: #c3cad5; --accent: #3a75b0; --code-bg: #d8dde6; }
   body { font: 15px/1.6 system-ui, sans-serif; margin: 0 auto; max-width: 50rem;
-         padding: 1.5rem; background: #fff; color: #1c2330; }
+         padding: 1.5rem; background: var(--bg); color: var(--fg); }
   .bar { display: flex; gap: 1rem; align-items: baseline; margin-bottom: 1rem;
-         padding-bottom: .5rem; border-bottom: 1px solid #8883; }
+         padding-bottom: .5rem; border-bottom: 1px solid var(--rule); }
   .bar .name { font-family: ui-monospace, monospace; font-weight: 600; }
-  .bar a { color: #2563eb; text-decoration: none; font-size: .9rem; }
+  .bar a { color: var(--accent); text-decoration: none; font-size: .9rem; }
   .md > :first-child { margin-top: 0; }
   .md h1, .md h2, .md h3 { line-height: 1.25; margin: 1.4em 0 .5em; }
   .md h1 { font-size: 1.6em; } .md h2 { font-size: 1.35em; } .md h3 { font-size: 1.15em; }
-  .md code { font-family: ui-monospace, Menlo, Consolas, monospace; background: #eef1f5;
+  .md code { font-family: ui-monospace, Menlo, Consolas, monospace; background: var(--code-bg);
              padding: 1px 5px; border-radius: 4px; font-size: .9em; }
-  .md pre { background: #eef1f5; padding: 12px 14px; border-radius: 8px; overflow: auto; }
+  .md pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow: auto; }
   .md pre code { background: none; padding: 0; }
-  .md blockquote { margin: 1em 0; padding: .2em 0 .2em 1em; border-left: 3px solid #d6dbe3;
-                   color: #667085; }
-  .md a { color: #2563eb; }
-  .md hr { border: none; border-top: 1px solid #d6dbe3; margin: 1.5em 0; }
+  .md blockquote { margin: 1em 0; padding: .2em 0 .2em 1em; border-left: 3px solid var(--rule);
+                   color: var(--muted); }
+  .md a { color: var(--accent); }
+  .md hr { border: none; border-top: 1px solid var(--rule); margin: 1.5em 0; }
   .md table { border-collapse: collapse; }
-  .md th, .md td { border: 1px solid #d6dbe3; padding: 4px 9px; }
+  .md th, .md td { border: 1px solid var(--rule); padding: 4px 9px; }
 </style></head><body>
 <div class="bar"><span class="name">__TITLE__</span>
   <a href="__INDEX__">&larr; index</a><a href="__RAW__">raw</a></div>

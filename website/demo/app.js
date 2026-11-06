@@ -31,7 +31,7 @@ const $ = (sel) => document.querySelector(sel);
 const ui = {
   scenario: $("#scenario"), model: $("#model"),
   stage: $(".stage"), svg: $("#graph"), chart: $("#chart"), panel: $("#panel"), spot: $("#spotlight"),
-  title: $("#run-title"), sub: $("#run-sub"), pill: $("#run-pill"), editedTag: $("#edited-tag"),
+  pill: $("#run-pill"), editedTag: $("#edited-tag"),
   play: $("#play"), speed: $("#speed"), scrub: $("#scrub"), ticks: $("#ticks"), time: $("#time"),
   next: $("#next-msg"), prev: $("#prev-msg"), reports: $("#open-reports"),
   dialog: $("#reports"), reportTabs: $("#report-tabs"), reportBody: $("#report-body"), status: $("#status"),
@@ -170,7 +170,6 @@ function openRun(events) {
   ui.spot.hidden = !run.messages.length && !(run.live && scenarioHasMessages(run.start.scenario));
 
   fitGraph(); // the layout is final now (chart, message box)
-  ui.title.textContent = titleOf(run.start.scenario) || run.start.title;
   subtitle();
   controls();
   p = 0;
@@ -178,33 +177,13 @@ function openRun(events) {
   seek(0);
 }
 
-const titleOf = (scenario) => index?.runs.find((r) => r.scenario === scenario)?.title;
 const scenarioHasMessages = (scenario) => !!index?.runs.some((r) => r.scenario === scenario && r.messages > 0);
 
 function subtitle() {
   ui.editedTag.hidden = !(mode === "live" && run && (run.preview && !following
     ? Object.keys(edits[editsKey(run.start.scenario, ui.model.value)] || {}).length
     : live.status?.run?.id === following && live.status.run.edited?.length));
-  if (!run) return;
-  if (run.preview) {
-    const model = labels[ui.model.value] || ui.model.value;
-    ui.sub.textContent = following ? `Model: ${model} · starting…` : `Model: ${model} · ready · press Play to run it`;
-    return;
-  }
-  const model = labels[run.start.model] || run.start.model;
-  if (!run.live) {
-    ui.sub.textContent = summary(model, `Duration: ${fmtTime(run.duration)}`, replayEntry.messages, replayEntry.commands);
-    return;
-  }
-  const s = live.status?.run;
-  const state = run.ended ? `ended after ${fmtTime(run.duration)}: ${ENDINGS[run.endReason] || run.endReason}`
-    : s?.state === "stopping" ? "stopping…" : `running for ${fmtTime(s ? s.elapsed : run.duration)}`;
-  ui.sub.textContent = summary(model, `Live run, ${state}`, run.messages.length, run.events.filter((e) => e.type === "exec").length);
 }
-
-// Spelled out, so nobody has to guess what a bare "4 messages" counts.
-const summary = (model, time, messages, commands) =>
-  [`Model: ${model}`, time, `Messages exchanged: ${messages}`, `Shell commands run: ${commands}`].join(" · ");
 
 // --- playback -------------------------------------------------------------------------
 
@@ -457,7 +436,7 @@ async function setMode(m) {
   if (m === "live") {
     history.replaceState(null, "", "#live");
     live.watch(true);
-    clearStage("Live run", "Connecting to the demo server…");
+    clearStage("Connecting to the demo server…");
     await connectLive();
   } else {
     // Keep an eye on the server (a run there carries on): the Live toggle shows it going.
@@ -471,7 +450,7 @@ async function setMode(m) {
 }
 
 // An empty stage, with a note where the graph goes: before a live run's events arrive.
-function clearStage(title, note) {
+function clearStage(note) {
   run = null;
   ui.stage.classList.add("no-run");
   endSpot(false);
@@ -481,8 +460,6 @@ function clearStage(title, note) {
   document.documentElement.classList.remove("narrated");
   ui.chart.hidden = true;
   ui.ticks.replaceChildren();
-  ui.title.textContent = title;
-  ui.sub.textContent = "";
   ui.time.textContent = "0:00 / 0:00";
   ui.scrub.value = 0;
   for (const b of [ui.next, ui.prev, ui.reports, ui.catchUp, $("#open-prompts")]) b.disabled = true;
@@ -526,7 +503,7 @@ function showPreview(scenario) {
   const events = previews.get(scenario);
   setPlaying(false);
   if (!events) {
-    clearStage(titleOf(scenario) || "Live run", "Preparing this scenario…");
+    clearStage("Preparing this scenario…");
     return;
   }
   // Each prompt as the chosen model's agents will get it: the attendee's edit, or the original.
@@ -742,8 +719,7 @@ function liveEvents(events) {
         controls();
         notice("Stopped before the network was up.");
       } else if (end) {
-        ui.title.textContent = "The run did not start";
-        notice(`It ended (${ENDINGS[end.reason] || end.reason}) before the network was up. ` +
+        notice(`The run did not start: it ended (${ENDINGS[end.reason] || end.reason}) before the network was up. ` +
           "The server's terminal, and run.out in the run's folder under demo/logs/, say why.");
       }
       return;

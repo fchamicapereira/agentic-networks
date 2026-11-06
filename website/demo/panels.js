@@ -103,6 +103,7 @@ export class StoryBox {
   constructor(root, run) {
     this.root = root;
     this.run = run;
+    this.scroller = root.querySelector(".story-scroll");
     this.list = root.querySelector("ol");
     this.outcome = root.querySelector(".story-outcome");
     this.shown = -1;
@@ -121,14 +122,14 @@ export class StoryBox {
         return li;
       }));
       if (!n) this.list.append(h("li", "empty", "Nothing has happened yet."));
-      this.list.scrollTop = this.list.scrollHeight;
+      this.scroller.scrollTop = this.scroller.scrollHeight;
     }
     const ended = !!this.run.outcome && world.now >= this.run.duration - 0.5;
     if (ended !== this.ended) {
       this.ended = ended;
       this.outcome.hidden = !ended;
       if (ended) this.outcome.replaceChildren(h("strong", "", this.run.outcome.headline), h("p", "", this.run.outcome.text));
-      this.list.scrollTop = this.list.scrollHeight; // the outcome took room from the list: keep its newest line in view
+      this.scroller.scrollTop = this.scroller.scrollHeight; // keep the newest line, or the outcome, in view
     }
   }
 }
