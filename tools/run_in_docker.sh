@@ -60,11 +60,19 @@ fi
 # Model access. Every run gets its own tools/llm_proxy.py, holding the real keys on this host,
 # and the container gets only its address and a throwaway run token: the keys never enter it,
 # so an agent's commands can't read them.
-BRIDGE=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
+# On Linux the proxy listens on docker0, an address only containers can reach. Docker Desktop
+# (macOS, Windows) has no docker0 on the host: there it listens on loopback, and the container
+# reaches it by the name host.docker.internal, which Desktop resolves to the host.
+BRIDGE=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+if [ -n "$BRIDGE" ]; then
+    PROXY_HOST="$BRIDGE"; PROXY_HOST_IN_CONTAINER="$BRIDGE"
+else
+    PROXY_HOST="127.0.0.1"; PROXY_HOST_IN_CONTAINER="host.docker.internal"
+fi
 LLM_PROXY_TOKEN="run-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 PROXY_LOG=$(mktemp)
 # Port 0: any free port, so runs side by side each get their own proxy.
-python3 "$SCRIPT_DIR/llm_proxy.py" --listen "$BRIDGE:0" --token "$LLM_PROXY_TOKEN" > "$PROXY_LOG" 2>&1 &
+python3 "$SCRIPT_DIR/llm_proxy.py" --listen "$PROXY_HOST:0" --token "$LLM_PROXY_TOKEN" > "$PROXY_LOG" 2>&1 &
 PROXY_PID=$!
 # However the run ends, stop the proxy and report what went through it.
 proxy_done() {
@@ -86,6 +94,7 @@ done
 if [ -z "$LLM_PROXY" ]; then
     echo "Error: the LLM proxy did not start:"; cat "$PROXY_LOG"; exit 1
 fi
+LLM_PROXY="${LLM_PROXY/$PROXY_HOST/$PROXY_HOST_IN_CONTAINER}"  # as the container must address it
 echo "Model access through $LLM_PROXY (no keys in the container)"
 KEY_ARGS=(
     -e ANTHROPIC_API_KEY="$LLM_PROXY_TOKEN" -e ANTHROPIC_BASE_URL="$LLM_PROXY/anthropic"
